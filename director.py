@@ -78,6 +78,7 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "If a toon is NOT listed at all, say you do not know that name. "
            "Only toons marked ONLINE can take direct orders, but OFFLINE units can be brought online with a 'bot add' order. "
            "The roster lists each unit's professions as jobs - match gathering orders to units with herb or mine. "
+           "When reporting counts, count the roster entries carefully; if unsure, list names instead of numbers. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
            "Bots grind solo with rpg+grind strategies already set.")
 
@@ -276,6 +277,11 @@ def repl():
 
 LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
 
+# natural confirm/discard words for pending plans (only matter while a plan is pending)
+GO_WORDS = ("go", "do it", "confirm", "confirmed", "execute", "approved", "approve",
+            "yes", "sure", "affirmative", "send it", "make it so")
+SKIP_WORDS = ("skip", "no", "cancel", "abort", "discard", "negative", "belay that")
+
 
 def daemon():
     # single-instance guard: a second daemon would double-answer every whisper
@@ -311,12 +317,12 @@ def daemon():
                     continue
                 print("daemon: [%s] (%s): %s" % (sender, channel, text))
                 low = text.lower().strip()
-                if low == "go" and sender in pending:
+                if low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
                     execute(plan, census(), 2.0, dry=False)
                     say(sender, "executed: " + "; ".join("%s <- %s" % (b, c) for b, c in plan))
                     continue
-                if low == "skip" and sender in pending:
+                if low in SKIP_WORDS and sender in pending:
                     pending.pop(sender)
                     say(sender, "plan discarded.")
                     continue
