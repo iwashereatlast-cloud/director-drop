@@ -20,7 +20,7 @@ require the word 'leo' in the line. Validated orders execute immediately (set
 DIRECTOR_CONFIRM=1 to restore the whisper-'go' confirm step). Run daemon with
 python3 -u for live logs.
 """
-import argparse, fcntl, json, os, re, subprocess, sys, time, urllib.request
+import argparse, base64, fcntl, html, json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -29,6 +29,10 @@ FIFO = os.environ.get("LEO_FIFO", "/tmp/leo.in")
 LOG = os.environ.get("DIRECTOR_LOG", "/tmp/leo.log")
 AUDIT = os.path.join(HERE, "audit.log")
 ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "i_was_here%")
+WATCH_GUILD = os.environ.get("DIRECTOR_GUILD", "Special FXc")
+# ^ the ONE guild whose members Leo watches (census unions them with the bot
+# accounts). Add an alt bot to THIS guild and Leo watches it automatically;
+# every other guild on the server is ignored. Keep the name quote-free.
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
 # ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
@@ -36,6 +40,13 @@ MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"
 # ^ read via --defaults-file (NOT --defaults-extra-file): MySQL reads ~/.my.cnf
 # AFTER the extra file, so the full-power acore identity in ~/.my.cnf would
 # override the RO user. --defaults-file reads ONLY the RO file.
+SOAPCNF = os.path.expanduser(os.environ.get("DIRECTOR_SOAPCNF", "~/.soap-director"))
+# ^ 3-line side file (chmod 600) for the worldserver SOAP endpoint: url, user,
+# pass. The credentials are a real game account with gmlevel >= Administrator
+# (AzerothCore checks the account table over HTTP Basic - verified in
+# ACSOap.cpp; there is no SOAP user/password key in worldserver.conf). Missing
+# or short file = SOAP off: the location query falls back to the DB logout
+# position (stale, but the LLM is told so).
 CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "") not in ("", "0", "no", "off")
 # ^ daemon default: validated orders execute IMMEDIATELY. DIRECTOR_CONFIRM=1
 # restores the whisper-'go'/'skip' confirmation step for every plan.
@@ -85,7 +96,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (map/zone/coords), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout). Use them instead of guessing numbers.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
   * Questing: cmd "nc +new rpg,-follow" then cmd "rpg status do quest". The bot picks a quest from its log; if it has none, it will say so.
@@ -115,20 +126,18 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
 
 
 def census(online_only=True):
-    # Watch list: every toon on the bot accounts PLUS every member of any
-    # guild that has a bot-account toon in it -> adding an alt to the guild
-    # is enough for Leo to watch it. Masters (who may talk to Leo) are NOT
-    # widened by this: masters() stays master-account only.
+    # Watch list: every toon on the bot accounts PLUS every member of the
+    # ONE named guild (WATCH_GUILD, default "Special FXc") -> adding an alt
+    # to THAT guild is enough for Leo to watch it; all other guilds on the
+    # server are ignored. Masters (who may talk to Leo) are NOT widened by
+    # this: masters() stays master-account only.
     q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid, "
          "(SELECT GROUP_CONCAT(cs.skill) FROM acore_characters.character_skills cs "
          "WHERE cs.guid=c.guid) "
          "FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account "
          "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
          "WHERE (a.username LIKE '" + ACCOUNT_LIKE + "' OR gm.guildid IN ("
-         "SELECT DISTINCT gm2.guildid FROM acore_characters.guild_member gm2 "
-         "JOIN acore_characters.characters c2 ON c2.guid=gm2.guid "
-         "JOIN acore_auth.account a2 ON a2.id=c2.account "
-         "WHERE a2.username LIKE '" + ACCOUNT_LIKE + "' AND gm2.guildid IS NOT NULL))"
+         "SELECT guildid FROM acore_characters.guild WHERE name='" + WATCH_GUILD + "'))"
          + (" AND c.online=1" if online_only else "") +
          " ORDER BY a.username, c.name;")
     env = dict(os.environ)
@@ -244,6 +253,74 @@ def _fmt_played(raw):
                "ONLINE" if online == "1" else "OFFLINE"))
 
 
+# ---------------------------------------------------------------------------
+# SOAP (optional): live worldserver-console access for the location query.
+# One operation only: ns1:executeCommand over HTTP Basic auth with a game
+# account whose gmlevel is >= Administrator (AzerothCore checks the account
+# table itself - verified in ACSOap.cpp). The server needs SOAP.Enabled=1
+# (default bind 127.0.0.1:7878). Config file ~/.soap-director, 3 lines:
+#   http://127.0.0.1:7878/
+#   <game account name>
+#   <game account password>
+# ---------------------------------------------------------------------------
+
+def _soap_cfg():
+    try:
+        with open(SOAPCNF) as f:
+            vals = [l.strip() for l in f.read().splitlines()][:3]
+    except OSError:
+        return None
+    if len(vals) < 3 or not all(vals):
+        return None
+    return vals[0], vals[1], vals[2]
+
+
+def soap_command(cmd, timeout=10):
+    """Run one console command via SOAP; returns (ok, text). Never raises."""
+    cfg = _soap_cfg()
+    if not cfg:
+        return False, "SOAP not configured (" + SOAPCNF + " missing/incomplete)"
+    url, user, pw = cfg
+    env = ('<?xml version="1.0" encoding="utf-8"?>'
+           '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" '
+           'xmlns:ns1="urn:AC"><SOAP-ENV:Body>'
+           '<ns1:executeCommand><command>' + cmd + '</command></ns1:executeCommand>'
+           '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
+    auth = base64.b64encode((user + ":" + pw).encode()).decode()
+    req = urllib.request.Request(url, data=env.encode("utf-8"), headers={
+        "Content-Type": "text/xml; charset=utf-8", "SOAPAction": "urn:AC",
+        "Authorization": "Basic " + auth})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return False, "HTTP %d (bad account/password or gmlevel below Administrator)" % e.code
+    except Exception as e:
+        return False, type(e).__name__ + ": " + str(e)
+    if "<SOAP-ENV:Fault" in body:
+        m = re.search(r"<faultstring[^>]*>(.*?)</faultstring>", body, re.S)
+        return False, "server fault: " + html.unescape(m.group(1) if m else "?")
+    m = re.search(r"<[^>]*executeCommandResponse[^>]*>(.*)</[^>]*executeCommandResponse>", body, re.S)
+    if not m:
+        return False, "unexpected SOAP response: " + body[:120]
+    text = html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+    return bool(text), text
+
+
+def _fmt_pinfo(raw):
+    """Keep the useful lines of '.pinfo' console output, drop the rest."""
+    keep = []
+    for line in raw.splitlines():
+        line = re.sub(r"\|c[0-9A-Fa-f]{8}|\|r", "", line).strip().strip("|").strip()
+        if not line:
+            continue
+        low = line.lower()
+        if any(k in low for k in ("map:", "zone:", "area:", "online", "login",
+                                   "guild:", "level:", "alive", "money:")):
+            keep.append(line)
+    return "; ".join(keep) if keep else raw[:200]
+
+
 # name -> (what it returns, sql with {n} = validated toon name and
 #          {g} = guid-by-name subquery, result formatter)
 DB_QUERIES = {
@@ -293,9 +370,16 @@ def run_queries(qs, all_bots):
         if not match or not re.fullmatch(r"[A-Za-z]+", match):
             lines.append("query %s: %r not in census" % (name, bot))
             continue
+        note = ""
+        if name == "location":
+            ok, txt = soap_command(".pinfo " + match)
+            if ok:
+                lines.append("%s location (live .pinfo): %s" % (match, _fmt_pinfo(txt)))
+                continue
+            note = "SOAP unavailable (%s); DB last-logout position: " % txt
         sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
         try:
-            lines.append("%s %s: %s" % (match, name, info[2](_mysql(sql))))
+            lines.append("%s %s: %s%s" % (match, name, note, info[2](_mysql(sql))))
         except Exception as e:
             lines.append("%s %s failed: %s" % (match, name, e))
     return "\n".join(lines) if lines else "no valid queries"
