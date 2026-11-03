@@ -38,12 +38,16 @@ WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "repop", "position", "go", "invite", "give leader", "buff",
              "reset botAI", "quests", "drop", "share", "leave")
 
+# master-issued server commands (Leo runs them himself via the shell, not /w to a bot)
+MASTER_CMDS = ("bot add", "bot remove")
+
 ORDER_RULES = """Reply with ONE JSON object and nothing else:
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Rules:
 - Only name bots from the live roster (the CLI validates against a live SQL census and skips others).
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: nc, co, cs, gb, sendmail, summon, talents, equip, repair, buy, sell, mail, lfg, join, roll, stats, rpg, follow, stay, attack, tell, wait, release, repop, position, go, invite, give leader, buff, reset botAI, quests, drop, share, leave.
+- Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - Orders are NOT executed immediately: the human confirms. Keep replies short."""
 
@@ -57,7 +61,7 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "A live roster of every toon on the bot accounts is provided in the last system message, each marked ONLINE or OFFLINE. "
            "Answer status questions from that roster. If a toon is listed, you know them: report their level or ONLINE/OFFLINE status plainly. "
            "If a toon is NOT listed at all, say you do not know that name. "
-           "Only toons marked ONLINE can receive orders. "
+           "Only toons marked ONLINE can take direct orders, but OFFLINE units can be brought online with a 'bot add' order. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
            "Bots grind solo with rpg+grind strategies already set.")
 
@@ -132,9 +136,29 @@ def parse_orders(text):
         return {"reply": text, "orders": []}
 
 
+def is_master_cmd(cmd):
+    return any(cmd == mc or cmd.startswith(mc + " ") for mc in MASTER_CMDS)
+
+
+def order_line(bot, cmd):
+    """FIFO line for an order: master cmds go to the server, others are /w to the bot."""
+    if is_master_cmd(cmd):
+        return ".playerbots %s %s" % (cmd, bot)
+    return "/w %s %s" % (bot, cmd)
+
+
 def validate(order, bots):
     bot = str(order.get("bot", ""))
     cmd = str(order.get("cmd", ""))
+    if is_master_cmd(cmd):
+        all_bots = census(online_only=False)
+        if bot not in all_bots:
+            return "SKIP %s: not in census" % bot
+        if cmd.startswith("bot add") and all_bots[bot]["online"]:
+            return "SKIP %s: already online" % bot
+        if cmd.startswith("bot remove") and not all_bots[bot]["online"]:
+            return "SKIP %s: already offline" % bot
+        return None
     if bot not in bots:
         return "SKIP %s: not online (census)" % bot
     if not any(cmd == w or cmd.startswith(w + " ") for w in WHITELIST):
@@ -172,13 +196,13 @@ def execute(orders, bots, pace, dry):
         print("nothing executable")
         return None
     for bot, cmd in plan:
-        print("  -> /w %s %s" % (bot, cmd))
+        print("  -> " + order_line(bot, cmd))
     if dry:
         print("(dry-run: nothing sent; type 'go' to execute, 'skip' to discard)")
         return plan
     for bot, cmd in plan:
-        send_line("/w %s %s" % (bot, cmd), pace)
-        print("  sent: /w %s %s" % (bot, cmd))
+        send_line(order_line(bot, cmd), pace)
+        print("  sent: " + order_line(bot, cmd))
     return plan
 
 
@@ -302,7 +326,7 @@ def daemon():
                         msg += " | " + "; ".join(skips)
                     if plan:
                         pending[sender] = plan
-                        msg += (" | plan: " + "; ".join("/w %s %s" % (b, c) for b, c in plan)
+                        msg += (" | plan: " + "; ".join(order_line(b, c) for b, c in plan)
                                 + " - whisper me 'go' to execute, 'skip' to drop.")
                 print("daemon -> %s: %s" % (sender, msg))
                 if channel == "guild" and not plan:
