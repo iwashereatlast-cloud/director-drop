@@ -27,7 +27,7 @@ WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "repair", "buy", "sell", "mail", "lfg", "join", "roll", "stats",
              "rpg", "follow", "stay", "attack", "tell", "wait", "release",
              "repop", "position", "go", "invite", "give leader", "buff",
-             "reset botAI", "quests", "drop", "share")
+             "reset botAI", "quests", "drop", "share", "leave")
 
 SYSTEM = """You are the director of altbots on a private WoW server (master: Leo).
 The human gives marching orders as natural language, JSON, or pasted lists.
@@ -36,7 +36,7 @@ Reply with ONE JSON object and nothing else:
 Rules:
 - Only name bots the CLI confirms online (it validates against a live SQL census and skips others).
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
-- Allowed command prefixes: nc, co, cs, gb, sendmail, summon, talents, equip, repair, buy, sell, mail, lfg, join, roll, stats, rpg, follow, stay, attack, tell, wait, release, repop, position, go, invite, give leader, buff, reset botAI, quests, drop, share.
+- Allowed command prefixes: nc, co, cs, gb, sendmail, summon, talents, equip, repair, buy, sell, mail, lfg, join, roll, stats, rpg, follow, stay, attack, tell, wait, release, repop, position, go, invite, give leader, buff, reset botAI, quests, drop, share, leave.
 - Never invent bot names, item links, or gold amounts. sendmail reaches the master only; prefer gb (guild bank) for items. If unsure, explain in reply and leave orders empty.
 - Bots grind solo with rpg+grind strategies already set."""
 
