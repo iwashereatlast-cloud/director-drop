@@ -17,7 +17,7 @@ orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], 
 Daemon auth: only toons on the master account (default i_was_here1st, all its toons)
 get LLM treatment; override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
 require the word 'leo' in the line. Orders always confirm via whisper: Leo replies
-with the plan, whisper him 'go' or 'skip'.
+with the plan, whisper him 'go' or 'skip'. Run daemon with python3 -u for live logs.
 """
 import argparse, json, os, re, subprocess, sys, time, urllib.request
 
@@ -225,9 +225,12 @@ def daemon():
     pending = {}       # sender -> [(bot, cmd), ...]
     convs = {}         # sender -> [messages]
     proc = subprocess.Popen(["tail", "-n", "0", "-F", LOG],
-                            stdout=subprocess.PIPE, text=True)
+                            stdout=subprocess.PIPE, bufsize=1, text=True)
     try:
-        for raw in proc.stdout:
+        while True:
+            raw = proc.stdout.readline()
+            if not raw:
+                break
             try:
                 m = LINE_RE.search(raw)
                 if not m:
@@ -241,6 +244,7 @@ def daemon():
                     continue
                 if len(text) > 300:
                     continue
+                print("daemon: [%s] (%s): %s" % (sender, channel, text))
                 low = text.lower().strip()
                 if low == "go" and sender in pending:
                     plan = pending.pop(sender)
@@ -254,7 +258,7 @@ def daemon():
                 conv = convs.setdefault(sender, [])
                 sysmsg = {"role": "system",
                           "content": GENERAL + " " + roster_text(census())}
-                conv[:] = ([sysmsg] + conv[-10:]) if conv and conv[0]["role"] == "system" else [sysmsg]
+                conv[:] = [sysmsg] + [m2 for m2 in conv if m2["role"] != "system"][-10:]
                 conv.append({"role": "user", "content": text})
                 try:
                     reply = llm(conv)
@@ -278,6 +282,7 @@ def daemon():
                         pending[sender] = plan
                         msg += (" | plan: " + "; ".join("/w %s %s" % (b, c) for b, c in plan)
                                 + " - whisper me 'go' to execute, 'skip' to drop.")
+                print("daemon -> %s: %s" % (sender, msg))
                 if channel == "guild" and not plan:
                     say(None, msg, guild=True)
                 else:
