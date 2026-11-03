@@ -19,7 +19,7 @@ get LLM treatment; override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat trigg
 require the word 'leo' in the line. Orders always confirm via whisper: Leo replies
 with the plan, whisper him 'go' or 'skip'. Run daemon with python3 -u for live logs.
 """
-import argparse, json, os, re, subprocess, sys, time, urllib.request
+import argparse, fcntl, json, os, re, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -229,6 +229,12 @@ LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
 
 
 def daemon():
+    # single-instance guard: a second daemon would double-answer every whisper
+    lock_fd = os.open(os.path.join(HERE, "daemon.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("another director.py daemon is already running (daemon.lock); not starting")
     authed = masters()
     print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
