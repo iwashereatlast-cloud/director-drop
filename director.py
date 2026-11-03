@@ -32,6 +32,9 @@ MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
 # ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
 # write-capable ~/.my.cnf must NEVER be the default: this process is LLM-driven.
+# ^ read via --defaults-file (NOT --defaults-extra-file): MySQL reads ~/.my.cnf
+# AFTER the extra file, so the full-power acore identity in ~/.my.cnf would
+# override the RO user. --defaults-file reads ONLY the RO file.
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
@@ -89,8 +92,8 @@ def census(online_only=True):
          + (" AND c.online=1" if online_only else "") +
          " ORDER BY a.username, c.name;")
     env = dict(os.environ)
-    env.pop("MYSQL_PWD", None)  # let ~/.my.cnf supply credentials
-    out = subprocess.run(["mysql", "--defaults-extra-file=" + MYCNF, "-N", "-B", "-e", q],
+    env.pop("MYSQL_PWD", None)  # let the defaults file supply credentials
+    out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
                          capture_output=True, text=True, env=env)
     if out.returncode != 0:
         raise RuntimeError("census failed: " + out.stderr.strip())
@@ -116,7 +119,7 @@ def masters():
          "WHERE a.username LIKE '" + MASTER_ACCOUNT + "%';")
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)
-    out = subprocess.run(["mysql", "--defaults-extra-file=" + MYCNF, "-N", "-B", "-e", q],
+    out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
                          capture_output=True, text=True, env=env)
     if out.returncode != 0:
         raise RuntimeError("masters failed: " + out.stderr.strip())
