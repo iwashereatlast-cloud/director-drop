@@ -2,8 +2,8 @@
 """director - LLM <-> altbot command interface for Chazbot (I_WAS_CMD / Leo shell).
 
 Transport: writes chat lines to the Leo shell FIFO (/tmp/leo.in) as /w <bot> <cmd>.
-Eyes: read-only SQL census + human tails /tmp/leo.log. LLM: local Ollama (off the
-world thread). Stdlib only.
+Eyes: read-only SQL census (auth_socket RO account via ~/.my.cnf-director) + human
+tails /tmp/leo.log. LLM: local Ollama (off the world thread). Stdlib only.
 
 Modes:
   python3 director.py chat            interactive terminal LLM REPL; dry-run first, 'go' sends
@@ -29,7 +29,9 @@ LOG = os.environ.get("DIRECTOR_LOG", "/tmp/leo.log")
 AUDIT = os.path.join(HERE, "audit.log")
 ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "i_was_here%")
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
-MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf"))
+MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
+# ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
+# write-capable ~/.my.cnf must NEVER be the default: this process is LLM-driven.
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
