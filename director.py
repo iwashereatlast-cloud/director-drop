@@ -64,6 +64,7 @@ Rules:
   * Gathering mats: cmd "nc +new rpg,+gather,-follow" then cmd "rpg status do gather". ONLY for bots whose roster jobs include herb or mine - the server refuses others (no skinning in gather mode).
   * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
+- IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
 - Orders are NOT executed immediately: the human confirms. Keep replies short."""
 
 SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
