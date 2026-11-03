@@ -42,8 +42,9 @@ Rules:
 
 
 def census():
-    q = ("SELECT c.name, a.username, c.level, c.map "
+    q = ("SELECT c.name, a.username, c.level, c.map, gm.guildid "
          "FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account "
+         "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
          "WHERE a.username LIKE '" + ACCOUNT_LIKE + "' AND c.online=1 "
          "ORDER BY a.username, c.name;")
     env = dict(os.environ)
@@ -54,8 +55,9 @@ def census():
         raise RuntimeError("census failed: " + out.stderr.strip())
     bots = {}
     for line in out.stdout.strip().splitlines():
-        name, acct, level, mapid = line.split("\t")
-        bots[name] = {"account": acct, "level": int(level), "map": int(mapid)}
+        name, acct, level, mapid, guildid = line.split("\t")
+        bots[name] = {"account": acct, "level": int(level), "map": int(mapid),
+                      "guildid": int(guildid) if guildid != "NULL" else 0}
     return bots
 
 
