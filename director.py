@@ -16,8 +16,9 @@ orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], 
 
 Daemon auth: only toons on the master account (default i_was_here1st, all its toons)
 get LLM treatment; override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
-require the word 'leo' in the line. Orders always confirm via whisper: Leo replies
-with the plan, whisper him 'go' or 'skip'. Run daemon with python3 -u for live logs.
+require the word 'leo' in the line. Validated orders execute immediately (set
+DIRECTOR_CONFIRM=1 to restore the whisper-'go' confirm step). Run daemon with
+python3 -u for live logs.
 """
 import argparse, fcntl, json, os, re, subprocess, sys, time, urllib.request
 
@@ -35,6 +36,9 @@ MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"
 # ^ read via --defaults-file (NOT --defaults-extra-file): MySQL reads ~/.my.cnf
 # AFTER the extra file, so the full-power acore identity in ~/.my.cnf would
 # override the RO user. --defaults-file reads ONLY the RO file.
+CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "") not in ("", "0", "no", "off")
+# ^ daemon default: validated orders execute IMMEDIATELY. DIRECTOR_CONFIRM=1
+# restores the whisper-'go'/'skip' confirmation step for every plan.
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
@@ -65,7 +69,7 @@ Rules:
   * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
-- Orders are NOT executed immediately: the human confirms. Keep replies short."""
+- The system validates and executes the orders after your reply. Keep replies short."""
 
 SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
           "The human gives marching orders as natural language, JSON, or pasted lists.\n" + ORDER_RULES + "\n"
@@ -278,7 +282,7 @@ def repl():
 
 LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
 
-# natural confirm/discard words for pending plans (only matter while a plan is pending)
+# confirm/discard words, used only in DIRECTOR_CONFIRM=1 mode (only matter while a plan is pending)
 GO_WORDS = ("go", "do it", "confirm", "confirmed", "execute", "approved", "approve",
             "yes", "sure", "affirmative", "send it", "make it so")
 SKIP_WORDS = ("skip", "no", "cancel", "abort", "discard", "negative", "belay that")
@@ -293,6 +297,7 @@ def daemon():
         sys.exit("another director.py daemon is already running (daemon.lock); not starting")
     authed = masters()
     print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
+    print("daemon: orders execute immediately (DIRECTOR_CONFIRM=1 restores go/skip).")
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)
@@ -320,7 +325,7 @@ def daemon():
                     continue
                 print("daemon: [%s] (%s): %s" % (sender, channel, text))
                 low = text.lower().strip()
-                if low in GO_WORDS and sender in pending:
+                if CONFIRM and low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
                     sent = execute(plan, census(), 2.0, dry=False)
                     if sent:
@@ -328,7 +333,7 @@ def daemon():
                     else:
                         say(sender, "plan no longer executable - discarded.")
                     continue
-                if low in SKIP_WORDS and sender in pending:
+                if CONFIRM and low in SKIP_WORDS and sender in pending:
                     pending.pop(sender)
                     say(sender, "plan discarded.")
                     continue
@@ -357,20 +362,26 @@ def daemon():
                     print("daemon: empty LLM reply from %s for %s" % (MODEL, sender))
                     msg = "(the model returned an empty reply - raw: %r)" % reply
                 orders = obj.get("orders") or []
-                plan, skips = [], []
+                sent, skips = [], []
                 if orders:
                     bots = census()
                     for o in orders:
                         err = validate(o, bots)
-                        (skips.append(err) if err else plan.append(o))
+                        (skips.append(err) if err else sent.append(o))
                     if skips:
                         msg += " | " + "; ".join(skips)
-                    if plan:
-                        pending[sender] = plan
-                        msg += (" | plan: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in plan)
-                                + " - whisper me 'go' to execute, 'skip' to drop.")
+                    if sent:
+                        if CONFIRM:
+                            pending[sender] = sent
+                            msg += (" | plan: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
+                                    + " - whisper me 'go' to execute, 'skip' to drop.")
+                        else:
+                            # auto-execute: validation is the safety net, no ritual
+                            for o in sent:
+                                send_line(order_line(str(o["bot"]), str(o["cmd"])), 2.0)
+                            msg += " | executed: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
                 print("daemon -> %s: %s" % (sender, msg))
-                if channel == "guild" and not plan:
+                if channel == "guild" and not sent:
                     say(None, msg, guild=True)
                 else:
                     say(sender, msg)
