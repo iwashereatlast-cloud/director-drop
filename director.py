@@ -54,17 +54,21 @@ SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo)
 GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "The guild master (C B) talks to you in-game through whispers or guild chat. "
            "Answer tersely and in character, like a general: short, confident, no fluff, at most 3 sentences. "
-           "For status questions use the live roster below. "
+           "A live roster of every toon on the bot accounts is provided in the last system message, each marked ONLINE or OFFLINE. "
+           "Answer status questions from that roster. If a toon is listed, you know them: report their level or ONLINE/OFFLINE status plainly. "
+           "If a toon is NOT listed at all, say you do not know that name. "
+           "Only toons marked ONLINE can receive orders. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
-           "Bots grind solo with rpg+grind strategies already set. Live roster (name, account, level, map, guild):")
+           "Bots grind solo with rpg+grind strategies already set.")
 
 
-def census():
-    q = ("SELECT c.name, a.username, c.level, c.map, gm.guildid "
+def census(online_only=True):
+    q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid "
          "FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account "
          "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-         "WHERE a.username LIKE '" + ACCOUNT_LIKE + "' AND c.online=1 "
-         "ORDER BY a.username, c.name;")
+         "WHERE a.username LIKE '" + ACCOUNT_LIKE + "'"
+         + (" AND c.online=1" if online_only else "") +
+         " ORDER BY a.username, c.name;")
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)  # let ~/.my.cnf supply credentials
     out = subprocess.run(["mysql", "--defaults-extra-file=" + MYCNF, "-N", "-B", "-e", q],
@@ -73,8 +77,9 @@ def census():
         raise RuntimeError("census failed: " + out.stderr.strip())
     bots = {}
     for line in out.stdout.strip().splitlines():
-        name, acct, level, mapid, guildid = line.split("\t")
+        name, acct, level, mapid, online, guildid = line.split("\t")
         bots[name] = {"account": acct, "level": int(level), "map": int(mapid),
+                      "online": int(online) == 1,
                       "guildid": int(guildid) if guildid != "NULL" else 0}
     return bots
 
@@ -96,8 +101,13 @@ def masters():
 
 
 def roster_text(bots):
-    return "; ".join("%s(acc %s, lvl %s, map %s)" % (n, b["account"].lower(), b["level"], b["map"])
-                     for n, b in bots.items()) or "NONE online"
+    if not bots:
+        return "NONE on the bot accounts"
+    parts = []
+    for n, b in bots.items():
+        parts.append("%s(acc %s, lvl %s, map %s) %s" % (n, b["account"].lower(), b["level"],
+                     b["map"], "ONLINE" if b["online"] else "OFFLINE"))
+    return "; ".join(parts)
 
 
 def llm(messages):
@@ -256,11 +266,17 @@ def daemon():
                     say(sender, "plan discarded.")
                     continue
                 conv = convs.setdefault(sender, [])
-                sysmsg = {"role": "system",
-                          "content": GENERAL + " " + roster_text(census())}
-                conv[:] = [sysmsg] + [m2 for m2 in conv if m2["role"] != "system"][-10:]
+                # rebuild each turn: persona first, last 10 history turns, then a
+                # FRESH full roster (online+offline) as its own system message
+                # right before the user text so the model cannot miss it
+                history = [m2 for m2 in conv if m2["role"] != "system"][-10:]
+                conv[:] = [{"role": "system", "content": GENERAL}]
+                conv.extend(history)
                 conv.append({"role": "user", "content": text})
                 try:
+                    roster_msg = ("Live roster (name, account, level, map, status): "
+                                  + roster_text(census(online_only=False)))
+                    conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
                     reply = llm(conv)
                 except Exception as e:
                     conv.pop()
