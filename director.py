@@ -303,6 +303,7 @@ def daemon():
             raw = proc.stdout.readline()
             if not raw:
                 break
+            sender = None
             try:
                 m = LINE_RE.search(raw)
                 if not m:
@@ -347,6 +348,10 @@ def daemon():
                 conv.append({"role": "assistant", "content": reply})
                 obj = parse_orders(reply)
                 msg = (obj.get("reply") or reply).strip()
+                if not msg:
+                    # gemma sometimes returns empty output; never suffer silence
+                    print("daemon: empty LLM reply from %s for %s" % (MODEL, sender))
+                    msg = "(the model returned an empty reply - raw: %r)" % reply
                 orders = obj.get("orders") or []
                 plan, skips = [], []
                 if orders:
@@ -367,6 +372,12 @@ def daemon():
                     say(sender, msg)
             except Exception as e:
                 print("daemon line error: %s" % e)
+                if sender:
+                    # never drop a turn silently: the master must know we choked
+                    try:
+                        say(sender, "error: %s" % e)
+                    except Exception:
+                        pass
     finally:
         proc.terminate()
 
