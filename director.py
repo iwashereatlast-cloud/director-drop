@@ -294,7 +294,8 @@ def daemon():
     authed = masters()
     print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
-    pending = {}       # sender -> [(bot, cmd), ...]
+    pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
+                       # confirm path can re-validate against a FRESH census)
     convs = {}         # sender -> [messages]
     proc = subprocess.Popen(["tail", "-n", "0", "-F", LOG],
                             stdout=subprocess.PIPE, bufsize=1, text=True)
@@ -321,8 +322,11 @@ def daemon():
                 low = text.lower().strip()
                 if low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
-                    execute(plan, census(), 2.0, dry=False)
-                    say(sender, "executed: " + "; ".join("%s <- %s" % (b, c) for b, c in plan))
+                    sent = execute(plan, census(), 2.0, dry=False)
+                    if sent:
+                        say(sender, "executed: " + "; ".join("%s <- %s" % (b, c) for b, c in sent))
+                    else:
+                        say(sender, "plan no longer executable - discarded.")
                     continue
                 if low in SKIP_WORDS and sender in pending:
                     pending.pop(sender)
@@ -358,12 +362,12 @@ def daemon():
                     bots = census()
                     for o in orders:
                         err = validate(o, bots)
-                        (skips.append(err) if err else plan.append((str(o["bot"]), str(o["cmd"]))))
+                        (skips.append(err) if err else plan.append(o))
                     if skips:
                         msg += " | " + "; ".join(skips)
                     if plan:
                         pending[sender] = plan
-                        msg += (" | plan: " + "; ".join(order_line(b, c) for b, c in plan)
+                        msg += (" | plan: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in plan)
                                 + " - whisper me 'go' to execute, 'skip' to drop.")
                 print("daemon -> %s: %s" % (sender, msg))
                 if channel == "guild" and not plan:
