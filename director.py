@@ -85,6 +85,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (map/zone/coords), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
   * Questing: cmd "nc +new rpg,-follow" then cmd "rpg status do quest". The bot picks a quest from its log; if it has none, it will say so.
@@ -114,12 +115,20 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
 
 
 def census(online_only=True):
+    # Watch list: every toon on the bot accounts PLUS every member of any
+    # guild that has a bot-account toon in it -> adding an alt to the guild
+    # is enough for Leo to watch it. Masters (who may talk to Leo) are NOT
+    # widened by this: masters() stays master-account only.
     q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid, "
          "(SELECT GROUP_CONCAT(cs.skill) FROM acore_characters.character_skills cs "
          "WHERE cs.guid=c.guid) "
          "FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account "
          "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-         "WHERE a.username LIKE '" + ACCOUNT_LIKE + "'"
+         "WHERE (a.username LIKE '" + ACCOUNT_LIKE + "' OR gm.guildid IN ("
+         "SELECT DISTINCT gm2.guildid FROM acore_characters.guild_member gm2 "
+         "JOIN acore_characters.characters c2 ON c2.guid=gm2.guid "
+         "JOIN acore_auth.account a2 ON a2.id=c2.account "
+         "WHERE a2.username LIKE '" + ACCOUNT_LIKE + "' AND gm2.guildid IS NOT NULL))"
          + (" AND c.online=1" if online_only else "") +
          " ORDER BY a.username, c.name;")
     env = dict(os.environ)
@@ -155,6 +164,141 @@ def masters():
     if out.returncode != 0:
         raise RuntimeError("masters failed: " + out.stderr.strip())
     return set(l.strip().lower() for l in out.stdout.strip().splitlines() if l.strip())
+
+
+# ---------------------------------------------------------------------------
+# Read-only DB fact lookups: the LLM only ever picks a NAME from this menu,
+# it never writes SQL. The toon name interpolated into each query is
+# validated against the census first (real DB names, letters only), so no
+# other text can enter the SQL string. Everything runs under the
+# SELECT-only identity. "quest" and "bags" also read acore_world
+# (quest_template, item_template); until those two grants exist those two
+# queries fail audibly instead of hanging:
+#   GRANT SELECT ON acore_world.quest_template TO 'iwashere'@'localhost';
+#   GRANT SELECT ON acore_world.item_template TO 'iwashere'@'localhost';
+# ---------------------------------------------------------------------------
+
+def _mysql(sql):
+    env = dict(os.environ)
+    env.pop("MYSQL_PWD", None)  # let the defaults file supply credentials
+    out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", sql],
+                         capture_output=True, text=True, env=env)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip()[:200])
+    return out.stdout.strip()
+
+
+def _guid_sub(name):
+    return "(SELECT guid FROM acore_characters.characters WHERE name='%s')" % name
+
+
+def _fmt_money(raw):
+    c = int(raw or 0)
+    return "%dg %ds %dc" % (c // 10000, (c % 10000) // 100, c % 100)
+
+
+def _fmt_location(raw):
+    if not raw:
+        return "not found"
+    mapid, zone, x, y, online = raw.split("\t")
+    return "map %s zone %s at (%s, %s), %s" % (mapid, zone, x, y,
+                                               "ONLINE" if online == "1" else "OFFLINE")
+
+
+def _fmt_quest(raw):
+    if not raw:
+        return "no active quests"
+    labels = {1: "ready to turn in", 3: "in progress"}
+    out = []
+    for line in raw.splitlines():
+        title, status = line.rsplit("\t", 1)
+        out.append("%s (%s)" % (title, labels.get(int(status), "status %s" % status)))
+    return "; ".join(out)
+
+
+def _fmt_skills(raw):
+    if not raw:
+        return "no skills"
+    out = []
+    for line in raw.splitlines():
+        skill, value, cap = line.split("\t")
+        out.append("%s %s/%s" % (SKILLS.get(int(skill), "s" + skill), value, cap))
+    return ", ".join(out)
+
+
+def _fmt_bags(raw):
+    if not raw:
+        return "not found"
+    free = int(raw)
+    state = " - BAGS FULL" if free <= 0 else (" - nearly full" if free <= 10 else "")
+    return "%d free bag slots%s" % (free, state)
+
+
+def _fmt_played(raw):
+    if not raw:
+        return "not found"
+    level, xp, total, lvltime, logout, online = raw.split("\t")
+    when = time.strftime("%F %H:%M", time.localtime(int(logout))) if int(logout) else "never"
+    return ("level %s, played %.1fh, last logout %s, %s"
+            % (level, int(total) / 3600.0, when,
+               "ONLINE" if online == "1" else "OFFLINE"))
+
+
+# name -> (what it returns, sql with {n} = validated toon name and
+#          {g} = guid-by-name subquery, result formatter)
+DB_QUERIES = {
+    "location": ("map, zone, coordinates, online flag",
+                 "SELECT map, zone, position_x, position_y, online "
+                 "FROM acore_characters.characters WHERE name='{n}'", _fmt_location),
+    "quest": ("active quests (in progress / ready to turn in)",
+              "SELECT qt.LogTitle, cqs.status FROM acore_characters.character_queststatus cqs "
+              "JOIN acore_world.quest_template qt ON qt.ID=cqs.quest "
+              "WHERE cqs.guid={g} AND cqs.status IN (1,3) "
+              "ORDER BY cqs.status LIMIT 10", _fmt_quest),
+    "money": ("gold on hand",
+              "SELECT money FROM acore_characters.characters WHERE name='{n}'", _fmt_money),
+    "skills": ("profession levels",
+               "SELECT skill, value, max FROM acore_characters.character_skills "
+               "WHERE guid={g} ORDER BY skill", _fmt_skills),
+    "bags": ("free bag slots",
+             "SELECT 16 + (SELECT IFNULL(SUM(it.ContainerSlots), 0) "
+             "FROM acore_characters.character_inventory ci "
+             "JOIN acore_characters.item_instance ii ON ii.guid=ci.item "
+             "JOIN acore_world.item_template it ON it.entry=ii.itemEntry "
+             "WHERE ci.guid={g} AND ci.bag=255 AND ci.slot<4) "
+             "- (SELECT COUNT(*) FROM acore_characters.character_inventory "
+             "WHERE guid={g} AND (bag=0 OR bag IN "
+             "(SELECT item FROM acore_characters.character_inventory "
+             "WHERE guid={g} AND bag=255 AND slot<4)))", _fmt_bags),
+    "played": ("playtime and last logout",
+                "SELECT level, xp, totaltime, leveltime, logout_time, online "
+                "FROM acore_characters.characters WHERE name='{n}'", _fmt_played),
+}
+
+
+def run_queries(qs, all_bots):
+    """Run up to 3 named lookups; return a human-readable digest (never raise)."""
+    lines = []
+    for q in qs[:3]:
+        if not isinstance(q, dict):
+            lines.append("invalid query entry")
+            continue
+        name = str(q.get("query", "")).strip().lower()
+        bot = str(q.get("bot", "")).strip()
+        info = DB_QUERIES.get(name)
+        if not info:
+            lines.append("query %r unknown (have: %s)" % (name, ", ".join(sorted(DB_QUERIES))))
+            continue
+        match = next((n for n in all_bots if n.lower() == bot.lower()), None)
+        if not match or not re.fullmatch(r"[A-Za-z]+", match):
+            lines.append("query %s: %r not in census" % (name, bot))
+            continue
+        sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
+        try:
+            lines.append("%s %s: %s" % (match, name, info[2](_mysql(sql))))
+        except Exception as e:
+            lines.append("%s %s failed: %s" % (match, name, e))
+    return "\n".join(lines) if lines else "no valid queries"
 
 
 def cast_list(name, jobs):
@@ -198,6 +342,7 @@ def parse_orders(text):
         obj = json.loads(m.group(0))
         obj.setdefault("reply", "")
         obj.setdefault("orders", [])
+        obj.setdefault("queries", [])
         return obj
     except json.JSONDecodeError:
         return {"reply": text, "orders": []}
@@ -401,6 +546,24 @@ def daemon():
                     continue
                 conv.append({"role": "assistant", "content": reply})
                 obj = parse_orders(reply)
+                qs = [q for q in (obj.get("queries") or []) if isinstance(q, dict)][:3]
+                if qs:
+                    # one read-only DB round: results go back to the LLM, whose
+                    # NEXT reply (final text + orders) is the one acted on
+                    say(sender, "one moment, checking the ledgers.")
+                    results = run_queries(qs, census(online_only=False))
+                    conv.append({"role": "system", "content":
+                                 "DB query results (read-only):\n" + results +
+                                 "\nGive your final reply now, with orders if any. "
+                                 "(Further queries this turn are ignored.)"})
+                    try:
+                        reply = llm(conv)
+                    except Exception as e:
+                        conv.pop()
+                        say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+                        continue
+                    conv.append({"role": "assistant", "content": reply})
+                    obj = parse_orders(reply)
                 msg = (obj.get("reply") or reply).strip()
                 if not msg:
                     # gemma sometimes returns empty output; never suffer silence
