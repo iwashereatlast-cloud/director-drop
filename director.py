@@ -45,12 +45,35 @@ SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
           185: "cook", 186: "mine", 197: "tailor", 333: "enchant", 356: "fish",
           393: "skin", 755: "jewel", 762: "eng", 773: "scribe"}
 
-# whisper-bot command prefixes the LLM is allowed to emit (no leading /w in cmd)
+# whisper-bot command prefixes the LLM is allowed to emit (no leading /w in cmd).
+# Source-audited 2026-11-03 vs mod-playerbots ChatTriggerContext.h (138 trigger
+# keys). Removed dead words (no source trigger -> bot silently ignores them):
+# join, tell, wait, repop. "autogear" prefix-covers "autogear bis", "pull"
+# covers "pull back"/"pull rti", "target" covers "target me". Deliberately NOT
+# whitelisted: cheat, debug/cdebug, rtsc, ra, teleport, taxi, destroy, castnc,
+# d/do (raw action execution), guild management, cast (gated separately below).
 WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
-             "repair", "buy", "sell", "mail", "lfg", "join", "roll", "stats",
-             "rpg", "follow", "stay", "attack", "tell", "wait", "release",
-             "repop", "position", "go", "invite", "give leader", "buff",
-             "reset botAI", "quests", "drop", "share", "leave")
+             "repair", "buy", "sell", "mail", "lfg", "roll", "stats",
+             "rpg", "follow", "stay", "attack", "release",
+             "position", "go", "invite", "give leader", "buff",
+             "reset botAI", "quests", "drop", "share", "leave",
+             "maintenance", "trainer", "autogear", "equip upgrade", "craft",
+             "c", "ll", "loot all", "bank", "ue", "de", "spells", "help",
+             "revive", "flee", "runaway", "max dps", "save mana", "focus heal",
+             "attackers", "target", "formation", "stance", "rti", "ready",
+             "pull", "tank attack", "wait for attack time", "wipe", "rebuff",
+             "warning", "q", "who", "rep", "aura", "spell", "los", "emblems",
+             "pvp stats", "calc", "qi", "cast")
+
+# "cast" is whitelist-gated PER SPELL, not open-ended: the server matches the
+# spell name EXACTLY (case-insensitive, full length) against the bot's own
+# spellbook, so names must be exact. Keyed by roster job code (see SKILLS).
+# The bot whispers back "Unknown spell"/"Cannot cast"/"Cast failed" on bad
+# casts, so errors are audible in leo.log - extend this dict from receipts.
+CAST_SPELLS = {"tailor": ("Mooncloth",),
+               "alchemy": ("Transmute: Titanium",),
+               "mine": ("Smelt Titansteel",)}
+CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 
 # master-issued server commands (Leo runs them himself via the shell, not /w to a bot)
 MASTER_CMDS = ("bot add", "bot remove")
@@ -60,7 +83,8 @@ ORDER_RULES = """Reply with ONE JSON object and nothing else:
 Rules:
 - Only name bots from the live roster (the CLI validates against a live SQL census and skips others).
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
-- Allowed command prefixes: nc, co, cs, gb, sendmail, summon, talents, equip, repair, buy, sell, mail, lfg, join, roll, stats, rpg, follow, stay, attack, tell, wait, release, repop, position, go, invite, give leader, buff, reset botAI, quests, drop, share, leave.
+- Allowed command prefixes: %(wl)s.
+- Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
   * Questing: cmd "nc +new rpg,-follow" then cmd "rpg status do quest". The bot picks a quest from its log; if it has none, it will say so.
@@ -69,7 +93,7 @@ Rules:
   * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
-- The system validates and executes the orders after your reply. Keep replies short."""
+- The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST)}
 
 SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
           "The human gives marching orders as natural language, JSON, or pasted lists.\n" + ORDER_RULES + "\n"
@@ -83,6 +107,7 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "If a toon is NOT listed at all, say you do not know that name. "
            "Only toons marked ONLINE can take direct orders, but OFFLINE units can be brought online with a 'bot add' order. "
            "The roster lists each unit's professions as jobs - match gathering orders to units with herb or mine. "
+           "A unit's roster casts field lists the exact spell names you may order that unit to cast (cmd \"cast <spell name>\"). "
            "When reporting counts, count the roster entries carefully; if unsure, list names instead of numbers. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
            "Bots grind solo with rpg+grind strategies already set.")
@@ -132,6 +157,14 @@ def masters():
     return set(l.strip().lower() for l in out.stdout.strip().splitlines() if l.strip())
 
 
+def cast_list(name, jobs):
+    """Exact spell names Leo may tell this toon to cast (overrides + by job)."""
+    spells = list(CAST_OVERRIDES.get(name, ()))
+    for j in (jobs or "").split("+"):
+        spells.extend(CAST_SPELLS.get(j, ()))
+    return spells
+
+
 def roster_text(bots):
     if not bots:
         return "NONE on the bot accounts"
@@ -140,6 +173,9 @@ def roster_text(bots):
         p = "%s(acc %s, lvl %s, map %s" % (n, b["account"].lower(), b["level"], b["map"])
         if b.get("jobs"):
             p += ", jobs " + b["jobs"]
+        casts = cast_list(n, b.get("jobs"))
+        if casts:
+            p += ", casts " + "+".join(casts)
         p += ") " + ("ONLINE" if b["online"] else "OFFLINE")
         parts.append(p)
     return "; ".join(parts)
@@ -194,6 +230,15 @@ def validate(order, bots):
         return "SKIP %s: not online (census)" % bot
     if not any(cmd == w or cmd.startswith(w + " ") for w in WHITELIST):
         return "SKIP %s: cmd not whitelisted: %r" % (bot, cmd)
+    if cmd == "cast" or cmd.startswith("cast "):
+        rest = cmd[4:].strip()
+        if not rest:
+            return "SKIP %s: cast needs a spell name" % bot
+        m = re.match(r"^(.+?)\s+(\d+)$", rest)  # optional trailing repeat count
+        spell = (m.group(1) if m else rest).strip().lower()
+        allowed = [s.lower() for s in cast_list(bot, bots[bot].get("jobs"))]
+        if spell not in allowed:
+            return "SKIP %s: cast spell not allowed for %s: %r" % (bot, bot, spell)
     return None
 
 
