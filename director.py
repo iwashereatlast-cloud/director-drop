@@ -31,6 +31,11 @@ ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "i_was_here%")
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf"))
 
+# profession skill ids -> short codes for the roster (character_skills.skill)
+SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
+          185: "cook", 186: "mine", 197: "tailor", 333: "enchant", 356: "fish",
+          393: "skin", 755: "jewel", 762: "eng", 773: "scribe"}
+
 # whisper-bot command prefixes the LLM is allowed to emit (no leading /w in cmd)
 WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "repair", "buy", "sell", "mail", "lfg", "join", "roll", "stats",
@@ -48,6 +53,11 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: nc, co, cs, gb, sendmail, summon, talents, equip, repair, buy, sell, mail, lfg, join, roll, stats, rpg, follow, stay, attack, tell, wait, release, repop, position, go, invite, give leader, buff, reset botAI, quests, drop, share, leave.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
+- Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
+  * Questing: cmd "nc +new rpg,-follow" then cmd "rpg status do quest". The bot picks a quest from its log; if it has none, it will say so.
+  * Grinding mobs: cmd "nc +new rpg,+grind,-follow" (optionally then cmd "rpg status go grind").
+  * Gathering mats: cmd "nc +new rpg,+gather,-follow" then cmd "rpg status do gather". ONLY for bots whose roster jobs include herb or mine - the server refuses others (no skinning in gather mode).
+  * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - Orders are NOT executed immediately: the human confirms. Keep replies short."""
 
@@ -62,12 +72,15 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "Answer status questions from that roster. If a toon is listed, you know them: report their level or ONLINE/OFFLINE status plainly. "
            "If a toon is NOT listed at all, say you do not know that name. "
            "Only toons marked ONLINE can take direct orders, but OFFLINE units can be brought online with a 'bot add' order. "
+           "The roster lists each unit's professions as jobs - match gathering orders to units with herb or mine. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
            "Bots grind solo with rpg+grind strategies already set.")
 
 
 def census(online_only=True):
-    q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid "
+    q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid, "
+         "(SELECT GROUP_CONCAT(cs.skill) FROM acore_characters.character_skills cs "
+         "WHERE cs.guid=c.guid) "
          "FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account "
          "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
          "WHERE a.username LIKE '" + ACCOUNT_LIKE + "'"
@@ -81,9 +94,13 @@ def census(online_only=True):
         raise RuntimeError("census failed: " + out.stderr.strip())
     bots = {}
     for line in out.stdout.strip().splitlines():
-        name, acct, level, mapid, online, guildid = line.split("\t")
+        name, acct, level, mapid, online, guildid, skills = line.split("\t")
+        jobs = ""
+        if skills and skills != "NULL":
+            jobs = "+".join(SKILLS.get(int(s), "s" + s)
+                            for s in skills.split(",") if s.strip())
         bots[name] = {"account": acct, "level": int(level), "map": int(mapid),
-                      "online": int(online) == 1,
+                      "online": int(online) == 1, "jobs": jobs,
                       "guildid": int(guildid) if guildid != "NULL" else 0}
     return bots
 
@@ -109,8 +126,11 @@ def roster_text(bots):
         return "NONE on the bot accounts"
     parts = []
     for n, b in bots.items():
-        parts.append("%s(acc %s, lvl %s, map %s) %s" % (n, b["account"].lower(), b["level"],
-                     b["map"], "ONLINE" if b["online"] else "OFFLINE"))
+        p = "%s(acc %s, lvl %s, map %s" % (n, b["account"].lower(), b["level"], b["map"])
+        if b.get("jobs"):
+            p += ", jobs " + b["jobs"]
+        p += ") " + ("ONLINE" if b["online"] else "OFFLINE")
+        parts.append(p)
     return "; ".join(parts)
 
 
