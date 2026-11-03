@@ -6,11 +6,18 @@ Eyes: read-only SQL census + human tails /tmp/leo.log. LLM: local Ollama (off th
 world thread). Stdlib only.
 
 Modes:
-  python3 director.py chat            interactive LLM REPL; orders dry-run first, type 'go'
+  python3 director.py chat            interactive terminal LLM REPL; dry-run first, 'go' sends
+  python3 director.py daemon         in-game interface: whisper Leo (or say 'Leo' in guild) and
+                                     the LLM answers as the general and directs bots (confirm via 'go')
   python3 director.py run orders.json [--go]   execute a JSON marching-orders file
-  python3 director.py census          print live online-bot roster (read-only)
+  python3 director.py census         print live online-bot roster (read-only)
 
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
+
+Daemon auth: only toons on the master account (default i_was_here1st, all its toons)
+get LLM treatment; override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
+require the word 'leo' in the line. Orders always confirm via whisper: Leo replies
+with the plan, whisper him 'go' or 'skip'.
 """
 import argparse, json, os, re, subprocess, sys, time, urllib.request
 
@@ -18,8 +25,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 MODEL = os.environ.get("DIRECTOR_MODEL", "gemma4:12b")
 FIFO = os.environ.get("LEO_FIFO", "/tmp/leo.in")
+LOG = os.environ.get("DIRECTOR_LOG", "/tmp/leo.log")
 AUDIT = os.path.join(HERE, "audit.log")
 ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "i_was_here%")
+MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf"))
 
 # whisper-bot command prefixes the LLM is allowed to emit (no leading /w in cmd)
@@ -29,16 +38,25 @@ WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "repop", "position", "go", "invite", "give leader", "buff",
              "reset botAI", "quests", "drop", "share", "leave")
 
-SYSTEM = """You are the director of altbots on a private WoW server (master: Leo).
-The human gives marching orders as natural language, JSON, or pasted lists.
-Reply with ONE JSON object and nothing else:
-{"reply": "<short human-readable summary>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
+ORDER_RULES = """Reply with ONE JSON object and nothing else:
+{"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Rules:
-- Only name bots the CLI confirms online (it validates against a live SQL census and skips others).
+- Only name bots from the live roster (the CLI validates against a live SQL census and skips others).
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: nc, co, cs, gb, sendmail, summon, talents, equip, repair, buy, sell, mail, lfg, join, roll, stats, rpg, follow, stay, attack, tell, wait, release, repop, position, go, invite, give leader, buff, reset botAI, quests, drop, share, leave.
-- Never invent bot names, item links, or gold amounts. sendmail reaches the master only; prefer gb (guild bank) for items. If unsure, explain in reply and leave orders empty.
-- Bots grind solo with rpg+grind strategies already set."""
+- Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
+- Orders are NOT executed immediately: the human confirms. Keep replies short."""
+
+SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
+          "The human gives marching orders as natural language, JSON, or pasted lists.\n" + ORDER_RULES + "\n"
+          "Bots grind solo with rpg+grind strategies already set.")
+
+GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
+           "The guild master (C B) talks to you in-game through whispers or guild chat. "
+           "Answer tersely and in character, like a general: short, confident, no fluff, at most 3 sentences. "
+           "For status questions use the live roster below. "
+           "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
+           "Bots grind solo with rpg+grind strategies already set. Live roster (name, account, level, map, guild):")
 
 
 def census():
@@ -59,6 +77,27 @@ def census():
         bots[name] = {"account": acct, "level": int(level), "map": int(mapid),
                       "guildid": int(guildid) if guildid != "NULL" else 0}
     return bots
+
+
+def masters():
+    names = os.environ.get("DIRECTOR_MASTERS", "")
+    if names.strip():
+        return set(n.strip().lower() for n in names.split(",") if n.strip())
+    q = ("SELECT c.name FROM acore_characters.characters c "
+         "JOIN acore_auth.account a ON a.id=c.account "
+         "WHERE a.username LIKE '" + MASTER_ACCOUNT + "%';")
+    env = dict(os.environ)
+    env.pop("MYSQL_PWD", None)
+    out = subprocess.run(["mysql", "--defaults-extra-file=" + MYCNF, "-N", "-B", "-e", q],
+                         capture_output=True, text=True, env=env)
+    if out.returncode != 0:
+        raise RuntimeError("masters failed: " + out.stderr.strip())
+    return set(l.strip().lower() for l in out.stdout.strip().splitlines() if l.strip())
+
+
+def roster_text(bots):
+    return "; ".join("%s(acc %s, lvl %s, map %s)" % (n, b["account"].lower(), b["level"], b["map"])
+                     for n, b in bots.items()) or "NONE online"
 
 
 def llm(messages):
@@ -100,6 +139,15 @@ def send_line(line, pace):
         f.write(time.strftime("%F %T ") + "SENT " + line + "\n")
     if pace:
         time.sleep(pace)
+
+
+def say(recipient, msg, guild=False):
+    msg = (msg or "").strip()
+    if not msg:
+        return
+    for i in range(0, len(msg), 200):
+        chunk = msg[i:i + 200]
+        send_line(("/g " if guild else "/w %s " % recipient) + chunk, 0.5)
 
 
 def execute(orders, bots, pace, dry):
@@ -167,6 +215,79 @@ def repl():
             pending = execute(orders, census(), 2.0, dry=True)
 
 
+LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
+
+
+def daemon():
+    authed = masters()
+    print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
+    print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
+    pending = {}       # sender -> [(bot, cmd), ...]
+    convs = {}         # sender -> [messages]
+    proc = subprocess.Popen(["tail", "-n", "0", "-F", LOG],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        for raw in proc.stdout:
+            try:
+                m = LINE_RE.search(raw)
+                if not m:
+                    continue
+                sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
+                if sender in ("Leo", "System") or not text:
+                    continue
+                if sender.lower() not in authed:
+                    continue
+                if channel == "guild" and "leo" not in text.lower():
+                    continue
+                if len(text) > 300:
+                    continue
+                low = text.lower().strip()
+                if low == "go" and sender in pending:
+                    plan = pending.pop(sender)
+                    execute(plan, census(), 2.0, dry=False)
+                    say(sender, "executed: " + "; ".join("%s <- %s" % (b, c) for b, c in plan))
+                    continue
+                if low == "skip" and sender in pending:
+                    pending.pop(sender)
+                    say(sender, "plan discarded.")
+                    continue
+                conv = convs.setdefault(sender, [])
+                sysmsg = {"role": "system",
+                          "content": GENERAL + " " + roster_text(census())}
+                conv[:] = ([sysmsg] + conv[-10:]) if conv and conv[0]["role"] == "system" else [sysmsg]
+                conv.append({"role": "user", "content": text})
+                try:
+                    reply = llm(conv)
+                except Exception as e:
+                    conv.pop()
+                    say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+                    continue
+                conv.append({"role": "assistant", "content": reply})
+                obj = parse_orders(reply)
+                msg = (obj.get("reply") or reply).strip()
+                orders = obj.get("orders") or []
+                plan, skips = [], []
+                if orders:
+                    bots = census()
+                    for o in orders:
+                        err = validate(o, bots)
+                        (skips.append(err) if err else plan.append((str(o["bot"]), str(o["cmd"]))))
+                    if skips:
+                        msg += " | " + "; ".join(skips)
+                    if plan:
+                        pending[sender] = plan
+                        msg += (" | plan: " + "; ".join("/w %s %s" % (b, c) for b, c in plan)
+                                + " - whisper me 'go' to execute, 'skip' to drop.")
+                if channel == "guild" and not plan:
+                    say(None, msg, guild=True)
+                else:
+                    say(sender, msg)
+            except Exception as e:
+                print("daemon line error: %s" % e)
+    finally:
+        proc.terminate()
+
+
 def run_file(path, go, pace):
     with open(path) as f:
         data = json.load(f)
@@ -176,7 +297,7 @@ def run_file(path, go, pace):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["chat", "run", "census"])
+    ap.add_argument("mode", choices=["chat", "run", "census", "daemon"])
     ap.add_argument("file", nargs="?")
     ap.add_argument("--go", action="store_true", help="actually send (default dry-run)")
     ap.add_argument("--pace", type=float, default=2.0)
@@ -188,5 +309,7 @@ if __name__ == "__main__":
         if not args.file:
             sys.exit("run needs a JSON file")
         run_file(args.file, args.go, args.pace)
+    elif args.mode == "daemon":
+        daemon()
     else:
         repl()
