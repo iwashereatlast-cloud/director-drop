@@ -247,7 +247,7 @@ def _fmt_played(raw):
     if not raw:
         return "not found"
     level, xp, total, lvltime, logout, online = raw.split("\t")
-    when = time.strftime("%F %H:%M", time.localtime(int(logout))) if int(logout) else "never"
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(logout))) if int(logout) else "never"
     return ("level %s, played %.1fh, last logout %s, %s"
             % (level, int(total) / 3600.0, when,
                "ONLINE" if online == "1" else "OFFLINE"))
@@ -376,7 +376,7 @@ def run_queries(qs, all_bots):
             if ok:
                 lines.append("%s location (live .pinfo): %s" % (match, _fmt_pinfo(txt)))
                 continue
-            note = "SOAP unavailable (%s); DB last-logout position: " % txt
+            note = "SOAP unavailable (%s); DB last-logout position: " % (txt or "empty .pinfo response")
         sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
         try:
             lines.append("%s %s: %s%s" % (match, name, note, info[2](_mysql(sql))))
@@ -464,8 +464,10 @@ def validate(order, bots):
         if not rest:
             return "SKIP %s: cast needs a spell name" % bot
         m = re.match(r"^(.+?)\s+(\d+)$", rest)  # optional trailing repeat count
-        spell = (m.group(1) if m else rest).strip().lower()
+        spell = rest.strip().lower()
         allowed = [s.lower() for s in cast_list(bot, bots[bot].get("jobs"))]
+        if spell not in allowed and m:
+            spell = m.group(1).strip().lower()
         if spell not in allowed:
             return "SKIP %s: cast spell not allowed for %s: %r" % (bot, bot, spell)
     return None
@@ -475,7 +477,7 @@ def send_line(line, pace):
     subprocess.run(["timeout", "3", "bash", "-c",
                     'printf "%s\\n" "$1" > ' + FIFO, "_", line])
     with open(AUDIT, "a") as f:
-        f.write(time.strftime("%F %T ") + "SENT " + line + "\n")
+        f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "SENT " + line + "\n")
     if pace:
         time.sleep(pace)
 
@@ -496,18 +498,18 @@ def execute(orders, bots, pace, dry):
         if err:
             print("  " + err)
             continue
-        plan.append((str(o["bot"]), str(o["cmd"])))
+        plan.append({"bot": str(o["bot"]), "cmd": str(o["cmd"])})
     if not plan:
         print("nothing executable")
         return None
-    for bot, cmd in plan:
-        print("  -> " + order_line(bot, cmd))
+    for o in plan:
+        print("  -> " + order_line(o["bot"], o["cmd"]))
     if dry:
         print("(dry-run: nothing sent; type 'go' to execute, 'skip' to discard)")
         return plan
-    for bot, cmd in plan:
-        send_line(order_line(bot, cmd), pace)
-        print("  sent: " + order_line(bot, cmd))
+    for o in plan:
+        send_line(order_line(o["bot"], o["cmd"]), pace)
+        print("  sent: " + order_line(o["bot"], o["cmd"]))
     return plan
 
 
@@ -551,7 +553,8 @@ def repl():
         print(obj.get("reply") or raw)
         orders = obj.get("orders") or []
         if orders:
-            pending = execute(orders, census(), 2.0, dry=True)
+            pending = [dict(o) for o in orders]
+            execute(pending, census(), 2.0, dry=True)
 
 
 LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
@@ -596,6 +599,7 @@ def daemon():
                 if channel == "guild" and "leo" not in text.lower():
                     continue
                 if len(text) > 300:
+                    say(sender, "line too long (max 300 chars) - ignored.")
                     continue
                 print("daemon: [%s] (%s): %s" % (sender, channel, text))
                 low = text.lower().strip()
@@ -603,7 +607,7 @@ def daemon():
                     plan = pending.pop(sender)
                     sent = execute(plan, census(), 2.0, dry=False)
                     if sent:
-                        say(sender, "executed: " + "; ".join("%s <- %s" % (b, c) for b, c in sent))
+                        say(sender, "executed: " + "; ".join(order_line(o["bot"], o["cmd"]) for o in sent))
                     else:
                         say(sender, "plan no longer executable - discarded.")
                     continue
@@ -673,7 +677,7 @@ def daemon():
                                 send_line(order_line(str(o["bot"]), str(o["cmd"])), 2.0)
                             msg += " | executed: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
                 print("daemon -> %s: %s" % (sender, msg))
-                if channel == "guild" and not sent:
+                if channel == "guild" and not sent and not (CONFIRM and sender in pending):
                     say(None, msg, guild=True)
                 else:
                     say(sender, msg)
@@ -692,7 +696,12 @@ def daemon():
 def run_file(path, go, pace):
     with open(path) as f:
         data = json.load(f)
-    orders = data["orders"] if isinstance(data, dict) else data
+    if isinstance(data, dict):
+        if "orders" not in data:
+            sys.exit("orders file has no 'orders' key")
+        orders = data["orders"]
+    else:
+        orders = data
     execute(orders, census(), pace, dry=not go)
 
 
