@@ -20,22 +20,35 @@ system_soap_status() {
     okmsg "armed: $url (user $user, perms $(stat -c '%a' "$BOTCMD_SOAP_CONF"))"
     echo
     warn "live test: .server info via SOAP..."
-    local envelope body text
+    local envelope resp code body text
     envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>.server info</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
-    body=$(curl -s --max-time 10 -u "$user:$pass" \
+    resp=$(curl -s --max-time 10 -u "$user:$pass" \
       -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
-      -d "$envelope" "$url" 2>/dev/null || true)
-    if [ -n "$body" ]; then
-      text=$(printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | head -c 300)
-      if [ -n "$(printf '%s' "$text" | tr -d ' ')" ]; then
-        okmsg "SOAP works - worldserver answered:"
-        echo "$text"
-      else
-        errmsg "empty SOAP response - check worldserver SOAP bind and the account's gmlevel"
-      fi
-    else
-      errmsg "no response - is worldserver up and listening on $url?"
-    fi
+      -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null || true)
+    code=$(printf '%s' "$resp" | tail -n 1)
+    body=$(printf '%s' "$resp" | sed '$d')
+    text=$(printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | head -c 300)
+    case "$code" in
+      200)
+        if [ -n "$(printf '%s' "$text" | tr -d ' ')" ]; then
+          okmsg "SOAP works (HTTP 200) - worldserver answered:"
+          echo "$text"
+        else
+          errmsg "HTTP 200 but empty response - odd; paste this to the chat"
+        fi ;;
+      401)
+        errmsg "HTTP 401 Unauthorized: endpoint is UP but the credentials were REJECTED"
+        warn "  AC SOAP auth = real game account: username not found or password mismatch"
+        warn "  re-enter carefully: botcmd system arm" ;;
+      403)
+        errmsg "HTTP 403: account authenticated but gmlevel below Administrator"
+        warn "  needs gmlevel 3 on the account (acore_auth.account_access)" ;;
+      000|"")
+        errmsg "no response (connection failed/timeout) - is worldserver up and listening on $url?" ;;
+      *)
+        errmsg "HTTP $code - unexpected response:"
+        echo "$text" ;;
+    esac
   else
     warn "NOT armed: $BOTCMD_SOAP_CONF missing or short"
     errmsg "the director's bot-sender gate is INERT (fail-open) without it"
