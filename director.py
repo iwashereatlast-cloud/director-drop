@@ -39,6 +39,13 @@ WATCH_GUILD = os.environ.get("DIRECTOR_GUILD", "Special FXc")
 # ^ the ONE guild whose members Leo watches (census unions them with the bot
 # accounts). Add an alt bot to THIS guild and Leo watches it automatically;
 # every other guild on the server is ignored. Keep the name quote-free.
+HANDPLAY = set(n.strip().lower() for n in os.environ.get(
+    "DIRECTOR_HANDPLAY", "Cecil,Rydia,Shadow,Vivi,Aerith").split(",") if n.strip())
+# ^ hand-play-only toons (the manual leveling group): Leo may report their
+# status but must NEVER order them or bring them online as bots - even though
+# they sit on bot accounts and appear in the census. Incident 2026-11-04:
+# RP chatter became "Aerith is offline. Bringing her online to perform
+# the craft" and auto-execute ran `bot add Aerith` (a G1 hard-rule violation).
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
 # ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
@@ -463,6 +470,9 @@ def order_line(bot, cmd):
 def validate(order, bots):
     bot = str(order.get("bot", ""))
     cmd = str(order.get("cmd", ""))
+    if bot.strip().lower() in HANDPLAY:
+        return ("SKIP %s: hand-play toon, never commanded or brought "
+                "online as a bot (DIRECTOR_HANDPLAY)" % bot)
     if is_master_cmd(cmd):
         all_bots = census(online_only=False)
         if bot not in all_bots:
