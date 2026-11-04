@@ -470,7 +470,7 @@ def order_line(bot, cmd):
 def validate(order, bots):
     bot = str(order.get("bot", ""))
     cmd = str(order.get("cmd", ""))
-    if bot.strip().lower() in HANDPLAY:
+    if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "
                 "online as a bot (DIRECTOR_HANDPLAY)" % bot)
     if is_master_cmd(cmd):
