@@ -14,8 +14,11 @@ Modes:
 
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
 
-Daemon auth: only toons on the master account (default i_was_here1st, all its toons)
-get LLM treatment; override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
+Daemon auth: toons on the master account (default i_was_here1st, all its toons)
+PLUS members of the watched guild (DIRECTOR_GUILD) who are NOT on a bot account
+- bot-account toons never get auth, because their automatic "Using X"
+master-report whispers would be answered by the LLM and ping-pong with the bot
+AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
 require the word 'leo' in the line. Validated orders execute immediately (set
 DIRECTOR_CONFIRM=1 to restore the whisper-'go' confirm step). Run daemon with
 python3 -u for live logs.
@@ -129,8 +132,9 @@ def census(online_only=True):
     # Watch list: every toon on the bot accounts PLUS every member of the
     # ONE named guild (WATCH_GUILD, default "Special FXc") -> adding an alt
     # to THAT guild is enough for Leo to watch it; all other guilds on the
-    # server are ignored. Masters (who may talk to Leo) are NOT widened by
-    # this: masters() stays master-account only.
+    # server are ignored. masters() is widened by the guild too: HUMAN members
+    # (non-bot accounts, e.g. Banksie) may talk to Leo; bot-account toons
+    # never can (see masters()).
     q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid, "
          "(SELECT GROUP_CONCAT(cs.skill) FROM acore_characters.character_skills cs "
          "WHERE cs.guid=c.guid) "
@@ -163,9 +167,19 @@ def masters():
     names = os.environ.get("DIRECTOR_MASTERS", "")
     if names.strip():
         return set(n.strip().lower() for n in names.split(",") if n.strip())
-    q = ("SELECT c.name FROM acore_characters.characters c "
+    # default: every toon on the master account (G1) PLUS every member of the
+    # watched guild who is NOT on a bot account (guild-recruited humans, e.g.
+    # Banksie). Bot-account toons are deliberately NOT masters: they are the
+    # roster Leo commands, and their automatic "Using X" master-report whispers
+    # would otherwise be treated as human chat -> LLM replies to the bot ->
+    # the bot parses Leo's whisper as a command -> chatter loop.
+    q = ("SELECT DISTINCT c.name FROM acore_characters.characters c "
          "JOIN acore_auth.account a ON a.id=c.account "
-         "WHERE a.username LIKE '" + MASTER_ACCOUNT + "%';")
+         "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
+         "WHERE a.username LIKE '" + MASTER_ACCOUNT + "%' "
+         "OR (gm.guildid IN (SELECT guildid FROM acore_characters.guild "
+         "WHERE name='" + WATCH_GUILD + "') "
+         "AND a.username NOT LIKE '" + ACCOUNT_LIKE + "');")
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)
     out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
