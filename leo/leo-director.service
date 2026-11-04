@@ -1,0 +1,12 @@
+[Unit]
+Description=Leo director daemon (LLM brain)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/downloads/director-drop
+ExecStart=/bin/bash -c 'cd %h/downloads/director-drop && exec python3 -u director.py daemon >> daemon.log 2>&1'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

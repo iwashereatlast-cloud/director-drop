@@ -52,5 +52,24 @@ RITUAL_BOTS="Golbez"
   same grants director.py uses, no new credentials.
 - Re-added bots likely need nc strategy re-issue during sprees (known
   mod-playerbots behavior) - the ritual brings them ONLINE, not back to work.
-- director.py daemon (Leo's brain) is still manual after reboots; it can get
-  the same treatment later as leo-director.service.
+- director.py daemon (Leo's brain) runs as leo-director.service (see below).
+
+## The director daemon (leo-director.service)
+
+The daemon under systemd too - pinned working directory, log always at
+downloads/director-drop/daemon.log, restarts itself, starts at boot.
+
+Install:
+
+1. pkill -f 'director.py daemon'          # stop the manual daemon
+2. ln -sf $HOME/downloads/director-drop/leo/leo-director.service $HOME/.config/systemd/user/leo-director.service
+3. systemctl --user daemon-reload && systemctl --user enable --now leo-director
+
+Receipts:
+
+- systemctl --user status leo-director
+- journalctl --user -n 30 -u leo-director        # everything stdout says
+- tail -n 30 $HOME/downloads/director-drop/daemon.log
+
+The watchdog only manages leo.service (the shell). leo-director always runs;
+it is harmless when Leo is offline (its tail -F just waits for the log).
