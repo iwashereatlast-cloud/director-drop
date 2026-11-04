@@ -1,0 +1,12 @@
+[Unit]
+Description=Leo headless world session (Chazbot)
+After=network-online.target
+
+[Service]
+ExecStartPre=/bin/bash -c 'test -p /tmp/leo.in || mkfifo /tmp/leo.in'
+ExecStart=/bin/bash -c 'tail -f /tmp/leo.in | %h/downloads/headless/.venv/bin/python %h/downloads/headless/shell.py >> /tmp/leo.log 2>&1'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
