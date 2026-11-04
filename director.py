@@ -19,7 +19,10 @@ PLUS members of the watched guild (DIRECTOR_GUILD) who are NOT on a bot account
 - bot-account toons never get auth, because their automatic "Using X"
 master-report whispers would be answered by the LLM and ping-pong with the bot
 AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
-require the word 'leo' in the line. Validated orders execute immediately (set
+require the word 'leo' in the line. A sender currently logged in AS A BOT is
+always dropped (SOAP .playerbots inspect; fail-open without SOAP) - RP
+chatter must never reach the LLM or the two layers talk to each other.
+Validated orders execute immediately (set
 DIRECTOR_CONFIRM=1 to restore the whisper-'go' confirm step). Run daemon with
 python3 -u for live logs.
 """
@@ -579,6 +582,24 @@ GO_WORDS = ("go", "do it", "confirm", "confirmed", "execute", "approved", "appro
 SKIP_WORDS = ("skip", "no", "cancel", "abort", "discard", "negative", "belay that")
 
 
+_bot_check_cache = {}  # sender -> (checked_at, is_online_bot)
+
+
+def _is_online_bot(name):
+    """True if <name> is currently logged in AS A BOT, via SOAP
+    '.playerbots inspect'. Cached 5 min per name. Any SOAP failure returns
+    False (fail-open: the whisper is processed as before)."""
+    now = time.time()
+    key = name.lower()
+    hit = _bot_check_cache.get(key)
+    if hit and now - hit[0] < 300:
+        return hit[1]
+    ok, txt = soap_command(".playerbots inspect " + name)
+    is_bot = bool(ok) and "not an online bot" not in txt.lower()
+    _bot_check_cache[key] = (now, is_bot)
+    return is_bot
+
+
 def daemon():
     # single-instance guard: a second daemon would double-answer every whisper
     lock_fd = os.open(os.path.join(HERE, "daemon.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
@@ -609,6 +630,15 @@ def daemon():
                 if sender in ("Leo", "System") or not text:
                     continue
                 if sender.lower() not in authed:
+                    continue
+                if _is_online_bot(sender):
+                    # mod-ollama-chat RP chatter: roster bots whisper Leo like
+                    # players do. Bots never get LLM treatment even when the
+                    # toon name is authed (G1 bots share the master account) -
+                    # answering them made the two LLM layers talk to each
+                    # other and starved Ollama (empty replies), and auto-
+                    # execute even ran orders extracted from flavor text.
+                    print("daemon: [%s] (%s): dropped - sender is an online bot" % (sender, channel))
                     continue
                 if channel == "guild" and "leo" not in text.lower():
                     continue
