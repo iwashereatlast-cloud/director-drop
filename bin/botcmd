@@ -52,7 +52,8 @@ botcmd - Chazbot control
   botcmd states presets               built-in strategy presets (+ zone recipes)
   botcmd states bots                  pick a bot (paginated) -> set its default state
   botcmd states zones [level]         vanilla level->zone table (for go travel)
-  botcmd states setall <preset>       set EVERY alt bot's conf to one preset + apply online (grind|quest|gather|follow|idle)
+  botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|follow|idle)
+  botcmd states verify [bot|all]      Leo whispers 'rpg status' to online bots; tabulates conf vs live reply
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd watchdog procs               duplicate-process audit (daemons, leo shell, menu lock)
   botcmd system worldserver           ac-worldserver check
@@ -186,6 +187,7 @@ case "${1:-}" in
       bots) locked states_pick_and_set ;;
       zones) states_zones "${3:-}" ;;
       setall) states_setall "${3:-}" ;;
+      verify) states_verify "${3:-all}" ;;
       apply) states_apply "${3:-all}" ;;
       edit) states_edit ;;
       presets) states_presets ;;

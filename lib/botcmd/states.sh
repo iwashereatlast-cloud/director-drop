@@ -36,12 +36,15 @@ state_expand() {  # $1 = conf value
   esac
 }
 
-# NOTE: there is NO read-only way to see a bot's LIVE strategy set:
+# NOTE: the full LIVE strategy set (nc +/-) has no read-only view:
 # '.playerbots inspect' does not exist in mod-playerbots @ e88cc40 and
 # '.playerbots bot <name> ...' is Console::No (needs an active in-game session),
 # so SOAP cannot run it either. The old _states_inspect() called a nonexistent
-# command AND duplicated the SOAP envelope code - removed. states_show shows
-# your conf; verify live behavior in the chat log (botcmd leo chat 40).
+# command AND duplicated the SOAP envelope code - removed. BUT the rpg status
+# IS readable: '/w <bot> rpg status' (no args) whispers back
+# NewRpgInfo::ToString() -> "Status: GO_GRIND / DO_QUEST / DO_GATHER / IDLE ..."
+# (source: src/Ai/World/Rpg/Action/NewRpgAction.cpp TellRpgStatusAction::Execute).
+# states_verify() uses exactly that to read back what each bot is doing.
 
 _states_conf_entries() {  # prints "name<TAB>value" per conf line
   [ -r "$BOTCMD_STATES_CONF" ] || return 1
@@ -74,7 +77,7 @@ states_show() {
   rm -f /tmp/.botcmd-entries.$$
   echo
   warn "purity rule: states are sent by YOU (apply), never auto-applied on login"
-  warn "no read-only live-strategy view exists (.playerbots bot is in-game only) - verify live in: botcmd leo chat 40"
+  warn "full nc strategy set has no read-only view - read back the rpg status with: botcmd states verify"
 }
 
 states_apply() {  # $1 = bot name or "all" (default)
@@ -107,7 +110,12 @@ states_apply() {  # $1 = bot name or "all" (default)
   rm -f /tmp/.botcmd-apply.$$
   echo
   okmsg "states pushed to $applied bot(s), $skipped skipped (offline)"
-  warn "bots answer strategy changes in chat - check: botcmd leo chat 40"
+  if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
+    echo
+    states_verify all
+  else
+    warn "bots answer strategy changes in chat - botcmd leo chat 40  (or read back: botcmd states verify $target)"
+  fi
 }
 
 states_edit() {
@@ -263,14 +271,134 @@ EOF
   echo "rpg grind/quest/gather scans near the bot, so go travel <zone> FIRST, then the rpg order."
 }
 
-# set EVERY watched alt bot's conf to one preset, then apply to online bots
-states_setall() {  # $1 = grind|quest|gather|follow|idle
+# preset picker for setall - same [x] style as states_set_bot. The box is
+# ticked when EVERY watched bot currently has that same conf state.
+# Menu goes to stderr; only the chosen preset is printed on stdout (rc 1 = back).
+states_pick_preset() {
+  local presets=(grind quest gather follow idle) c i p vals nbots uniq_n uniform=""
+  nbots=$(_states_all_bots | wc -l)
+  vals=$(_states_all_bots | while IFS=$'\t' read -r n _ _ _; do _states_conf_get "$n"; done)
+  uniq_n=$(printf '%s\n' "$vals" | grep -v '^$' | sort -u | wc -l)
+  if [ "$uniq_n" = "1" ] && [ "$(printf '%s\n' "$vals" | grep -cv '^$')" = "$nbots" ] && [ "$nbots" -gt 0 ]; then
+    uniform=$(printf '%s\n' "$vals" | grep -v '^$' | head -n 1)
+  fi
+  while :; do
+    clear 2>/dev/null || :
+    hdr "Set ALL bots to one state ($nbots watched bots)" >&2
+    if [ -n "$uniform" ]; then
+      printf 'all bots currently have conf state: %s\n\n' "$uniform" >&2
+    else
+      printf '(bots currently have mixed or no conf states)\n\n' >&2
+    fi
+    i=0
+    for p in "${presets[@]}"; do
+      i=$((i + 1))
+      if [ "$uniform" = "$p" ]; then printf '[x] %d. %s\n' "$i" "$p" >&2
+      else printf '[ ] %d. %s\n' "$i" "$p" >&2; fi
+    done
+    printf '%s\n' "    blank Enter = back" >&2
+    printf '%s' "choice: " >&2; IFS= read -r c
+    case "$c" in
+      ""|b|back) return 1 ;;
+      1|2|3|4|5) printf '%s' "${presets[$((c - 1))]}"; return 0 ;;
+      *) warn "invalid choice" >&2 ;;
+    esac
+  done
+}
+
+# Read-back verification: Leo whispers 'rpg status' to each online target bot
+# (via the FIFO, exactly like an order), then we collect the "[Name] [whisper]:
+# Status: X" replies from the shell log and tabulate conf vs live status.
+# Source-verified: 'rpg status' with no args whispers back NewRpgInfo::ToString().
+states_verify() {  # $1 = bot name or "all" (default all online watched bots)
+  local target="${1:-all}" log="$BOTCMD_SHELL_LOG" start n online
+  hdr "Verify live states (Leo whispers 'rpg status' to online bots, reads replies)"
+  if [ ! -r "$log" ]; then
+    errmsg "no $log - is the Leo shell up? (botcmd leo status)"
+    return 1
+  fi
+  local -a targets=()
+  if [ "$target" = "all" ]; then
+    while IFS=$'\t' read -r n _ online _; do
+      [ "$online" = "1" ] && targets+=("$n")
+    done < <(_states_all_bots)
+  else
+    case "$target" in
+      *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; return 1 ;;
+    esac
+    if is_handplay "$target"; then
+      errmsg "REFUSED: $target is hand-play (G1) - never commanded"; return 1
+    fi
+    online=$(_states_online "$target")
+    if [ "$online" != "1" ]; then warn "$target is not online - nothing to verify"; return 1; fi
+    targets+=("$target")
+  fi
+  if [ "${#targets[@]}" -eq 0 ]; then
+    warn "no online watched bots to verify right now"
+    return 1
+  fi
+  start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
+  for n in "${targets[@]}"; do
+    game_send "/w $n rpg status" && sleep 1
+  done
+  local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 new line who st all
+  declare -A reply=()
+  okmsg "asked ${#targets[@]} bot(s) for 'rpg status' - collecting replies (up to ${max}s)..."
+  while [ "$waited" -lt "$max" ]; do
+    new=$(tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: Status: [A-Z_]*' || true)
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      who=$(printf '%s' "$line" | sed 's/^\[\([A-Za-z]*\)\].*/\1/')
+      st=$(printf '%s' "$line" | sed 's/.*Status: //')
+      reply[$who]="$st"
+    done <<< "$new"
+    all=1
+    for n in "${targets[@]}"; do [ -n "${reply[$n]:-}" ] || all=0; done
+    [ "$all" = "1" ] && break
+    sleep 1; waited=$((waited + 1))
+  done
+  echo
+  printf '%-12s %-8s %-14s %s\n' "BOT" "CONF" "LIVE(rpg)" "VERDICT"
+  local conf st verdict exp
+  for n in "${targets[@]}"; do
+    conf=$(_states_conf_get "$n"); [ -n "$conf" ] || conf="-"
+    st=${reply[$n]:-}
+    if [ -z "$st" ]; then
+      st="-"; verdict="NO REPLY (offline? shell down?)"
+    else
+      case "$conf" in
+        grind)  exp="GO_GRIND" ;;
+        quest)  exp="DO_QUEST" ;;
+        gather) exp="DO_GATHER" ;;
+        idle)   exp="IDLE" ;;
+        *)      exp="" ;;
+      esac
+      if [ -z "$exp" ]; then
+        verdict="custom/follow conf - reply shown"
+      elif printf '%s' "$st" | grep -q "$exp"; then
+        verdict="OK ($exp)"
+      else
+        verdict="MISMATCH (want $exp)"
+      fi
+    fi
+    printf '%-12s %-8s %-14s %s\n' "$n" "$conf" "$st" "$verdict"
+  done
+  echo
+  warn "full reply text: botcmd leo chat 60   (daemon.log also logs these replies as dropped bot-sender lines - expected)"
+}
+
+# set EVERY watched alt bot's conf to one preset, then apply (which verifies).
+# $1 = optional preset; no arg -> interactive [x] picker (states_pick_preset).
+states_setall() {  # $1 = grind|quest|gather|follow|idle (optional)
   local preset="${1:-}" n count=0
+  if [ -z "$preset" ]; then
+    preset=$(states_pick_preset) || { warn "cancelled - nothing written"; return 0; }
+  fi
   case "$preset" in
     grind|quest|gather|follow|idle) ;;
-    *) errmsg "usage: botcmd states setall <grind|quest|gather|follow|idle>"; return 1 ;;
+    *) errmsg "usage: botcmd states setall [grind|quest|gather|follow|idle]   (no arg = [x] picker)"; return 1 ;;
   esac
-  hdr "Set ALL alt bots to '$preset' (conf + apply online)"
+  hdr "Set ALL alt bots to '$preset' (conf + apply online + verify)"
   while IFS=$'\t' read -r n _ _ _; do
     if _states_conf_set "$n" "$preset"; then count=$((count + 1)); fi
   done < <(_states_all_bots)
@@ -287,24 +415,26 @@ states_menu() {
     cat <<'EOF'
  1. States table (conf + online)
  2. Pick a bot -> set its default state   (paginated, [x] = current)
- 3. Set ALL bots to ONE state (writes conf + applies online)
- 4. Apply ALL states from conf (online bots only)
+ 3. Set ALL bots to ONE state   ([x] picker; conf + apply + verify)
+ 4. Apply ALL states from conf (online bots only, then verify)
  5. Apply ONE bot's state
  6. Edit states conf
  7. Show presets + level->zone table
- 8. Return to main menu   (blank Enter = back)
+ 8. Verify live states now (Leo whispers 'rpg status' to online bots)
+ 9. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
       ""|b|back) return 0 ;;
       1) states_show; pause ;;
       2) states_pick_and_set; pause ;;
-      3) printf '%s' "preset (grind|quest|gather|follow|idle): "; IFS= read -r n; states_setall "$n"; pause ;;
+      3) states_setall; pause ;;
       4) states_apply all; pause ;;
       5) printf '%s' "bot name: "; IFS= read -r n; states_apply "$n"; pause ;;
       6) states_edit ;;
       7) states_presets; echo; states_zones; pause ;;
-      8) return 0 ;;
+      8) states_verify all; pause ;;
+      9) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

@@ -200,9 +200,18 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   whitelist/roster instead of improvising (ORDER_RULES).
 - Master screen quits on Q (blank Enter is "back" in every submenu; at the
   master screen Enter just redraws, so you can spam Enter safely).
-- `botcmd states setall <preset>` (or States menu -> 3) writes one preset
+- `botcmd states setall [preset]` (or States menu -> 3) writes one preset
   (grind|quest|gather|follow|idle) into the conf for EVERY watched alt bot
-  (G1 and Leo excluded) and applies it to all online bots in one go.
+  (G1 and Leo excluded) and applies it to all online bots in one go. With no
+  argument it opens a `[x]` picker in the same style as the per-bot state menu
+  (the box is ticked when every watched bot currently has that same state).
+- After a set-all / apply-all, Leo automatically whispers each online bot
+  `rpg status` and botcmd tabulates the replies (`botcmd states verify
+  [bot|all]`, States menu -> 8): conf vs live `Status: GO_GRIND / DO_QUEST /
+  DO_GATHER / IDLE ...` with OK / MISMATCH / NO REPLY per bot. Source-verified:
+  `rpg status` with no args whispers back `NewRpgInfo::ToString()`
+  (NewRpgAction.cpp, TellRpgStatusAction). The full nc strategy set itself has
+  no read-only view (`.playerbots bot` is in-game only).
 - Leo can broadcast too: /w Leo "send everyone to Barrens to grind" -> the
   order {"bot":"ALL","cmd":"go travel Barrens"} is expanded by the daemon to
   one validated order per unit (never hand-play, never Leo). The daemon now
