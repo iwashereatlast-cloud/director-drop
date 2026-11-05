@@ -1,5 +1,24 @@
-# System checks: worldserver, SOAP gate, RO DB grants.
-# All read-only. The SOAP envelope mirrors director.py soap_command exactly.
+# System checks: worldserver, SOAP gate, RO DB grants, remote console.
+# The SOAP envelope mirrors director.py soap_command exactly.
+
+# run one console command via SOAP; prints "code" line then stripped text.
+# fails (returns 1, prints nothing) when the gate is not armed.
+_soap_run() {  # $1 = console command
+  local url user pass cmdxml envelope resp code body
+  [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ] || return 1
+  url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
+  user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
+  pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
+  cmdxml=$(printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g')
+  envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>'"$cmdxml"'</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
+  resp=$(curl -s --max-time 10 -u "$user:$pass" \
+    -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
+    -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null) || { echo "000"; return 0; }
+  code=$(printf '%s' "$resp" | tail -n 1)
+  body=$(printf '%s' "$resp" | sed '$d')
+  printf '%s\n' "$code"
+  printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | sed 's/^ *//'
+}
 
 system_worldserver() {
   hdr "worldserver (system unit)"
@@ -11,23 +30,11 @@ system_worldserver() {
 }
 
 system_soap_status() {
-  hdr "SOAP gate (bot-sender filter + live .pinfo)"
-  local url user pass
-  if [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ]; then
-    url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
-    user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
-    pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
-    okmsg "armed: $url (user $user, perms $(stat -c '%a' "$BOTCMD_SOAP_CONF"))"
-    echo
-    warn "live test: .server info via SOAP..."
-    local envelope resp code body text
-    envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>.server info</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
-    resp=$(curl -s --max-time 10 -u "$user:$pass" \
-      -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
-      -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null || true)
-    code=$(printf '%s' "$resp" | tail -n 1)
-    body=$(printf '%s' "$resp" | sed '$d')
-    text=$(printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | head -c 300)
+  hdr "SOAP gate (bot-sender filter + live .pinfo + remote console)"
+  local out code text
+  if out=$(_soap_run ".server info"); then
+    code=$(printf '%s\n' "$out" | head -n 1)
+    text=$(printf '%s\n' "$out" | tail -n +2 | head -c 300)
     case "$code" in
       200)
         if [ -n "$(printf '%s' "$text" | tr -d ' ')" ]; then
@@ -44,7 +51,7 @@ system_soap_status() {
         errmsg "HTTP 403: account authenticated but gmlevel below Administrator"
         warn "  needs gmlevel 3 on the account (acore_auth.account_access)" ;;
       000|"")
-        errmsg "no response (connection failed/timeout) - is worldserver up and listening on $url?" ;;
+        errmsg "no response (connection failed/timeout) - is worldserver up and listening?" ;;
       *)
         errmsg "HTTP $code - unexpected response:"
         echo "$text" ;;
@@ -53,6 +60,23 @@ system_soap_status() {
     warn "NOT armed: $BOTCMD_SOAP_CONF missing or short"
     errmsg "the director's bot-sender gate is INERT (fail-open) without it"
     echo "arm it from the menu (System -> arm SOAP) or: botcmd system arm"
+  fi
+}
+
+# arbitrary worldserver console command via the SOAP gate
+system_cmd() {  # $1 = console command
+  local out code
+  hdr "SOAP console: $1"
+  if out=$(_soap_run "$1"); then
+    code=$(printf '%s\n' "$out" | head -n 1)
+    case "$code" in
+      200) okmsg "HTTP 200:"; printf '%s\n' "$out" | tail -n +2 ;;
+      401) errmsg "401 - credentials rejected (re-arm: botcmd system arm)" ;;
+      403) errmsg "403 - gmlevel below Administrator" ;;
+      *)   errmsg "HTTP $code:"; printf '%s\n' "$out" | tail -n +2 ;;
+    esac
+  else
+    errmsg "SOAP not armed (botcmd system arm)"
   fi
 }
 
@@ -87,16 +111,17 @@ system_grants() {
 }
 
 system_menu() {
-  local c
+  local c cmd
   while :; do
     clear 2>/dev/null || :
-    hdr "System (worldserver / SOAP / DB)"
+    hdr "System (worldserver / SOAP / DB / console)"
     cat <<'EOF'
  1. worldserver status
  2. SOAP gate: status + live test
  3. Arm SOAP gate
  4. RO DB grants
- 5. Return to main menu
+ 5. Run a console command via SOAP
+ 6. Return to main menu
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -104,7 +129,9 @@ EOF
       2) system_soap_status; pause ;;
       3) system_soap_arm; pause ;;
       4) system_grants; pause ;;
-      5) return 0 ;;
+      5) printf '%s' "console command: "; IFS= read -r cmd
+         [ -n "$cmd" ] && system_cmd "$cmd"; pause ;;
+      6) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

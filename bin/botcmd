@@ -37,6 +37,7 @@ botcmd - Chazbot control
   botcmd director restart|status      LLM daemon
   botcmd director log [N]             last N lines of daemon.log
   botcmd director deploy              git pull + compile check + restart
+  botcmd director commands            Leo's command list (parsed live)
   botcmd roster census                live who's-online (read-only DB)
   botcmd roster ritual                summon full roster (G1-safe)
   botcmd roster add <toon>            bring one bot online (hand-play refused)
@@ -49,6 +50,7 @@ botcmd - Chazbot control
   botcmd system worldserver           ac-worldserver check
   botcmd system soap                  SOAP gate status + live test
   botcmd system arm                   write ~/.soap-director (hidden prompts)
+  botcmd system cmd '<console cmd>'   run a worldserver console command via SOAP
   botcmd system grants                RO identity SHOW GRANTS
 
 Config overrides: ~/.botcmd.conf (see lib/botcmd/common.sh header).
@@ -91,7 +93,7 @@ main_menu() {
  3. Roster     (census / summon ritual / add / remove bots)
  4. States     (who does what: per-bot strategies / layout / apply)
  5. Watchdog   (presence policy: timer / journal / conf)
- 6. System     (worldserver / SOAP gate / DB grants)
+ 6. System     (worldserver / SOAP gate / DB / console)
  7. Full launch (ordered boot ritual: everything up, one button)
  8. Dashboard  (all units + census at a glance)
  0. Exit
@@ -131,6 +133,7 @@ case "${1:-}" in
       status) director_status ;;
       log) director_log "${3:-40}" ;;
       deploy) director_deploy ;;
+      commands) director_commands ;;
       *) usage; exit 1 ;;
     esac ;;
   roster)
@@ -161,6 +164,7 @@ case "${1:-}" in
       worldserver) system_worldserver ;;
       soap) system_soap_status ;;
       arm) system_soap_arm ;;
+      cmd) system_cmd "${3:-}" ;;
       grants) system_grants ;;
       *) usage; exit 1 ;;
     esac ;;
