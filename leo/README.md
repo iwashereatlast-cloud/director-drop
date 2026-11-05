@@ -53,6 +53,12 @@ RITUAL_BOTS="Golbez"
   same grants director.py uses, no new credentials.
 - Re-added bots likely need nc strategy re-issue during sprees (known
   mod-playerbots behavior) - the ritual brings them ONLINE, not back to work.
+- `bot addaccount` / `bot add` SKIP toons that are already online
+  ("player already logged in" - PlayerbotMgr.cpp ProcessBotCommand); bot AI
+  is only attached on a fresh login. `botcmd roster ritual` therefore prints
+  the toons currently ONLINE and warns: log them out first, then re-run the
+  ritual. Until a toon has bot AI it will never answer `/w <toon> rpg status`
+  (`botcmd states verify` shows NO REPLY for it).
 - director.py daemon (Leo's brain) runs as leo-director.service (see below).
 - Bot-sender gate (2026-11-05 fix): senders on bot accounts (i_was_here% except
   the master account) or on Leo's shell account (i_was_cmd) are dropped by a

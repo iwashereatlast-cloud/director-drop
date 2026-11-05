@@ -14,11 +14,29 @@ roster_census() {
   echo "hand-play five (G1, never bots): $BOTCMD_HANDPLAY"
 }
 
+# online watched bot toons, one per line (minus G1 minus Leo's shell account).
+# 'bot addaccount' / 'bot add' SKIP online toons ("player already logged in",
+# PlayerbotMgr.cpp ProcessBotCommand) - bot AI is only attached on a fresh
+# login, so the ritual cannot fix a toon that is already online as a plain
+# character. Such toons never answer '/w <toon> rpg status' (verify: NO REPLY).
+_roster_online_watched() {
+  local from="FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid"
+  local where="WHERE (a.username LIKE '$BOTCMD_ACCOUNT_LIKE' OR gm.guildid IN (SELECT guildid FROM acore_characters.guild WHERE name='$BOTCMD_WATCH_GUILD')) AND a.username NOT LIKE '${BOTCMD_SHELL_ACCOUNT}%' AND c.online=1"
+  db_ro -N -B -e "SELECT c.name $from $where ORDER BY c.name" 2>/dev/null \
+    | awk -v hp="$BOTCMD_HANDPLAY" 'BEGIN{n=split(hp,a," "); for(i=1;i<=n;i++) e[tolower(a[i])]=1} !e[tolower($1)] {print}'
+}
+
 roster_ritual() {
   hdr "Summon full roster (ritual)"
   warn "G1 baked in: accounts $BOTCMD_RITUAL_ACCOUNTS"
   warn "             plus bots: $BOTCMD_RITUAL_BOTS - account I_WAS_HERE1ST is never touched"
-  local a b
+  local a b on
+  on=$(_roster_online_watched)
+  if [ -n "$on" ]; then
+    warn "ONLINE right now - addaccount SKIPS online toons ('player already logged in'):"
+    warn "  $(printf '%s ' $on)"
+    warn "log those toons out first, then re-run the ritual - until they have bot AI they never answer /w"
+  fi
   for a in $BOTCMD_RITUAL_ACCOUNTS; do
     if game_send ".playerbots bot addaccount $a"; then okmsg "queued: addaccount $a"; sleep 1; fi
   done
@@ -31,6 +49,11 @@ roster_ritual() {
 roster_add() {  # $1 = toon name
   local name="${1:-}"
   [ -z "$name" ] && { errmsg "usage: botcmd roster add <name>"; return 1; }
+  case "$name" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$name' rejected"; return 1 ;; esac
+  if [ "$(db_ro -N -B -e "SELECT online FROM acore_characters.characters WHERE name='$name'" 2>/dev/null | head -n 1)" = "1" ]; then
+    warn "$name is ONLINE - 'bot add' is refused for online toons ('player already logged in');"
+    warn "log the toon out first; bot AI attaches on the fresh login via add/addaccount"
+  fi
   if is_handplay "$name"; then
     errmsg "REFUSED: $name is hand-play (G1) - never brought online as a bot."
     warn "   if $name is wrongly online as a bot, use REMOVE to stand them down"
@@ -42,12 +65,14 @@ roster_add() {  # $1 = toon name
 roster_remove() {  # $1 = toon name (allowed even for hand-play - remediation)
   local name="${1:-}"
   [ -z "$name" ] && { errmsg "usage: botcmd roster remove <name>"; return 1; }
+  case "$name" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$name' rejected"; return 1 ;; esac
   game_send ".playerbots bot remove $name" && okmsg "queued: bot remove $name"
 }
 
 roster_go() {  # botcmd go <toon> <zone words...> -> /w <toon> go travel <zone>
   local name="${1:-}"
   [ $# -ge 2 ] || { errmsg "usage: botcmd go <toon> <zone...>   e.g.: botcmd go Gau Westfall"; return 1; }
+  case "$name" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$name' rejected"; return 1 ;; esac
   if is_handplay "$name"; then errmsg "REFUSED: $name is hand-play (G1) - never commanded"; return 1; fi
   shift
   local zone="$*"
