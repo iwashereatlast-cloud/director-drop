@@ -183,7 +183,7 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
 - Menus: blank Enter (or `b`/`back`) = up one screen, everywhere.
 - States -> "Pick a bot -> set its default state": paginated list of every
   watched alt bot (bot accounts + watched guild, minus G1 hand-play minus Leo),
-  10 per page - keys `1-9,0` pick, `n`/`p` change page, or type a toon name.
+  10 per page - keys `1-9` or `10+` pick a slot on the page, `0`/`n` next page, `p` prev, blank = back, or type a toon name (G1 names get a specific refusal).
   The state menu shows `[x]` on the bot's current conf state; picking a preset
   writes `Name: preset` into ~/.botcmd-states.conf (apply with `botcmd states apply`).
 - Zone travel (verified vs mod-playerbots @ e88cc40): `go travel <zone>` matches

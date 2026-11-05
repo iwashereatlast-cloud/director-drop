@@ -156,7 +156,7 @@ states_pick_bot() {
   pages=$(( (total + pagesize - 1) / pagesize ))
   while :; do
     clear 2>/dev/null || :
-    hdr "Pick a bot - page $((page + 1))/$pages, $total bots  (blank=back, n=next page, p=prev page, or type a name)" >&2
+    hdr "Pick a bot - page $((page + 1))/$pages, $total bots  (1-9 or 10+ = slot on this page, 0 or n = next page, p = prev, blank = back, or type a name)" >&2
     i=$((page * pagesize)); slot=1
     while [ "$i" -lt "$total" ] && [ "$slot" -le "$pagesize" ]; do
       IFS=$'\t' read -r name lvl onl acct <<< "${rows[$i]}"
@@ -170,21 +170,37 @@ states_pick_bot() {
       ""|b|back) return 1 ;;
       n) [ $((page + 1)) -lt "$pages" ] && page=$((page + 1)) ;;
       p) [ "$page" -gt 0 ] && page=$((page - 1)) ;;
-      [0-9])
-        slot=$(( c == 0 ? 10 : c ))
-        i=$((page * pagesize + slot - 1))
-        if [ "$i" -lt "$total" ]; then
-          IFS=$'\t' read -r name _ _ _ <<< "${rows[$i]}"
-          printf '%s' "$name"; return 0
-        fi
-        warn "no bot on slot $slot this page" >&2 ;;
+      [0-9]|[0-9][0-9]|[0-9][0-9][0-9])
+        if [ "$c" = "0" ]; then
+          # 0 = next page
+          if [ $((page + 1)) -lt "$pages" ]; then
+            page=$((page + 1))
+          else
+            warn "already on the last page ($pages/$pages)" >&2; sleep 1
+          fi
+        else
+          # multi-digit number = slot on THIS page (10 = 10th entry)
+          slot=$c
+          i=$((page * pagesize + slot - 1))
+          if [ "$i" -lt "$total" ]; then
+            IFS=$'\t' read -r name _ _ _ <<< "${rows[$i]}"
+            printf '%s' "$name"; return 0
+          fi
+          warn "no bot on slot $slot this page" >&2
+        fi ;;
       *)
-        local canon
-        canon=$(printf '%s\n' "${rows[@]}" | awk -F'\t' -v n="$c" 'tolower($1)==tolower(n){print $1; exit}')
-        if [ -n "$canon" ]; then
-          printf '%s' "$canon"; return 0
-        fi
-        errmsg "'$c' is not a watched alt bot (or is G1)" >&2; sleep 1 ;;
+        case "$c" in *[!A-Za-z0-9]*)
+          errmsg "toon names are letters/digits only - '$c' rejected" >&2; sleep 1; continue ;; esac
+        if is_handplay "$c"; then
+          errmsg "'$c' is G1 hand-play ($BOTCMD_HANDPLAY) - states are never set on them" >&2; sleep 1
+        else
+          local canon
+          canon=$(printf '%s\n' "${rows[@]}" | awk -F'\t' -v n="$c" 'tolower($1)==tolower(n){print $1; exit}')
+          if [ -n "$canon" ]; then
+            printf '%s' "$canon"; return 0
+          fi
+          errmsg "'$c' is not a watched alt bot (accounts like '$BOTCMD_ACCOUNT_LIKE' + guild '$BOTCMD_WATCH_GUILD', minus G1, minus Leo)" >&2; sleep 1
+        fi ;;
     esac
   done
 }
