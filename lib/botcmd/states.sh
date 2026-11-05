@@ -263,6 +263,22 @@ EOF
   echo "rpg grind/quest/gather scans near the bot, so go travel <zone> FIRST, then the rpg order."
 }
 
+# set EVERY watched alt bot's conf to one preset, then apply to online bots
+states_setall() {  # $1 = grind|quest|gather|follow|idle
+  local preset="${1:-}" n count=0
+  case "$preset" in
+    grind|quest|gather|follow|idle) ;;
+    *) errmsg "usage: botcmd states setall <grind|quest|gather|follow|idle>"; return 1 ;;
+  esac
+  hdr "Set ALL alt bots to '$preset' (conf + apply online)"
+  while IFS=$'\t' read -r n _ _ _; do
+    if _states_conf_set "$n" "$preset"; then count=$((count + 1)); fi
+  done < <(_states_all_bots)
+  okmsg "conf written: $count bot(s) -> $preset   (G1 hand-play and Leo are never in the list)"
+  echo
+  states_apply all
+}
+
 states_menu() {
   local c n
   while :; do
@@ -271,22 +287,24 @@ states_menu() {
     cat <<'EOF'
  1. States table (conf + online)
  2. Pick a bot -> set its default state   (paginated, [x] = current)
- 3. Apply ALL states (online bots only)
- 4. Apply ONE bot's state
- 5. Edit states conf
- 6. Show presets + level->zone table
- 7. Return to main menu   (blank Enter = back)
+ 3. Set ALL bots to ONE state (writes conf + applies online)
+ 4. Apply ALL states from conf (online bots only)
+ 5. Apply ONE bot's state
+ 6. Edit states conf
+ 7. Show presets + level->zone table
+ 8. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
       ""|b|back) return 0 ;;
       1) states_show; pause ;;
       2) states_pick_and_set; pause ;;
-      3) states_apply all; pause ;;
-      4) printf '%s' "bot name: "; IFS= read -r n; states_apply "$n"; pause ;;
-      5) states_edit ;;
-      6) states_presets; echo; states_zones; pause ;;
-      7) return 0 ;;
+      3) printf '%s' "preset (grind|quest|gather|follow|idle): "; IFS= read -r n; states_setall "$n"; pause ;;
+      4) states_apply all; pause ;;
+      5) printf '%s' "bot name: "; IFS= read -r n; states_apply "$n"; pause ;;
+      6) states_edit ;;
+      7) states_presets; echo; states_zones; pause ;;
+      8) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

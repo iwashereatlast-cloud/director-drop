@@ -52,6 +52,7 @@ botcmd - Chazbot control
   botcmd states presets               built-in strategy presets (+ zone recipes)
   botcmd states bots                  pick a bot (paginated) -> set its default state
   botcmd states zones [level]         vanilla level->zone table (for go travel)
+  botcmd states setall <preset>       set EVERY alt bot's conf to one preset + apply online (grind|quest|gather|follow|idle)
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd system worldserver           ac-worldserver check
   botcmd system soap                  SOAP gate status + live test
@@ -106,7 +107,7 @@ main_menu() {
  7. Full launch (ordered boot ritual: everything up, one button)
  8. Dashboard  (all units + census at a glance)
  9. Master     (human account selector - rotate which account you play on)
- 0. Exit
+ Q. Quit       (blank Enter = back in submenus; here it just redraws)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -119,8 +120,8 @@ EOF
       7) launch; printf '%s' "press Enter... "; IFS= read -r _x ;;
       8) overall_status; printf '%s' "press Enter... "; IFS= read -r _x ;;
       9) master_menu ;;
-      ""|b|back) exit 0 ;;
-      0) exit 0 ;;
+      ""|b|back) warn "Q quits - Enter is 'back' in submenus" ;;
+      q|Q|0) exit 0 ;;
       *) warn "invalid choice" ;;
     esac
   done
@@ -166,6 +167,7 @@ case "${1:-}" in
       show) states_show ;;
       bots) states_pick_and_set ;;
       zones) states_zones "${3:-}" ;;
+      setall) states_setall "${3:-}" ;;
       apply) states_apply "${3:-all}" ;;
       edit) states_edit ;;
       presets) states_presets ;;

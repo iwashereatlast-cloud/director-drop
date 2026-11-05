@@ -182,6 +182,7 @@ Rules:
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
 - Zone travel: cmd "go travel <zone name>" walks a unit to a named zone (matched by name, case-insensitive; the engine level-filters destinations, and rpg grind/quest/gather scans units near the unit's position - send it to the zone FIRST, then the rpg order). Vanilla level brackets: 1-10 Elwynn/Dun Morogh/Teldrassil/Mulgore; 10-20 Westfall/Loch Modan/Darkshore/Barrens; 20-30 Redridge/Wetlands/Duskwood/Ashenvale/Silverpine/Hillsbrad; 30-40 Desolace/Arathi/Alterac/STV/Badlands/Dustwallow/Thousand Needles; 40-50 Tanaris/Feralas/Hinterlands/Swamp of Sorrows/Azshara; 50-60 WPL/EPL/Burning Steppes/Silithus/Winterspring/Un'Goro/Felwood.
+- Broadcast: use "bot": "ALL" to apply one cmd to EVERY watched unit at once (never hand-play toons, never Leo) - e.g. {"bot":"ALL","cmd":"nc +new rpg,+grind,-follow"} or {"bot":"ALL","cmd":"go travel Barrens"}. The system expands it to one order per unit and validates each individually.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
 - The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST)}
 
@@ -683,6 +684,8 @@ def validate(order, bots):
         order["bot"] = target
         order["cmd"] = "group remove"
         bot, cmd, low = target, "group remove", "group remove"
+    if bot.strip().lower() == "all":
+        return "SKIP: broadcast order was not expanded (internal error)"
     if any(low == f or low.startswith(f + " ") for f in FORBIDDEN):
         return "SKIP %s: FORBIDDEN command (purity rails - always refused): %r" % (bot, cmd)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
@@ -774,7 +777,27 @@ def _llm_fail_say(sender, e, channel):
         say(sender, "llm error: %s" % e, guild=(channel == "guild"))
 
 
+def expand_orders(orders, all_bots):
+    """bot:"ALL" -> one order per watched toon. Never HANDPLAY, never Leo's
+    shell account. Lets the LLM send one broadcast order instead of 25."""
+    shell_pfx = SHELL_ACCOUNT.lower().rstrip("%")
+    out = []
+    for o in orders:
+        if str(o.get("bot", "")).strip().lower() == "all":
+            cmd = str(o.get("cmd", ""))
+            for n in sorted(all_bots):
+                if n.lower() in HANDPLAY:
+                    continue
+                if all_bots[n].get("account", "").lower().startswith(shell_pfx):
+                    continue
+                out.append({"bot": n, "cmd": cmd})
+        else:
+            out.append(o)
+    return out
+
+
 def execute(orders, bots, pace, dry):
+    orders = expand_orders(orders, census(online_only=False))
     plan = []
     for o in orders:
         err = validate(o, bots)
@@ -960,7 +983,7 @@ def daemon():
                 low = text.lower().strip()
                 if CONFIRM and low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
-                    sent = execute(plan, census(), 2.0, dry=False)
+                    sent = execute(plan, census(), 1.0, dry=False)
                     if sent:
                         say(sender, "executed: " + "; ".join(order_line(o["bot"], o["cmd"]) for o in sent))
                     else:
@@ -1026,6 +1049,7 @@ def daemon():
                 orders = obj.get("orders") or []
                 sent, skips = [], []
                 if orders:
+                    orders = expand_orders(orders, census(online_only=False))
                     bots = census()
                     for o in orders:
                         err = validate(o, bots)
@@ -1040,7 +1064,7 @@ def daemon():
                         else:
                             # auto-execute: validation is the safety net, no ritual
                             for o in sent:
-                                send_line(order_line(str(o["bot"]), str(o["cmd"])), 2.0)
+                                send_line(order_line(str(o["bot"]), str(o["cmd"])), 1.0)
                             msg += " | executed: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
                 print("daemon -> %s: %s (turn %.1fs)" % (sender, msg, time.time() - t0))
                 if channel == "guild" and not sent and not (CONFIRM and sender in pending):

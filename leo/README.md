@@ -198,3 +198,13 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   (customize: DIRECTOR_ACK="a;b;c" in ~/.director.env; empty disables).
 - Leo says "I can't do that - <reason>" when a request is outside the
   whitelist/roster instead of improvising (ORDER_RULES).
+- Master screen quits on Q (blank Enter is "back" in every submenu; at the
+  master screen Enter just redraws, so you can spam Enter safely).
+- `botcmd states setall <preset>` (or States menu -> 3) writes one preset
+  (grind|quest|gather|follow|idle) into the conf for EVERY watched alt bot
+  (G1 and Leo excluded) and applies it to all online bots in one go.
+- Leo can broadcast too: /w Leo "send everyone to Barrens to grind" -> the
+  order {"bot":"ALL","cmd":"go travel Barrens"} is expanded by the daemon to
+  one validated order per unit (never hand-play, never Leo). The daemon now
+  paces orders at 1s instead of 2s, so a 25-bot broadcast no longer blocks
+  the whisper loop for ~50s.
