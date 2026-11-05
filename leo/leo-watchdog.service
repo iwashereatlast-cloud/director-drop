@@ -3,4 +3,4 @@ Description=Leo presence watchdog - one poll
 
 [Service]
 Type=oneshot
-ExecStart=%h/downloads/director-drop/leo/leo-watchdog.sh
+ExecStart=/bin/bash %h/downloads/director-drop/leo/leo-watchdog.sh
