@@ -492,6 +492,19 @@ def llm(messages):
         return json.loads(r.read())["message"]["content"]
 
 
+def llm_retry(messages):
+    """llm() with a single retry on empty output - some models occasionally
+    return '' (seen live 2026-11-05); an empty reply must not look like silence."""
+    reply = llm(messages)
+    if not reply.strip():
+        print("daemon: empty LLM reply from %s - retrying once" % MODEL)
+        messages.append({"role": "user",
+                         "content": "Output ONLY the JSON object now. Nothing else."})
+        reply = llm(messages)
+        messages.pop()
+    return reply
+
+
 def _extract_json(text):
     """First JSON object in text: a fenced ```json block wins; otherwise the
     first balanced {...} (string-aware, so braces inside strings don't count).
@@ -821,7 +834,7 @@ def daemon():
                     roster_msg = ("Live roster (name, account, level, map, status): "
                                   + roster_text(census(online_only=False)))
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
-                    reply = llm(conv)
+                    reply = llm_retry(conv)
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
                 except Exception as e:
                     conv.pop()
@@ -840,7 +853,7 @@ def daemon():
                                  "\nGive your final reply now, with orders if any. "
                                  "(Further queries this turn are ignored.)"})
                     try:
-                        reply = llm(conv)
+                        reply = llm_retry(conv)
                     except Exception as e:
                         conv.pop()
                         say(sender, "llm error: %s" % e, guild=(channel == "guild"))
