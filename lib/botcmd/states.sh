@@ -376,7 +376,7 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
     conf=$(_states_conf_get "$n"); [ -n "$conf" ] || conf="-"
     txt=${reply[$n]:-}
     if [ -z "$txt" ]; then
-      st="-"; verdict="NO REPLY (offline? bot AI off? shell down?)"
+      st="-"; verdict="NO REPLY (bot AI off / not added as a bot? shell down? - try: botcmd roster ritual)"
     else
       st=$(printf '%s' "$txt" | head -n 1 | cut -c1-40)
       case "$st" in Status:*) st=${st#Status: } ;; esac
@@ -411,7 +411,8 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
 states_setall() {  # $1 = grind|quest|gather|follow|idle (optional)
   local preset="${1:-}" n count=0
   if [ -z "$preset" ]; then
-    preset=$(states_pick_preset) || { warn "cancelled - nothing written"; return 0; }
+    preset=$(states_pick_preset) || { warn "cancelled - nothing written (blank Enter = back)"; return 0; }
+    okmsg "picker selected: $preset"
   fi
   case "$preset" in
     grind|quest|gather|follow|idle) ;;
