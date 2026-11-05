@@ -64,7 +64,7 @@ system_soap_arm() {
   fi
   printf '%s' "SOAP URL [http://127.0.0.1:7878/]: "; IFS= read -r url
   url="${url:-http://127.0.0.1:7878/}"
-  printf '%s' "game account (gmlevel >= Administrator, e.g. I_WAS_BANK): "; IFS= read -r user
+  printf '%s' "game account (gmlevel >= Administrator, e.g. i_was_cmd): "; IFS= read -r user
   if [ -z "$user" ]; then errmsg "no account given - aborted"; return 1; fi
   printf '%s' "password (input hidden): "; IFS= read -rs pass; echo
   if [ -z "$pass" ]; then errmsg "no password given - aborted"; return 1; fi
