@@ -80,6 +80,13 @@ CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
 # ^ daemon default: validated orders are HELD until the master whispers
 # 'go'/'skip'. DIRECTOR_CONFIRM=0 auto-executes immediately (not recommended:
 # validate() rails are then the only safety net).
+DEBUG = os.environ.get("DIRECTOR_DEBUG", "") in ("1", "yes", "on")
+# ^ DIRECTOR_DEBUG=1 dumps unmatched leo.log lines to daemon.log (log-format drift)
+MYSQL_TIMEOUT = float(os.environ.get("DIRECTOR_MYSQL_TIMEOUT", "20"))
+# ^ hard cap on every mysql subprocess call - the daemon loop is single-threaded,
+#   so a hung DB connection would otherwise freeze ALL whisper handling silently
+LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "120"))
+# ^ cap on the Ollama call; a cold/slow model can otherwise stall a turn for minutes
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
@@ -183,8 +190,11 @@ def census(online_only=True):
          " ORDER BY a.username, c.name;")
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)  # let the defaults file supply credentials
-    out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
-                         capture_output=True, text=True, env=env)
+    try:
+        out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
+                             capture_output=True, text=True, env=env, timeout=MYSQL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("mysql timed out after %ss (census) - DB hung?" % MYSQL_TIMEOUT)
     if out.returncode != 0:
         raise RuntimeError("census failed: " + out.stderr.strip())
     bots = {}
@@ -223,8 +233,11 @@ def masters():
          "AND a.username NOT LIKE '" + SHELL_ACCOUNT + "%');")
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)
-    out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
-                         capture_output=True, text=True, env=env)
+    try:
+        out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
+                             capture_output=True, text=True, env=env, timeout=MYSQL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("mysql timed out after %ss (masters) - DB hung?" % MYSQL_TIMEOUT)
     if out.returncode != 0:
         raise RuntimeError("masters failed: " + out.stderr.strip())
     return set(l.strip().lower() for l in out.stdout.strip().splitlines() if l.strip())
@@ -245,8 +258,11 @@ def masters():
 def _mysql(sql):
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)  # let the defaults file supply credentials
-    out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", sql],
-                         capture_output=True, text=True, env=env)
+    try:
+        out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", sql],
+                             capture_output=True, text=True, env=env, timeout=MYSQL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("mysql timed out after %ss - DB hung?" % MYSQL_TIMEOUT)
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip()[:200])
     return out.stdout.strip()
@@ -472,7 +488,7 @@ def llm(messages):
                        "options": {"temperature": 0.2}}).encode()
     req = urllib.request.Request(OLLAMA + "/api/chat", data=body,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as r:
+    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
         return json.loads(r.read())["message"]["content"]
 
 
@@ -576,8 +592,12 @@ def validate(order, bots):
 
 
 def send_line(line, pace):
-    subprocess.run(["timeout", "3", "bash", "-c",
+    r = subprocess.run(["timeout", "3", "bash", "-c",
                     'printf "%s\\n" "$1" > ' + FIFO, "_", line])
+    if r.returncode != 0:
+        # e.g. FIFO has no reader (leo shell down) - the message is LOST in-game
+        print("send_line FAILED rc=%d - not written to %s (no reader? leo shell down?): %r"
+              % (r.returncode, FIFO, line[:80]))
     with open(AUDIT, "a") as f:
         f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "SENT " + line + "\n")
     if pace:
@@ -718,6 +738,12 @@ def daemon():
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         sys.exit("another director.py daemon is already running (daemon.lock); not starting")
+    others = subprocess.run(["pgrep", "-f", "director.py daemon"],
+                            capture_output=True, text=True).stdout.split()
+    if others:
+        print("daemon: WARNING - pgrep also sees 'director.py daemon' pid(s) %s; if one is "
+              "stale, kill it - two daemons double-answer whispers (removing daemon.lock does "
+              "NOT release the old flock)" % ",".join(others))
     authed = masters()
     print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
     if CONFIRM:
@@ -743,11 +769,14 @@ def daemon():
             try:
                 m = LINE_RE.search(raw)
                 if not m:
+                    if DEBUG:
+                        print("daemon: unmatched log line: %r" % raw.rstrip())
                     continue
                 sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
                 if sender in ("Leo", "System") or not text:
                     continue
                 if sender.lower() not in authed:
+                    print("daemon: [%s] (%s): dropped - not an authed master" % (sender, channel))
                     continue
                 if _is_bot_sender(sender):
                     # bots whisper their master (Leo) their "Selling/Using X"
@@ -787,10 +816,13 @@ def daemon():
                 conv.extend(history)
                 conv.append({"role": "user", "content": text})
                 try:
+                    t0 = time.time()
+                    print("daemon: [%s] thinking (model %s)..." % (sender, MODEL))
                     roster_msg = ("Live roster (name, account, level, map, status): "
                                   + roster_text(census(online_only=False)))
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
                     reply = llm(conv)
+                    print("daemon: llm answered in %.1fs" % (time.time() - t0))
                 except Exception as e:
                     conv.pop()
                     say(sender, "llm error: %s" % e, guild=(channel == "guild"))
