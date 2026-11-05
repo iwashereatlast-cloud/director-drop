@@ -37,6 +37,7 @@ botcmd - Chazbot control
   botcmd leo chat [N|-f]              last N lines, or live follow with -f
   botcmd director restart|status      LLM daemon
   botcmd director log [N]             last N lines of daemon.log
+  botcmd director watch               live tail -f of daemon.log (Ctrl-C to stop)
   botcmd director deploy              git pull + compile check + restart
   botcmd director commands            Leo's command list (parsed live)
   botcmd roster census                live who's-online (read-only DB)
@@ -138,6 +139,7 @@ case "${1:-}" in
       restart) director_restart ;;
       status) director_status ;;
       log) director_log "${3:-40}" ;;
+      watch) tail -f "$BOTCMD_DIRECTOR_LOG" ;;
       deploy) director_deploy ;;
       commands) director_commands ;;
       *) usage; exit 1 ;;

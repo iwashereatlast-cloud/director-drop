@@ -95,7 +95,8 @@ director_menu() {
  3. Tail daemon.log (last 40 lines)
  4. Deploy update (git pull + compile check + restart)
  5. Leo's command list (what he can order)
- 6. Return to main menu
+ 6. Watch daemon.log LIVE (tail -f - Ctrl-C to stop)
+ 7. Return to main menu
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -104,7 +105,8 @@ EOF
       3) director_log 40; pause ;;
       4) director_deploy; pause ;;
       5) director_commands; pause ;;
-      6) return 0 ;;
+      6) tail -f "$BOTCMD_DIRECTOR_LOG" ;;
+      7) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

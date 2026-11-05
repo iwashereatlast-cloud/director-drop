@@ -851,6 +851,8 @@ def daemon():
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
                     reply = llm_retry(conv)
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
+                    if DEBUG:
+                        print("daemon: raw llm reply: %r" % reply[:800])
                 except Exception as e:
                     conv.pop()
                     if "timed out" in str(e).lower():
@@ -873,6 +875,8 @@ def daemon():
                                  "(Further queries this turn are ignored.)"})
                     try:
                         reply = llm_retry(conv)
+                        if DEBUG:
+                            print("daemon: raw llm reply (post-queries): %r" % reply[:800])
                     except Exception as e:
                         conv.pop()
                         if "timed out" in str(e).lower():
