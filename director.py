@@ -22,11 +22,12 @@ AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
 require the word 'leo' in the line. A sender currently logged in AS A BOT is
 always dropped (SOAP .playerbots inspect; fail-open without SOAP) - RP
 chatter must never reach the LLM or the two layers talk to each other.
-Validated orders execute immediately (set
-DIRECTOR_CONFIRM=1 to restore the whisper-'go' confirm step). Run daemon with
+Validated orders are HELD for a whisper-'go' confirm by default (set
+DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
 import argparse, base64, fcntl, html, json, os, re, subprocess, sys, time, urllib.error, urllib.request
+from xml.sax.saxutils import escape as _xml_escape
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -40,12 +41,14 @@ WATCH_GUILD = os.environ.get("DIRECTOR_GUILD", "Special FXc")
 # accounts). Add an alt bot to THIS guild and Leo watches it automatically;
 # every other guild on the server is ignored. Keep the name quote-free.
 HANDPLAY = set(n.strip().lower() for n in os.environ.get(
-    "DIRECTOR_HANDPLAY", "Cecil,Rydia,Shadow,Vivi,Aerith").split(",") if n.strip())
+    "DIRECTOR_HANDPLAY", "Cecil,Rydia,Shadow,Vivi,Aeris,Aerith").split(",") if n.strip())
 # ^ hand-play-only toons (the manual leveling group): Leo may report their
 # status but must NEVER order them or bring them online as bots - even though
 # they sit on bot accounts and appear in the census. Incident 2026-11-04:
 # RP chatter became "Aerith is offline. Bringing her online to perform
 # the craft" and auto-execute ran `bot add Aerith` (a G1 hard-rule violation).
+# BOTH Aeris and Aerith are listed until the DB spelling is verified:
+#   SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
 # ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
@@ -60,9 +63,10 @@ SOAPCNF = os.path.expanduser(os.environ.get("DIRECTOR_SOAPCNF", "~/.soap-directo
 # ACSOap.cpp; there is no SOAP user/password key in worldserver.conf). Missing
 # or short file = SOAP off: the location query falls back to the DB logout
 # position (stale, but the LLM is told so).
-CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "") not in ("", "0", "no", "off")
-# ^ daemon default: validated orders execute IMMEDIATELY. DIRECTOR_CONFIRM=1
-# restores the whisper-'go'/'skip' confirmation step for every plan.
+CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
+# ^ daemon default: validated orders are HELD until the master whispers
+# 'go'/'skip'. DIRECTOR_CONFIRM=0 auto-executes immediately (not recommended:
+# validate() rails are then the only safety net).
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
@@ -72,22 +76,32 @@ SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
 # whisper-bot command prefixes the LLM is allowed to emit (no leading /w in cmd).
 # Source-audited 2026-11-03 vs mod-playerbots ChatTriggerContext.h (138 trigger
 # keys). Removed dead words (no source trigger -> bot silently ignores them):
-# join, tell, wait, repop. "autogear" prefix-covers "autogear bis", "pull"
-# covers "pull back"/"pull rti", "target" covers "target me". Deliberately NOT
-# whitelisted: cheat, debug/cdebug, rtsc, ra, teleport, taxi, destroy, castnc,
-# d/do (raw action execution), guild management, cast (gated separately below).
+# join, tell, wait, repop, buy, sell (only the aliases b/s exist for those).
+# "pull" covers "pull back"/"pull rti", "target" covers "target me".
+# Deliberately NOT whitelisted: cheat, debug/cdebug, rtsc, ra, teleport, taxi,
+# destroy, castnc, d/do (raw action execution), guild management, cast (gated
+# separately below). Anything in FORBIDDEN below is refused by validate() even
+# if it were listed here.
 WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
-             "repair", "buy", "sell", "mail", "lfg", "roll", "stats",
+             "mail", "lfg", "roll", "stats",
              "rpg", "follow", "stay", "attack", "release",
              "position", "go", "invite", "give leader", "buff",
-             "reset botAI", "quests", "drop", "share", "leave",
-             "maintenance", "trainer", "autogear", "equip upgrade", "craft",
-             "c", "ll", "loot all", "bank", "ue", "de", "spells", "help",
+             "quests", "share", "leave",
+             "trainer", "craft",
+             "c", "ll", "loot all", "ue", "de", "spells", "help",
              "revive", "flee", "runaway", "max dps", "save mana", "focus heal",
              "attackers", "target", "formation", "stance", "rti", "ready",
              "pull", "tank attack", "wait for attack time", "wipe", "rebuff",
              "warning", "q", "who", "rep", "aura", "spell", "los", "emblems",
              "pvp stats", "calc", "qi", "cast")
+
+# Hard purity rails - NEVER sendable as bot commands. validate() checks these
+# BEFORE the whitelist and regardless of CONFIRM / auto-execute: manual-play
+# purity is structural, not a prompt. Matched case-insensitively, prefix-exact
+# ("reset botai" also blocks "reset botAI now"). Mirrors Baron's FORBIDDEN_COMMANDS.
+FORBIDDEN = ("autogear", "maintenance", "equip upgrade", "reset botai",
+             "destroy", "drop", "sell", "buy", "repair", "bank",
+             "hire", "teleport", "taxi", "debug", "cdebug", "cheat")
 
 # "cast" is whitelist-gated PER SPELL, not open-ended: the server matches the
 # spell name EXACTLY (case-insensitive, full length) against the bot's own
@@ -102,7 +116,7 @@ CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 # master-issued server commands (Leo runs them himself via the shell, not /w to a bot)
 MASTER_CMDS = ("bot add", "bot remove")
 
-ORDER_RULES = """Reply with ONE JSON object and nothing else:
+ORDER_RULES = """Reply with ONE JSON object as the LAST thing in your reply, inside a single ```json code fence (short prose before the fence is fine, nothing after it):
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Rules:
 - Only name bots from the live roster (the CLI validates against a live SQL census and skips others).
@@ -308,7 +322,7 @@ def soap_command(cmd, timeout=10):
     env = ('<?xml version="1.0" encoding="utf-8"?>'
            '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" '
            'xmlns:ns1="urn:AC"><SOAP-ENV:Body>'
-           '<ns1:executeCommand><command>' + cmd + '</command></ns1:executeCommand>'
+           '<ns1:executeCommand><command>' + _xml_escape(cmd) + '</command></ns1:executeCommand>'
            '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
     auth = base64.b64encode((user + ":" + pw).encode()).decode()
     req = urllib.request.Request(url, data=env.encode("utf-8"), headers={
@@ -362,15 +376,18 @@ DB_QUERIES = {
                "SELECT skill, value, max FROM acore_characters.character_skills "
                "WHERE guid={g} ORDER BY skill", _fmt_skills),
     "bags": ("free bag slots",
+             # capacity = 16 backpack slots + ContainerSlots of EQUIPPED bags
+             # (bag=255, slots 19-22; slot<4 at bag=255 is equipment, not bags).
+             # used = items in the backpack (bag=0, slots 23-38) + inside bags.
              "SELECT 16 + (SELECT IFNULL(SUM(it.ContainerSlots), 0) "
              "FROM acore_characters.character_inventory ci "
              "JOIN acore_characters.item_instance ii ON ii.guid=ci.item "
              "JOIN acore_world.item_template it ON it.entry=ii.itemEntry "
-             "WHERE ci.guid={g} AND ci.bag=255 AND ci.slot<4) "
+             "WHERE ci.guid={g} AND ci.bag=255 AND ci.slot BETWEEN 19 AND 22) "
              "- (SELECT COUNT(*) FROM acore_characters.character_inventory "
-             "WHERE guid={g} AND (bag=0 OR bag IN "
+             "WHERE guid={g} AND ((bag=0 AND slot BETWEEN 23 AND 38) OR bag IN "
              "(SELECT item FROM acore_characters.character_inventory "
-             "WHERE guid={g} AND bag=255 AND slot<4)))", _fmt_bags),
+             "WHERE guid={g} AND bag=255 AND slot BETWEEN 19 AND 22)))", _fmt_bags),
     "played": ("playtime and last logout",
                 "SELECT level, xp, totaltime, leveltime, logout_time, online "
                 "FROM acore_characters.characters WHERE name='{n}'", _fmt_played),
@@ -442,18 +459,56 @@ def llm(messages):
         return json.loads(r.read())["message"]["content"]
 
 
+def _extract_json(text):
+    """First JSON object in text: a fenced ```json block wins; otherwise the
+    first balanced {...} (string-aware, so braces inside strings don't count).
+    Returns the raw candidate string, or None."""
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
+    if m:
+        return m.group(1)
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def parse_orders(text):
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
+    # NOTE: the old greedy r"\{.*\}" match silently dropped ALL orders when the
+    # model fenced the JSON and added prose containing braces afterwards, or
+    # emitted two JSON objects. Balanced extraction fixes that.
+    cand = _extract_json(text)
+    if not cand:
         return {"reply": text, "orders": []}
     try:
-        obj = json.loads(m.group(0))
-        obj.setdefault("reply", "")
-        obj.setdefault("orders", [])
-        obj.setdefault("queries", [])
-        return obj
+        obj = json.loads(cand)
     except json.JSONDecodeError:
+        print("parse_orders: extracted block is not valid JSON (%d chars); "
+              "treating the whole reply as plain text, orders=[]" % len(cand))
         return {"reply": text, "orders": []}
+    if not isinstance(obj, dict):
+        return {"reply": text, "orders": []}
+    obj.setdefault("reply", "")
+    obj.setdefault("orders", [])
+    obj.setdefault("queries", [])
+    return obj
 
 
 def is_master_cmd(cmd):
@@ -470,6 +525,9 @@ def order_line(bot, cmd):
 def validate(order, bots):
     bot = str(order.get("bot", ""))
     cmd = str(order.get("cmd", ""))
+    low = cmd.strip().lower()
+    if any(low == f or low.startswith(f + " ") for f in FORBIDDEN):
+        return "SKIP %s: FORBIDDEN command (purity rails - always refused): %r" % (bot, cmd)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "
                 "online as a bot (DIRECTOR_HANDPLAY)" % bot)
@@ -594,18 +652,27 @@ SKIP_WORDS = ("skip", "no", "cancel", "abort", "discard", "negative", "belay tha
 
 _bot_check_cache = {}  # sender -> (checked_at, is_online_bot)
 
+# DIRECTOR_BOTGATE=failclosed: when SOAP is unavailable, treat every sender as
+# a possible bot and DROP the line, instead of the default fail-open behavior.
+BOTGATE_FAILCLOSED = os.environ.get("DIRECTOR_BOTGATE", "").strip().lower() in (
+    "failclosed", "fail-closed", "closed", "1", "yes", "on")
+
 
 def _is_online_bot(name):
     """True if <name> is currently logged in AS A BOT, via SOAP
-    '.playerbots inspect'. Cached 5 min per name. Any SOAP failure returns
-    False (fail-open: the whisper is processed as before)."""
+    '.playerbots inspect'. Cached 5 min per name. SOAP failure: fail-open
+    (whisper processed) unless DIRECTOR_BOTGATE=failclosed, then fail-closed
+    (line dropped)."""
     now = time.time()
     key = name.lower()
     hit = _bot_check_cache.get(key)
     if hit and now - hit[0] < 300:
         return hit[1]
     ok, txt = soap_command(".playerbots inspect " + name)
-    is_bot = bool(ok) and "not an online bot" not in txt.lower()
+    if not ok:
+        is_bot = BOTGATE_FAILCLOSED
+    else:
+        is_bot = "not an online bot" not in txt.lower()
     _bot_check_cache[key] = (now, is_bot)
     return is_bot
 
@@ -619,7 +686,15 @@ def daemon():
         sys.exit("another director.py daemon is already running (daemon.lock); not starting")
     authed = masters()
     print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
-    print("daemon: orders execute immediately (DIRECTOR_CONFIRM=1 restores go/skip).")
+    if CONFIRM:
+        print("daemon: orders are HELD until you whisper 'go' (DIRECTOR_CONFIRM=0 = auto-execute).")
+    else:
+        print("daemon: WARNING - orders execute IMMEDIATELY (DIRECTOR_CONFIRM=0); "
+              "only the validate() rails apply.")
+    if not _soap_cfg():
+        print("daemon: WARNING - SOAP not configured (%s): the online-bot sender gate is "
+              "FAIL-OPEN, any authed whisper reaches the LLM. Set DIRECTOR_BOTGATE=failclosed "
+              "to drop senders while SOAP is down." % SOAPCNF)
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)

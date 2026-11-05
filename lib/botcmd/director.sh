@@ -60,6 +60,10 @@ director_commands() {
   echo "== whisper commands the LLM may order ($count, prefix-matched) =="
   printf '%s\n' "$wl" | paste -sd' ' - | fold -s -w 78
   echo
+  echo "== FORBIDDEN (purity rails - validate() refuses these ALWAYS, even with CONFIRM off) =="
+  awk '/^FORBIDDEN = \(/{f=1} f{print} f && /\)$/{exit}' "$d" \
+      | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' - | fold -s -w 78
+  echo
   echo "== presence commands (Leo runs himself, not /w to a bot) =="
   awk '/^MASTER_CMDS = \(/{f=1} f{print} f && /\)$/{exit}' "$d" \
     | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -

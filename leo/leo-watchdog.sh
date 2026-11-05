@@ -13,7 +13,8 @@ STATE=$HOME/.leo-watchdog.state
 CONF=$HOME/.leo-watchdog.conf
 ON_H=8
 OFF_H=22
-GROUP="Cecil Rydia Shadow Vivi Aerith"
+# Both Aeris/Aerith spellings until verified in the DB (SELECT ... LIKE 'Aeri%').
+GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"
 AUTORITUAL=1
 RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH"
 RITUAL_BOTS="Golbez"

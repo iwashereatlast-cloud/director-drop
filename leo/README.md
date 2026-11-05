@@ -11,7 +11,7 @@ Leo's headless world session becomes a managed service with a watchdog:
 Wanted-online = server-local hour in [ON_H, OFF_H) (default 08-22), OR any
 toon in GROUP online (default: the G1 manual-leveling five). Outside both,
 Leo is logged out. Manual start/stop works, but the next tick re-applies
-policy - being online in-game as Cecil/Rydia/Shadow/Vivi/Aerith overrides
+policy - being online in-game as Cecil/Rydia/Shadow/Vivi/Aeris overrides
 off-hours.
 
 ## Install (once)
@@ -31,7 +31,7 @@ Do NOT enable leo.service itself - the watchdog owns when Leo runs.
 
 ON_H=8                                          # server-local hour to come online
 OFF_H=22                                        # server-local hour to go offline
-GROUP="Cecil Rydia Shadow Vivi Aerith"          # space-separated toon names
+GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"  # space-separated toon names (both Aeri* spellings until verified in the DB: SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%')
 AUTORITUAL=1                                    # 1 = ritual after Leo logs in
 RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH"
 RITUAL_BOTS="Golbez"
@@ -58,6 +58,13 @@ RITUAL_BOTS="Golbez"
 
 The daemon under systemd too - pinned working directory, log always at
 downloads/director-drop/daemon.log, restarts itself, starts at boot.
+
+Defaults since the 2026-11 review fix: validated orders are HELD until the
+master whispers 'go' (set DIRECTOR_CONFIRM=0 in the unit's Environment= to
+auto-execute again); the purity rails (autogear/maintenance/equip
+upgrade/reset botAI/drop/sell/buy/repair/bank/...) are FORBIDDEN in
+validate() regardless of CONFIRM; audit.log/daemon.log/daemon.lock are
+gitignored - never `git add -A` them into the public repo.
 
 Install:
 

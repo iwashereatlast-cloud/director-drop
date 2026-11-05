@@ -10,7 +10,7 @@ Built-in presets (conf value = the preset word):
   grind    nc +new rpg,+grind,-follow
   quest    nc +new rpg,-follow ; rpg status do quest
   gather   nc +new rpg,+gather,-follow ; rpg status do gather
-  follow   nc +new +follow            (follow-duty: cling to master)
+  follow   nc +follow                 (follow-duty: cling to master; NOTE "+new +follow" is a silent no-op - strategies split on ',' only)
   idle     nc -new rpg,-grind,-gather ; rpg status idle   (stand down)
 Raw commands also work - separate multiple with ';;', e.g.:
   Crono: nc +new rpg,+grind,-follow ;; rpg status go grind
@@ -25,7 +25,7 @@ state_expand() {  # $1 = conf value
     grind)  printf '%s\n' 'nc +new rpg,+grind,-follow' ;;
     quest)  printf '%s\n' 'nc +new rpg,-follow' 'rpg status do quest' ;;
     gather) printf '%s\n' 'nc +new rpg,+gather,-follow' 'rpg status do gather' ;;
-    follow) printf '%s\n' 'nc +new +follow' ;;
+    follow) printf '%s\n' 'nc +follow' ;;
     idle)   printf '%s\n' 'nc -new rpg,-grind,-gather' 'rpg status idle' ;;
     *)      printf '%s\n' "$1" | sed 's/ *;; */\n/g' ;;
   esac
@@ -35,14 +35,20 @@ state_expand() {  # $1 = conf value
 # nothing on any failure - the table then shows "-")
 _states_inspect() {  # $1 = bot name, $2 = query word
   [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ] || return 1
-  local url user pass envelope body
+  local url user pass envelope body netrc rc
   url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
   user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
   pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
   envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>.playerbots inspect '"$1 $2"'</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
-  body=$(curl -s --max-time 5 -u "$user:$pass" \
+  # credentials via a 0600 netrc file, never -u on the cmdline (visible in /proc)
+  netrc=$(mktemp) || return 1
+  (umask 077 && printf 'default login %s password %s\n' "$user" "$pass" > "$netrc")
+  body=$(curl -s --max-time 5 --netrc --netrc-file "$netrc" \
     -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
-    -d "$envelope" "$url" 2>/dev/null) || return 1
+    -d "$envelope" "$url" 2>/dev/null)
+  rc=$?
+  rm -f "$netrc"
+  [ $rc -eq 0 ] || return 1
   printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | cut -c1-46 | sed 's/^ *//'
   [ -n "$(printf '%s' "$body" | tr -d ' ')" ] || return 1
 }

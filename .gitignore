@@ -1,0 +1,8 @@
+# Runtime files written into the repo dir by director.py / leo-director.service.
+# NEVER commit these to a public repo: audit.log is the full order/whisper trail.
+audit.log
+daemon.log
+daemon.lock
+*.log
+__pycache__/
+*.pyc

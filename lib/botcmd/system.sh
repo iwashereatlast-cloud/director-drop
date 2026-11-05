@@ -4,16 +4,22 @@
 # run one console command via SOAP; prints "code" line then stripped text.
 # fails (returns 1, prints nothing) when the gate is not armed.
 _soap_run() {  # $1 = console command
-  local url user pass cmdxml envelope resp code body
+  local url user pass cmdxml envelope resp code body netrc rc
   [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ] || return 1
   url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
   user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
   pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
   cmdxml=$(printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g')
   envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>'"$cmdxml"'</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
-  resp=$(curl -s --max-time 10 -u "$user:$pass" \
+  # credentials via a 0600 netrc file, never -u on the cmdline (visible in /proc)
+  netrc=$(mktemp) || return 1
+  (umask 077 && printf 'default login %s password %s\n' "$user" "$pass" > "$netrc")
+  resp=$(curl -s --max-time 10 --netrc --netrc-file "$netrc" \
     -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
-    -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null) || { echo "000"; return 0; }
+    -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null)
+  rc=$?
+  rm -f "$netrc"
+  [ $rc -eq 0 ] || { echo "000"; return 0; }
   code=$(printf '%s' "$resp" | tail -n 1)
   body=$(printf '%s' "$resp" | sed '$d')
   printf '%s\n' "$code"

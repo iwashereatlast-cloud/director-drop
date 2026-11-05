@@ -19,7 +19,9 @@ BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
 # G1 hard rule (mirrors DIRECTOR_HANDPLAY in director.py): these five are
 # hand-play only - NEVER summoned, never commanded. bot remove stays
 # allowed (remediation if one is wrongly online as a bot).
-BOTCMD_HANDPLAY="Cecil Rydia Shadow Vivi Aerith"
+# Both Aeris/Aerith spellings are listed until verified in the DB:
+#   SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';
+BOTCMD_HANDPLAY="Cecil Rydia Shadow Vivi Aeris Aerith"
 # Summon ritual (mirrors the watchdog AUTORITUAL): account I_WAS_HERE1ST is
 # deliberately absent. Do not add it.
 BOTCMD_RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH"
