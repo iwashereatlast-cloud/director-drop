@@ -85,8 +85,12 @@ DEBUG = os.environ.get("DIRECTOR_DEBUG", "") in ("1", "yes", "on")
 MYSQL_TIMEOUT = float(os.environ.get("DIRECTOR_MYSQL_TIMEOUT", "20"))
 # ^ hard cap on every mysql subprocess call - the daemon loop is single-threaded,
 #   so a hung DB connection would otherwise freeze ALL whisper handling silently
-LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "120"))
-# ^ cap on the Ollama call; a cold/slow model can otherwise stall a turn for minutes
+LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "240"))
+# ^ cap on the Ollama call; a cold/slow model or a queue of turns can otherwise
+#   stall the single-threaded loop for minutes
+ACK = os.environ.get("DIRECTOR_ACK", "one moment...")
+# ^ whispered back IMMEDIATELY when a master line is received, so a slow LLM turn
+#   never looks like silence. Set DIRECTOR_ACK= (empty) to disable.
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
@@ -816,6 +820,8 @@ def daemon():
                     say(sender, "line too long (max 300 chars) - ignored.")
                     continue
                 print("daemon: [%s] (%s): %s" % (sender, channel, text))
+                if ACK:
+                    say(sender, ACK, guild=(channel == "guild"))
                 low = text.lower().strip()
                 if CONFIRM and low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
@@ -847,7 +853,11 @@ def daemon():
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
                 except Exception as e:
                     conv.pop()
-                    say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+                    if "timed out" in str(e).lower():
+                        say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
+                            % (MODEL, LLM_TIMEOUT), guild=(channel == "guild"))
+                    else:
+                        say(sender, "llm error: %s" % e, guild=(channel == "guild"))
                     continue
                 conv.append({"role": "assistant", "content": reply})
                 obj = parse_orders(reply)
@@ -865,7 +875,11 @@ def daemon():
                         reply = llm_retry(conv)
                     except Exception as e:
                         conv.pop()
-                        say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+                        if "timed out" in str(e).lower():
+                            say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
+                                % (MODEL, LLM_TIMEOUT), guild=(channel == "guild"))
+                        else:
+                            say(sender, "llm error: %s" % e, guild=(channel == "guild"))
                         continue
                     conv.append({"role": "assistant", "content": reply})
                     obj = parse_orders(reply)
@@ -893,7 +907,7 @@ def daemon():
                             for o in sent:
                                 send_line(order_line(str(o["bot"]), str(o["cmd"])), 2.0)
                             msg += " | executed: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
-                print("daemon -> %s: %s" % (sender, msg))
+                print("daemon -> %s: %s (turn %.1fs)" % (sender, msg, time.time() - t0))
                 if channel == "guild" and not sent and not (CONFIRM and sender in pending):
                     say(None, msg, guild=True)
                 else:
