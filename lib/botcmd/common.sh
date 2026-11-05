@@ -13,6 +13,12 @@ BOTCMD_WATCHDOG_CONF="${BOTCMD_WATCHDOG_CONF:-$HOME/.leo-watchdog.conf}"
 BOTCMD_SOAP_CONF="${BOTCMD_SOAP_CONF:-$HOME/.soap-director}"
 BOTCMD_MYCNF="${BOTCMD_MYCNF:-$HOME/.my.cnf-director}"
 BOTCMD_ACCOUNT_LIKE="${BOTCMD_ACCOUNT_LIKE:-i_was_here%}"
+BOTCMD_MASTER_ACCOUNT="${BOTCMD_MASTER_ACCOUNT:-I_WAS_HERE1ST}"
+# ^ the account currently treated as the HUMAN/master account (rotated via
+#   'botcmd master'). Mirror of DIRECTOR_MASTER_ACCOUNT in ~/.director.env.
+BOTCMD_BOT_TOONS="${BOTCMD_BOT_TOONS:-}"
+# ^ space-separated toon names that are BOTS even if they sit on the selected
+#   master account - excluded from the auto human list when rotating (e.g. "Golbez")
 BOTCMD_WATCH_GUILD="${BOTCMD_WATCH_GUILD:-Special FXc}"
 BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
 
@@ -24,7 +30,7 @@ BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
 BOTCMD_HANDPLAY="Cecil Rydia Shadow Vivi Aeris Aerith"
 # Summon ritual (mirrors the watchdog AUTORITUAL): account I_WAS_HERE1ST is
 # deliberately absent. Do not add it.
-BOTCMD_RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH"
+BOTCMD_RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
 BOTCMD_RITUAL_BOTS="Golbez"
 
 [ -r "$HOME/.botcmd.conf" ] && . "$HOME/.botcmd.conf"

@@ -33,9 +33,10 @@ ON_H=8                                          # server-local hour to come onli
 OFF_H=22                                        # server-local hour to go offline
 GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"  # space-separated toon names (both Aeri* spellings until verified in the DB: SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%')
 AUTORITUAL=1                                    # 1 = ritual after Leo logs in
-RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH"
+RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
 RITUAL_BOTS="Golbez"
-# NEVER add I_WAS_HERE1ST to RITUAL_ACCOUNTS - the G1 five are hand-play only.
+# NEVER add the account you hand-play on to RITUAL_ACCOUNTS - hand-play toons
+# are never bots. (Default master account is I_WAS_HERE1ST - see 'botcmd master'.)
 
 ## Receipts
 
@@ -88,3 +89,48 @@ Receipts:
 
 The watchdog only manages leo.service (the shell). leo-director always runs;
 it is harmless when Leo is offline (its tail -F just waits for the log).
+
+## Master account rotation (botcmd master)
+
+Which i_was_here* account is the HUMAN account is a runtime setting. One-time
+install of the env plumbing:
+
+    cp leo/director.env.example ~/.director.env && chmod 600 ~/.director.env
+    mkdir -p ~/.config/systemd/user/leo-director.service.d
+    cp leo/leo-director.service.d/override.conf ~/.config/systemd/user/leo-director.service.d/
+    systemctl --user daemon-reload && systemctl --user restart leo-director
+
+Then rotate with:  botcmd -> 9. Master   (or one-shot: `botcmd master set I_WAS_HERE5TH`)
+
+It shows a table like:
+
+     current: I_WAS_HERE1ST   (env file: /home/iwashere/.director.env)
+      1. [X] I_WAS_HERE1ST    toons: Aeris Cecil* Rydia Shadow* Vivi
+      2. [ ] I_WAS_HERE2ND    toons: ...
+      3. [ ] I_WAS_HERE3RD    toons: ...
+      4. [ ] I_WAS_HERE4TH    toons: ...
+      5. [ ] I_WAS_HERE5TH    toons: Golbez*
+
+Selecting one writes DIRECTOR_MASTER_ACCOUNT + DIRECTOR_HUMANS +
+DIRECTOR_HANDPLAY (auto-filled from that account's toons, minus
+BOTCMD_BOT_TOONS in ~/.botcmd.conf) into ~/.director.env, mirrors them into
+~/.botcmd.conf, and restarts leo-director. So the "never command / never
+bot-add the group I'm hand-playing" rule follows the rotation automatically.
+
+RULE: only select a HUMAN-ONLY account. Every other i_was_here% account is a
+bot account - the daemon drops its toons as senders (DB account check, no
+SOAP needed) and never auths them.
+
+## Moving a toon to another account (e.g. Golbez -> I_WAS_HERE5TH)
+
+One-time admin steps - YOU run these against the DB; the tools stay read-only:
+
+    # 1. create the account (worldserver console, or first client login):
+    .account create I_WAS_HERE5TH <password>
+    # 2. make sure the toon is OFFLINE.
+    # 3. point the character at the new account:
+    mysql> SELECT id FROM acore_auth.account WHERE username='I_WAS_HERE5TH';
+    mysql> UPDATE acore_characters.characters SET account=<id> WHERE name='Golbez';
+    # 4. I_WAS_HERE5TH is already in RITUAL_ACCOUNTS defaults now; if you keep
+    #    a ~/.leo-watchdog.conf, add it there too. Verify:
+    python3 director.py census        # Golbez listed under I_WAS_HERE5TH

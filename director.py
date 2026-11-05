@@ -14,8 +14,9 @@ Modes:
 
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
 
-Daemon auth: ONLY the hand-play toons (DIRECTOR_HANDPLAY, default the G1 five)
-on the master account (default i_was_here1st) PLUS members of the watched
+Daemon auth: ONLY the toons in DIRECTOR_HUMANS (default the G1 five) on the
+master account (default i_was_here1st, rotatable via 'botcmd master') PLUS
+members of the watched
 guild (DIRECTOR_GUILD) on non-bot, non-shell accounts - bot-account toons and
 Leo's shell account never get auth, because their automatic "Using X"
 master-report whispers would be answered by the LLM and ping-pong with the bot
@@ -52,6 +53,12 @@ HANDPLAY = set(n.strip().lower() for n in os.environ.get(
 # the craft" and auto-execute ran `bot add Aerith` (a G1 hard-rule violation).
 # BOTH Aeris and Aerith are listed until the DB spelling is verified:
 #   SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';
+HUMANS = set(n.strip().lower() for n in os.environ.get(
+    "DIRECTOR_HUMANS", "Cecil,Rydia,Shadow,Vivi,Aeris,Aerith").split(",") if n.strip())
+# ^ toons on the MASTER account that may TALK to Leo (sender auth). Default =
+# the G1 five. 'botcmd master set <ACCOUNT>' rewrites this together with
+# DIRECTOR_MASTER_ACCOUNT when you rotate which account you hand-play on, so a
+# bot that shares the master account is still NOT authed (not in HUMANS).
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 SHELL_ACCOUNT = os.environ.get("DIRECTOR_SHELL_ACCOUNT", "i_was_cmd")
 # ^ Leo's own headless-shell account: never a master, never a valid sender -
@@ -197,14 +204,14 @@ def masters():
     names = os.environ.get("DIRECTOR_MASTERS", "")
     if names.strip():
         return set(n.strip().lower() for n in names.split(",") if n.strip())
-    # default: ONLY the hand-play humans (HANDPLAY names) on the master account -
-    # NOT every toon on it, because bots can share that account, and a bot that
-    # is authed will whisper Leo its master-reports and get LLM replies ->
+    # default: ONLY the HUMANS-named toons on the master account - NOT every
+    # toon on it, because bots can share that account, and a bot that is
+    # authed will whisper Leo its master-reports and get LLM replies ->
     # chatter loop (seen live 2026-11-05: Golbez bot chatter was answered).
     # PLUS every member of the watched guild on a non-bot, non-shell account
     # (guild-recruited humans, e.g. Banksie). Bot-account toons and Leo's shell
     # account are deliberately NOT masters.
-    hp = [n for n in HANDPLAY if re.fullmatch(r"[A-Za-z]+", n)]
+    hp = [n for n in HUMANS if re.fullmatch(r"[A-Za-z]+", n)]
     hp_in = ",".join("'%s'" % n for n in hp) or "'__none__'"
     q = ("SELECT DISTINCT c.name FROM acore_characters.characters c "
          "JOIN acore_auth.account a ON a.id=c.account "
