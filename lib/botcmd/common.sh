@@ -14,6 +14,7 @@ BOTCMD_SOAP_CONF="${BOTCMD_SOAP_CONF:-$HOME/.soap-director}"
 BOTCMD_MYCNF="${BOTCMD_MYCNF:-$HOME/.my.cnf-director}"
 BOTCMD_ACCOUNT_LIKE="${BOTCMD_ACCOUNT_LIKE:-i_was_here%}"
 BOTCMD_WATCH_GUILD="${BOTCMD_WATCH_GUILD:-Special FXc}"
+BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
 
 # G1 hard rule (mirrors DIRECTOR_HANDPLAY in director.py): these five are
 # hand-play only - NEVER summoned, never commanded. bot remove stays

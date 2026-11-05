@@ -19,6 +19,7 @@ BC_LIB=$(dirname "$(dirname "$BC_SELF")")/lib/botcmd
 . "$BC_LIB/leo.sh"
 . "$BC_LIB/director.sh"
 . "$BC_LIB/roster.sh"
+. "$BC_LIB/states.sh"
 . "$BC_LIB/watchdog.sh"
 . "$BC_LIB/system.sh"
 . "$BC_LIB/launch.sh"
@@ -32,7 +33,7 @@ botcmd - Chazbot control
   botcmd launch                       full boot ritual (worldserver..timer)
 
   botcmd leo on|off|status            Leo shell (client presence)
-  botcmd leo chat [N]                 last N lines, or live: botcmd leo chat -f
+  botcmd leo chat [N|-f]              last N lines, or live follow with -f
   botcmd director restart|status      LLM daemon
   botcmd director log [N]             last N lines of daemon.log
   botcmd director deploy              git pull + compile check + restart
@@ -40,6 +41,10 @@ botcmd - Chazbot control
   botcmd roster ritual                summon full roster (G1-safe)
   botcmd roster add <toon>            bring one bot online (hand-play refused)
   botcmd roster remove <toon>         stand one down (works on hand-play too)
+  botcmd states show                  state layout: conf + online + live
+  botcmd states apply [bot|all]       push conf states to online bots
+  botcmd states edit                  edit ~/.botcmd-states.conf
+  botcmd states presets               built-in strategy presets
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd system worldserver           ac-worldserver check
   botcmd system soap                  SOAP gate status + live test
@@ -84,10 +89,11 @@ main_menu() {
  1. Leo        (game client shell: online / off / status / chat log)
  2. Director   (LLM daemon: restart / status / logs / deploy)
  3. Roster     (census / summon ritual / add / remove bots)
- 4. Watchdog   (presence policy: timer / journal / conf)
- 5. System     (worldserver / SOAP gate / DB grants)
- 6. Full launch (ordered boot ritual: everything up, one button)
- 7. Dashboard  (all units + census at a glance)
+ 4. States     (who does what: per-bot strategies / layout / apply)
+ 5. Watchdog   (presence policy: timer / journal / conf)
+ 6. System     (worldserver / SOAP gate / DB grants)
+ 7. Full launch (ordered boot ritual: everything up, one button)
+ 8. Dashboard  (all units + census at a glance)
  0. Exit
 EOF
     printf '%s' "choice: "; IFS= read -r c
@@ -95,10 +101,11 @@ EOF
       1) leo_menu ;;
       2) director_menu ;;
       3) roster_menu ;;
-      4) watchdog_menu ;;
-      5) system_menu ;;
-      6) launch; printf '%s' "press Enter... "; IFS= read -r _x ;;
-      7) overall_status; printf '%s' "press Enter... "; IFS= read -r _x ;;
+      4) states_menu ;;
+      5) watchdog_menu ;;
+      6) system_menu ;;
+      7) launch; printf '%s' "press Enter... "; IFS= read -r _x ;;
+      8) overall_status; printf '%s' "press Enter... "; IFS= read -r _x ;;
       0) exit 0 ;;
       *) warn "invalid choice" ;;
     esac
@@ -132,6 +139,14 @@ case "${1:-}" in
       ritual) roster_ritual ;;
       add) roster_add "${3:-}" ;;
       remove) roster_remove "${3:-}" ;;
+      *) usage; exit 1 ;;
+    esac ;;
+  states)
+    case "${2:-}" in
+      show) states_show ;;
+      apply) states_apply "${3:-all}" ;;
+      edit) states_edit ;;
+      presets) states_presets ;;
       *) usage; exit 1 ;;
     esac ;;
   watchdog)
