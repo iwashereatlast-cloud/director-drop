@@ -487,9 +487,14 @@ def llm(messages):
     # keep_alive keeps the model resident on the GPU between whispers -
     # default Ollama unloads after 5m idle, and the reload is most of the
     # 20s first-reply latency. DIRECTOR_KEEP_ALIVE=-1 = never unload.
+    _ka = os.environ.get("DIRECTOR_KEEP_ALIVE", "60m")
+    try:
+        keep_alive = int(_ka)          # "-1"/"3600" -> JSON number (Ollama: negative = forever)
+    except ValueError:
+        keep_alive = _ka               # "60m"/"24h" -> duration string
     body = json.dumps({"model": MODEL, "messages": messages, "stream": False,
                        "options": {"temperature": 0.2},
-                       "keep_alive": os.environ.get("DIRECTOR_KEEP_ALIVE", "60m")}).encode()
+                       "keep_alive": keep_alive}).encode()
     req = urllib.request.Request(OLLAMA + "/api/chat", data=body,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
