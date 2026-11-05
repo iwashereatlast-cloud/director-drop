@@ -212,6 +212,9 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   `rpg status` with no args whispers back `NewRpgInfo::ToString()`
   (NewRpgAction.cpp, TellRpgStatusAction). The full nc strategy set itself has
   no read-only view (`.playerbots bot` is in-game only).
+  Any `[name] [whisper]:` reply line is captured (not just `Status:` lines);
+  `BOTCMD_VERIFY_DEBUG=1` additionally dumps the raw new log lines, and
+  `BOTCMD_VERIFY_WAIT=<seconds>` changes the default 20s collect window.
 - Leo can broadcast too: /w Leo "send everyone to Barrens to grind" -> the
   order {"bot":"ALL","cmd":"go travel Barrens"} is expanded by the daemon to
   one validated order per unit (never hand-play, never Leo). The daemon now

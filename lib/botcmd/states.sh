@@ -163,7 +163,7 @@ states_pick_bot() {
   fi
   pages=$(( (total + pagesize - 1) / pagesize ))
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Pick a bot - page $((page + 1))/$pages, $total bots  (1-9 or 10+ = slot on this page, 0 or n = next page, p = prev, blank = back, or type a name)" >&2
     i=$((page * pagesize)); slot=1
     while [ "$i" -lt "$total" ] && [ "$slot" -le "$pagesize" ]; do
@@ -219,7 +219,7 @@ states_set_bot() {  # $1 = bot name
   if is_handplay "$bot"; then errmsg "REFUSED: $bot is hand-play (G1) - never set states on them"; return 1; fi
   cur=$(_states_conf_get "$bot")
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Default state for $bot  (conf: $BOTCMD_STATES_CONF)"
     printf 'current conf state: %s\n\n' "${cur:-(none set)}"
     i=0
@@ -283,7 +283,7 @@ states_pick_preset() {
     uniform=$(printf '%s\n' "$vals" | grep -v '^$' | head -n 1)
   fi
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Set ALL bots to one state ($nbots watched bots)" >&2
     if [ -n "$uniform" ]; then
       printf 'all bots currently have conf state: %s\n\n' "$uniform" >&2
@@ -338,34 +338,48 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
     return 1
   fi
   start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
-  for n in "${targets[@]}"; do
-    game_send "/w $n rpg status" && sleep 1
-  done
-  local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 new line who st all
   declare -A reply=()
-  okmsg "asked ${#targets[@]} bot(s) for 'rpg status' - collecting replies (up to ${max}s)..."
-  while [ "$waited" -lt "$max" ]; do
-    new=$(tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: Status: [A-Z_]*' || true)
+  # one scan of everything appended to the log since the probe started
+  scan_new() {
+    tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: .*' || true
+  }
+  record() {  # $1 = raw matched line
+    local who txt
+    who=${1%%]*}; who=${who#\[}
+    txt=${1#*\[whisper\]: }
+    reply[$who]="$txt"
+  }
+  local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 line all sent=0
+  # send probes one by one and scan after EACH send, so early replies are
+  # never missed even when the post-send wait window is short
+  for n in "${targets[@]}"; do
+    game_send "/w $n rpg status" && sent=$((sent + 1))
     while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      who=$(printf '%s' "$line" | sed 's/^\[\([A-Za-z]*\)\].*/\1/')
-      st=$(printf '%s' "$line" | sed 's/.*Status: //')
-      reply[$who]="$st"
-    done <<< "$new"
+      [ -n "$line" ] && record "$line"
+    done <<< "$(scan_new)"
+    sleep 1
+  done
+  okmsg "sent 'rpg status' to $sent/${#targets[@]} bot(s) - collecting replies (up to ${max}s more)..."
+  while [ "$waited" -lt "$max" ]; do
+    while IFS= read -r line; do
+      [ -n "$line" ] && record "$line"
+    done <<< "$(scan_new)"
     all=1
     for n in "${targets[@]}"; do [ -n "${reply[$n]:-}" ] || all=0; done
     [ "$all" = "1" ] && break
     sleep 1; waited=$((waited + 1))
   done
   echo
-  printf '%-12s %-8s %-14s %s\n' "BOT" "CONF" "LIVE(rpg)" "VERDICT"
-  local conf st verdict exp
+  printf '%-12s %-8s %-40s %s\n' "BOT" "CONF" "LIVE(reply)" "VERDICT"
+  local conf txt st verdict exp
   for n in "${targets[@]}"; do
     conf=$(_states_conf_get "$n"); [ -n "$conf" ] || conf="-"
-    st=${reply[$n]:-}
-    if [ -z "$st" ]; then
-      st="-"; verdict="NO REPLY (offline? shell down?)"
+    txt=${reply[$n]:-}
+    if [ -z "$txt" ]; then
+      st="-"; verdict="NO REPLY (offline? bot AI off? shell down?)"
     else
+      st=$(printf '%s' "$txt" | head -n 1 | cut -c1-40)
+      case "$st" in Status:*) st=${st#Status: } ;; esac
       case "$conf" in
         grind)  exp="GO_GRIND" ;;
         quest)  exp="DO_QUEST" ;;
@@ -375,14 +389,19 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
       esac
       if [ -z "$exp" ]; then
         verdict="custom/follow conf - reply shown"
-      elif printf '%s' "$st" | grep -q "$exp"; then
+      elif printf '%s' "$txt" | head -n 1 | grep -q "Status: $exp"; then
         verdict="OK ($exp)"
       else
         verdict="MISMATCH (want $exp)"
       fi
     fi
-    printf '%-12s %-8s %-14s %s\n' "$n" "$conf" "$st" "$verdict"
+    printf '%-12s %-8s %-40s %s\n' "$n" "$conf" "$st" "$verdict"
   done
+  if [ "${BOTCMD_VERIFY_DEBUG:-0}" = "1" ]; then
+    echo
+    warn "DEBUG - all new '[name] [whisper]:' lines since the probe started:"
+    scan_new | sed 's/^/  /'
+  fi
   echo
   warn "full reply text: botcmd leo chat 60   (daemon.log also logs these replies as dropped bot-sender lines - expected)"
 }
@@ -410,7 +429,7 @@ states_setall() {  # $1 = grind|quest|gather|follow|idle (optional)
 states_menu() {
   local c n
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "States (who does what: per-bot strategies)"
     cat <<'EOF'
  1. States table (conf + online)

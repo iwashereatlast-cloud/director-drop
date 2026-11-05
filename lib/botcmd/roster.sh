@@ -58,7 +58,7 @@ roster_go() {  # botcmd go <toon> <zone words...> -> /w <toon> go travel <zone>
 roster_menu() {
   local c n z
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Roster (bots + watched guild)"
     cat <<'EOF'
  1. Who's online (census)

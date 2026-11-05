@@ -99,7 +99,7 @@ director_commands() {
 director_menu() {
   local c
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Director (LLM daemon: leo-director.service)"
     cat <<'EOF'
  1. Restart daemon

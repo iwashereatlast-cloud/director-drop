@@ -97,7 +97,7 @@ overall_status() {
 main_menu() {
   local c
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Chazbot control - $(date '+%a %H:%M')"
     cat <<'EOF'
  1. Leo        (game client shell: online / off / status / chat log)

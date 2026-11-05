@@ -67,7 +67,7 @@ watchdog_procs() {
 watchdog_menu() {
   local c
   while :; do
-    clear 2>/dev/null || :
+    clear >/dev/null 2>&1 || :
     hdr "Watchdog (presence policy: on-window / group-online)"
     cat <<'EOF'
  1. Status (timer + last run + conf)
