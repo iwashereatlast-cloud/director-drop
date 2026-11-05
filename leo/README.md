@@ -208,3 +208,11 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   one validated order per unit (never hand-play, never Leo). The daemon now
   paces orders at 1s instead of 2s, so a 25-bot broadcast no longer blocks
   the whisper loop for ~50s.
+- Duplicate-instance guards: only ONE interactive botcmd menu can run at a
+  time - a kernel flock on ~/.botcmd.lock (kill-safe: no stale lock files).
+  One-shot commands (`botcmd status`, `director watch`, `roster census`, ...)
+  are deliberately NOT locked and always work. `botcmd watchdog procs`
+  (or Watchdog menu -> 4) is a live audit: daemon + leo shell process counts
+  and whether the menu lock is held, each with a fix hint. leo-watchdog also
+  logs a WARNING into the journal when it sees more than one daemon or more
+  than one leo shell.

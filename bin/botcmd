@@ -54,6 +54,7 @@ botcmd - Chazbot control
   botcmd states zones [level]         vanilla level->zone table (for go travel)
   botcmd states setall <preset>       set EVERY alt bot's conf to one preset + apply online (grind|quest|gather|follow|idle)
   botcmd watchdog status|journal|conf presence-policy watchdog
+  botcmd watchdog procs               duplicate-process audit (daemons, leo shell, menu lock)
   botcmd system worldserver           ac-worldserver check
   botcmd system soap                  SOAP gate status + live test
   botcmd system arm                   write ~/.soap-director (hidden prompts)
@@ -127,8 +128,25 @@ EOF
   done
 }
 
+# One interactive botcmd menu at a time. The lock is a kernel flock on
+# ~/.botcmd.lock, so a killed menu never leaves a stale lock. One-shot
+# commands (status, watch, roster census, ...) are deliberately NOT locked.
+menu_lock() {
+  local lock="$HOME/.botcmd.lock" pid
+  exec 9>"$lock" 2>/dev/null || return 0
+  if flock -n 9 2>/dev/null; then
+    printf '%s\n' "$$" > "$lock.pid"
+    return 0
+  fi
+  pid=$(cat "$lock.pid" 2>/dev/null)
+  errmsg "another botcmd MENU is already running (pid ${pid:-?}, lock: $lock)"
+  warn "one-shot commands are not locked and still work: botcmd status | botcmd director watch | botcmd roster census ..."
+  exit 1
+}
+locked() { menu_lock; "$@"; }
+
 case "${1:-}" in
-  ""|menu) main_menu ;;
+  ""|menu) locked main_menu ;;
   help|-h|--help) usage ;;
   status) overall_status ;;
   launch) launch ;;
@@ -165,7 +183,7 @@ case "${1:-}" in
   states)
     case "${2:-}" in
       show) states_show ;;
-      bots) states_pick_and_set ;;
+      bots) locked states_pick_and_set ;;
       zones) states_zones "${3:-}" ;;
       setall) states_setall "${3:-}" ;;
       apply) states_apply "${3:-all}" ;;
@@ -178,6 +196,7 @@ case "${1:-}" in
       status) watchdog_status ;;
       journal) watchdog_journal "${3:-20}" ;;
       conf) watchdog_conf_edit ;;
+      procs) watchdog_procs ;;
       *) usage; exit 1 ;;
     esac ;;
   system)
@@ -193,7 +212,7 @@ case "${1:-}" in
     case "${2:-}" in
       show|"") master_show ;;
       set) master_set "${3:-}" ;;
-      menu) master_menu ;;
+      menu) locked master_menu ;;
       *) usage; exit 1 ;;
     esac ;;
   *) usage; exit 1 ;;

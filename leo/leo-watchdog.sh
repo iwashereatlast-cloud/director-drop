@@ -73,4 +73,14 @@ if [ "$AUTORITUAL" = "1" ] && [ "$leo" = "1" ] && [ "$prev_leo" = "0" ]; then
   echo "watchdog: ritual queued (accounts: $RITUAL_ACCOUNTS bots: $RITUAL_BOTS)"
 fi
 
+# Duplicate-instance audit (warn only - never kill anything from here).
+n_daemon=$(pgrep -fc 'director\.py daemon' 2>/dev/null); n_daemon=${n_daemon:-0}
+n_shell=$(pgrep -fc 'shell\.py' 2>/dev/null); n_shell=${n_shell:-0}
+if [ "$n_daemon" -gt 1 ] 2>/dev/null; then
+  echo "watchdog: WARNING - $n_daemon director.py daemon processes (pids: $(pgrep -f 'director\.py daemon' | paste -sd' ' -)); they double-answer whispers - fix: pkill -f 'director\.py daemon'; systemctl --user restart leo-director"
+fi
+if [ "$n_shell" -gt 1 ] 2>/dev/null; then
+  echo "watchdog: WARNING - $n_shell leo shell processes (pids: $(pgrep -f 'shell\.py' | paste -sd' ' -)) - fix: systemctl --user restart leo"
+fi
+
 printf 'prev_leo=%s\nprev_off_streak=%s\n' "$leo" "$prev_off_streak" > "$STATE"
