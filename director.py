@@ -484,8 +484,12 @@ def roster_text(bots):
 
 
 def llm(messages):
+    # keep_alive keeps the model resident on the GPU between whispers -
+    # default Ollama unloads after 5m idle, and the reload is most of the
+    # 20s first-reply latency. DIRECTOR_KEEP_ALIVE=-1 = never unload.
     body = json.dumps({"model": MODEL, "messages": messages, "stream": False,
-                       "options": {"temperature": 0.2}}).encode()
+                       "options": {"temperature": 0.2},
+                       "keep_alive": os.environ.get("DIRECTOR_KEEP_ALIVE", "60m")}).encode()
     req = urllib.request.Request(OLLAMA + "/api/chat", data=body,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
