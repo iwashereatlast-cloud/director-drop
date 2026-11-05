@@ -14,14 +14,17 @@ Modes:
 
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
 
-Daemon auth: toons on the master account (default i_was_here1st, all its toons)
-PLUS members of the watched guild (DIRECTOR_GUILD) who are NOT on a bot account
-- bot-account toons never get auth, because their automatic "Using X"
+Daemon auth: ONLY the hand-play toons (DIRECTOR_HANDPLAY, default the G1 five)
+on the master account (default i_was_here1st) PLUS members of the watched
+guild (DIRECTOR_GUILD) on non-bot, non-shell accounts - bot-account toons and
+Leo's shell account never get auth, because their automatic "Using X"
 master-report whispers would be answered by the LLM and ping-pong with the bot
 AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
-require the word 'leo' in the line. A sender currently logged in AS A BOT is
-always dropped (SOAP .playerbots inspect; fail-open without SOAP) - RP
-chatter must never reach the LLM or the two layers talk to each other.
+require the word 'leo' in the line. Bot senders are additionally dropped by a
+DB account check + master-report line filter (no SOAP involved:
+'.playerbots inspect' does not exist in mod-playerbots @ e88cc40 and
+'.playerbots bot' requires an active session, so neither works from the SOAP
+console). RP chatter must never reach the LLM or the two layers talk.
 Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
@@ -50,6 +53,9 @@ HANDPLAY = set(n.strip().lower() for n in os.environ.get(
 # BOTH Aeris and Aerith are listed until the DB spelling is verified:
 #   SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
+SHELL_ACCOUNT = os.environ.get("DIRECTOR_SHELL_ACCOUNT", "i_was_cmd")
+# ^ Leo's own headless-shell account: never a master, never a valid sender -
+# the shell must not talk to its own brain.
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
 # ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
 # write-capable ~/.my.cnf must NEVER be the default: this process is LLM-driven.
@@ -191,19 +197,23 @@ def masters():
     names = os.environ.get("DIRECTOR_MASTERS", "")
     if names.strip():
         return set(n.strip().lower() for n in names.split(",") if n.strip())
-    # default: every toon on the master account (G1) PLUS every member of the
-    # watched guild who is NOT on a bot account (guild-recruited humans, e.g.
-    # Banksie). Bot-account toons are deliberately NOT masters: they are the
-    # roster Leo commands, and their automatic "Using X" master-report whispers
-    # would otherwise be treated as human chat -> LLM replies to the bot ->
-    # the bot parses Leo's whisper as a command -> chatter loop.
+    # default: ONLY the hand-play humans (HANDPLAY names) on the master account -
+    # NOT every toon on it, because bots can share that account, and a bot that
+    # is authed will whisper Leo its master-reports and get LLM replies ->
+    # chatter loop (seen live 2026-11-05: Golbez bot chatter was answered).
+    # PLUS every member of the watched guild on a non-bot, non-shell account
+    # (guild-recruited humans, e.g. Banksie). Bot-account toons and Leo's shell
+    # account are deliberately NOT masters.
+    hp = [n for n in HANDPLAY if re.fullmatch(r"[A-Za-z]+", n)]
+    hp_in = ",".join("'%s'" % n for n in hp) or "'__none__'"
     q = ("SELECT DISTINCT c.name FROM acore_characters.characters c "
          "JOIN acore_auth.account a ON a.id=c.account "
          "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-         "WHERE a.username LIKE '" + MASTER_ACCOUNT + "%' "
+         "WHERE (a.username LIKE '" + MASTER_ACCOUNT + "%' AND LOWER(c.name) IN (" + hp_in + ")) "
          "OR (gm.guildid IN (SELECT guildid FROM acore_characters.guild "
          "WHERE name='" + WATCH_GUILD + "') "
-         "AND a.username NOT LIKE '" + ACCOUNT_LIKE + "');")
+         "AND a.username NOT LIKE '" + ACCOUNT_LIKE + "' "
+         "AND a.username NOT LIKE '" + SHELL_ACCOUNT + "%');")
     env = dict(os.environ)
     env.pop("MYSQL_PWD", None)
     out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
@@ -650,31 +660,48 @@ GO_WORDS = ("go", "do it", "confirm", "confirmed", "execute", "approved", "appro
 SKIP_WORDS = ("skip", "no", "cancel", "abort", "discard", "negative", "belay that")
 
 
-_bot_check_cache = {}  # sender -> (checked_at, is_online_bot)
+# bot master-report lines (mod-playerbots TellMaster formats, e.g.
+# "Selling |cff..|Hitem:..|h[..]|h|r", "Using .. on self", "=== Inventory ===")
+# - these are bot->master reports, never human orders; dropped on sight.
+BOT_REPORT_RE = re.compile(r"^(selling|buying|using)\s+\|c|^===", re.I)
 
-# DIRECTOR_BOTGATE=failclosed: when SOAP is unavailable, treat every sender as
-# a possible bot and DROP the line, instead of the default fail-open behavior.
-BOTGATE_FAILCLOSED = os.environ.get("DIRECTOR_BOTGATE", "").strip().lower() in (
-    "failclosed", "fail-closed", "closed", "1", "yes", "on")
+_sender_acct_cache = {}  # name -> (checked_at, account name or None)
 
 
-def _is_online_bot(name):
-    """True if <name> is currently logged in AS A BOT, via SOAP
-    '.playerbots inspect'. Cached 5 min per name. SOAP failure: fail-open
-    (whisper processed) unless DIRECTOR_BOTGATE=failclosed, then fail-closed
-    (line dropped)."""
+def _sender_account(name):
+    """Account of a toon via the read-only DB (cached 5 min); None on error.
+    LINE_RE only yields [A-Za-z]+ names, re-validated here before SQL."""
+    if not re.fullmatch(r"[A-Za-z]+", name):
+        return None
     now = time.time()
     key = name.lower()
-    hit = _bot_check_cache.get(key)
+    hit = _sender_acct_cache.get(key)
     if hit and now - hit[0] < 300:
         return hit[1]
-    ok, txt = soap_command(".playerbots inspect " + name)
-    if not ok:
-        is_bot = BOTGATE_FAILCLOSED
-    else:
-        is_bot = "not an online bot" not in txt.lower()
-    _bot_check_cache[key] = (now, is_bot)
-    return is_bot
+    try:
+        acct = _mysql("SELECT a.username FROM acore_characters.characters c "
+                      "JOIN acore_auth.account a ON a.id=c.account "
+                      "WHERE c.name='%s'" % name).strip() or None
+    except Exception:
+        acct = None
+    _sender_acct_cache[key] = (now, acct)
+    return acct
+
+
+def _is_bot_sender(name):
+    """True if the sender's ACCOUNT is a bot account or Leo's shell account.
+    Structural and DB-only - works with SOAP off. (The old SOAP
+    '.playerbots inspect' gate was removed: that subcommand does not exist
+    in mod-playerbots @ e88cc40, and '.playerbots bot ...' requires an
+    active session, so neither is usable from the SOAP console.)"""
+    acct = _sender_account(name)
+    if not acct:
+        return False  # DB down: the auth-list and line-filter gates still apply
+    a = acct.lower()
+    bot_pfx = ACCOUNT_LIKE.lower().rstrip("%")
+    master_pfx = MASTER_ACCOUNT.lower().rstrip("%")
+    shell_pfx = SHELL_ACCOUNT.lower().rstrip("%")
+    return (a.startswith(bot_pfx) and not a.startswith(master_pfx)) or a.startswith(shell_pfx)
 
 
 def daemon():
@@ -692,9 +719,8 @@ def daemon():
         print("daemon: WARNING - orders execute IMMEDIATELY (DIRECTOR_CONFIRM=0); "
               "only the validate() rails apply.")
     if not _soap_cfg():
-        print("daemon: WARNING - SOAP not configured (%s): the online-bot sender gate is "
-              "FAIL-OPEN, any authed whisper reaches the LLM. Set DIRECTOR_BOTGATE=failclosed "
-              "to drop senders while SOAP is down." % SOAPCNF)
+        print("daemon: note - SOAP not configured (%s): live .pinfo location queries fall "
+              "back to last-logout position. Bot-sender gating is DB-based and unaffected." % SOAPCNF)
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)
@@ -716,14 +742,15 @@ def daemon():
                     continue
                 if sender.lower() not in authed:
                     continue
-                if _is_online_bot(sender):
-                    # mod-ollama-chat RP chatter: roster bots whisper Leo like
-                    # players do. Bots never get LLM treatment even when the
-                    # toon name is authed (G1 bots share the master account) -
-                    # answering them made the two LLM layers talk to each
-                    # other and starved Ollama (empty replies), and auto-
-                    # execute even ran orders extracted from flavor text.
-                    print("daemon: [%s] (%s): dropped - sender is an online bot" % (sender, channel))
+                if _is_bot_sender(sender):
+                    # bots whisper their master (Leo) their "Selling/Using X"
+                    # reports and RP chatter; answering them makes the two LLM
+                    # layers talk to each other and starves Ollama (seen live
+                    # 2026-11-05). Dropped structurally via the account check.
+                    print("daemon: [%s] (%s): dropped - sender account is a bot/shell account" % (sender, channel))
+                    continue
+                if BOT_REPORT_RE.match(text):
+                    print("daemon: [%s] (%s): dropped - bot master-report line" % (sender, channel))
                     continue
                 if channel == "guild" and "leo" not in text.lower():
                     continue

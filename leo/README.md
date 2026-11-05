@@ -53,6 +53,14 @@ RITUAL_BOTS="Golbez"
 - Re-added bots likely need nc strategy re-issue during sprees (known
   mod-playerbots behavior) - the ritual brings them ONLINE, not back to work.
 - director.py daemon (Leo's brain) runs as leo-director.service (see below).
+- Bot-sender gate (2026-11-05 fix): senders on bot accounts (i_was_here% except
+  the master account) or on Leo's shell account (i_was_cmd) are dropped by a
+  read-only DB account check, and bot master-report lines ("Selling |c...",
+  "=== ... ===") are dropped on sight. Only DIRECTOR_HANDPLAY toons on the
+  master account plus guild members on non-bot accounts are authed. This does
+  not need SOAP: '.playerbots inspect' does not exist in mod-playerbots
+  @ e88cc40 and '.playerbots bot' needs an active session, so neither is
+  usable from the SOAP console.
 
 ## The director daemon (leo-director.service)
 
