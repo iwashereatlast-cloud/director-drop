@@ -24,6 +24,14 @@ director_log() {  # $1 = number of lines
   fi
 }
 
+director_raid() {  # $1 = toon name (default Leo)
+  local toon="${1:-Leo}"
+  hdr "Group/raid of $toon (read-only DB: groups + group_member)"
+  if ! python3 "$BOTCMD_REPO/director.py" group "$toon"; then
+    errmsg "group query failed (RO mysql identity $BOTCMD_MYCNF up?)"
+  fi
+}
+
 director_deploy() {
   hdr "Deploy update (git pull + compile check + restart)"
   local before after
@@ -68,6 +76,10 @@ director_commands() {
   awk '/^MASTER_CMDS = \(/{f=1} f{print} f && /\)$/{exit}' "$d" \
     | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -
   echo
+  echo "== group commands ('.group ...' from Leo's session; Console::No = NOT via SOAP) =="
+  awk '/^GROUP_CMDS = \(/{f=1} f{print} f && /\)$/{exit}' "$d" \
+    | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -
+  echo
   echo "== allowed cast spells (per profession job; spell-gated) =="
   awk '/^CAST_SPELLS = \{/{f=1} f{print} f && /\}$/{exit}' "$d" \
     | grep -o '"[^"]*"' | tr -d '"' | paste - - | sed 's/\t/: /'
@@ -96,7 +108,8 @@ director_menu() {
  4. Deploy update (git pull + compile check + restart)
  5. Leo's command list (what he can order)
  6. Watch daemon.log LIVE (tail -f - Ctrl-C to stop)
- 7. Return to main menu
+ 7. Leo's group/raid (leader + members, read-only DB)
+ 8. Return to main menu
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -106,7 +119,8 @@ EOF
       4) director_deploy; pause ;;
       5) director_commands; pause ;;
       6) tail -f "$BOTCMD_DIRECTOR_LOG" ;;
-      7) return 0 ;;
+      7) director_raid "${BOTCMD_LEO:-Leo}"; pause ;;
+      8) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

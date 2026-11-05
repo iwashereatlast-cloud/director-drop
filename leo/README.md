@@ -90,6 +90,49 @@ Receipts:
 The watchdog only manages leo.service (the shell). leo-director always runs;
 it is harmless when Leo is offline (its tail -F just waits for the log).
 
+## Raid / group awareness (who is in the raid Leo leads)
+
+Leo reads group membership straight from the characters DB (read-only):
+`groups` + `group_member` are written live by the worldserver on create /
+join / leave / leader-change / raid-convert (Group.cpp: CHAR_INS_GROUP,
+CHAR_DEL_GROUP_MEMBER, CHAR_UPD_GROUP_LEADER, CHAR_UPD_GROUP_TYPE), so the DB
+view matches the in-memory group for normal parties/raids (BG groups are not
+persisted). NOTE: `groups` is a RESERVED word in MySQL 8 - backtick-quote it
+in any hand-written query (use single quotes around the whole -e argument).
+
+- CLI:      botcmd director raid [toon]        (default Leo)
+            python3 director.py group Leo
+- In-game:  the daemon appends "Leo's group: ..." to the roster message on
+  every turn, and the LLM can attach the read-only query
+  {"query":"raid","bot":"Leo"} (or any watched toon) to answer
+  "who is in the raid / who leads it".
+- Live server-side view over SOAP:  botcmd system cmd '.group list Leo'
+  ('.group list' is Console::Yes, so SOAP can run it).
+
+Removing someone from the raid Leo leads:
+
+- BOT member:  order {"bot":"<name>","cmd":"group remove"} - validate()
+  rewrites it to the plain "leave" whisper (/w <bot> leave ->
+  LeaveGroupAction::Leave -> LeaveOrDisbandGroup). No GM level needed.
+- HUMAN member: the same order is sent as the server command
+  `.group remove <name>` from Leo's own session (FIFO line). '.group remove'
+  is Console::No in AzerothCore, so SOAP CANNOT run it (SOAP queues console
+  commands). Leo's account (I_WAS_CMD) needs the RBAC perm
+  rbac_perm_command_group_remove - gmlevel 3 (Administrator) has all perms:
+      mysql> SELECT id FROM acore_auth.account WHERE username='I_WAS_CMD';
+      mysql> UPDATE acore_auth.account_access SET gmlevel=3 WHERE id=<id> AND RealmID=-1;
+      -- or if no row exists:
+      mysql> INSERT INTO acore_auth.account_access (id, gmlevel, RealmID) VALUES (<id>, 3, -1);
+      then: systemctl --user restart leo.service   # security is cached at login
+  Until then bot members still leave via 'leave'; only human-member removal
+  needs the perm.
+
+Hard rails (validate()): "group remove" only ever targets a CURRENT member of
+Leo's own group (live DB membership check), never Leo himself, never the
+DIRECTOR_HANDPLAY toons, never bystanders. The headless chat client cannot
+send CMSG_GROUP_UNINVITE itself (chat-only client, no group opcodes), which
+is why removal goes through the bot 'leave' or the '.group remove' command.
+
 ## Master account rotation (botcmd master)
 
 Which i_was_here* account is the HUMAN account is a runtime setting. One-time

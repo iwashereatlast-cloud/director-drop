@@ -11,6 +11,7 @@ Modes:
                                      the LLM answers as the general and directs bots (confirm via 'go')
   python3 director.py run orders.json [--go]   execute a JSON marching-orders file
   python3 director.py census         print live online-bot roster (read-only)
+  python3 director.py group [toon]    print the group/raid a toon is in (read-only; default Leo)
 
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
 
@@ -61,6 +62,9 @@ HUMANS = set(n.strip().lower() for n in os.environ.get(
 # bot that shares the master account is still NOT authed (not in HUMANS).
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
 SHELL_ACCOUNT = os.environ.get("DIRECTOR_SHELL_ACCOUNT", "i_was_cmd")
+LEO = os.environ.get("DIRECTOR_LEO", "Leo")
+# ^ Leo's own toon (the headless shell character) - used for group/raid lookups
+#   ("who is in MY raid / who leads it") and for the group-remove target rail.
 # ^ Leo's own headless-shell account: never a master, never a valid sender -
 # the shell must not talk to its own brain.
 MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
@@ -140,6 +144,15 @@ CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 # master-issued server commands (Leo runs them himself via the shell, not /w to a bot)
 MASTER_CMDS = ("bot add", "bot remove")
 
+# group-management server commands, same FIFO path but formatted '.group ...'
+# (cs_group.cpp). NOTE: '.group remove' is Console::No in AzerothCore, so it
+# CANNOT run via SOAP (SOAP queues console commands; only '.group list' and
+# '.group revive' are Console::Yes). It only works as an in-game command from
+# Leo's own session and needs that account to hold rbac_perm_command_group_remove
+# (gmlevel 3 / Administrator has every perm). Bot members do not need it:
+# validate() rewrites their group-remove to the 'leave' whisper instead.
+GROUP_CMDS = ("group remove",)
+
 ORDER_RULES = """Reply with ONE JSON object as the LAST thing in your reply, inside a single ```json code fence (short prose before the fence is fine, nothing after it):
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Rules:
@@ -147,8 +160,9 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout). Use them instead of guessing numbers.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
+- Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
   * Questing: cmd "nc +new rpg,-follow" then cmd "rpg status do quest". The bot picks a quest from its log; if it has none, it will say so.
   * Grinding mobs: cmd "nc +new rpg,+grind,-follow" (optionally then cmd "rpg status go grind").
@@ -166,6 +180,7 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "The guild master (C B) talks to you in-game through whispers or guild chat. "
            "Answer tersely and in character, like a general: short, confident, no fluff, at most 3 sentences. "
            "A live roster of every toon on the bot accounts is provided in the last system message, each marked ONLINE or OFFLINE. "
+           "That roster message also states Leo's current group/raid (party/raid, leader, members) when he is in one. "
            "Answer status questions from that roster. If a toon is listed, you know them: report their level or ONLINE/OFFLINE status plainly. "
            "If a toon is NOT listed at all, say you do not know that name. "
            "Only toons marked ONLINE can take direct orders, but OFFLINE units can be brought online with a 'bot add' order. "
@@ -328,6 +343,76 @@ def _fmt_played(raw):
                "ONLINE" if online == "1" else "OFFLINE"))
 
 
+CLASSES = {1: "Warrior", 2: "Paladin", 3: "Hunter", 4: "Rogue", 5: "Priest",
+           6: "Death Knight", 7: "Shaman", 8: "Mage", 9: "Warlock", 11: "Druid"}
+
+# `groups` is a RESERVED word in MySQL 8 - always backtick-quote it. The rows
+# are written live by the worldserver on group create / member add / member
+# remove / leader change / raid convert (Group.cpp: CHAR_INS_GROUP,
+# CHAR_DEL_GROUP_MEMBER, CHAR_UPD_GROUP_LEADER, CHAR_UPD_GROUP_TYPE), so this
+# read-only view matches the in-memory group for normal parties/raids (BG
+# groups are not persisted). groupType bit 0x02 = raid (Group.h enum GroupType).
+GROUP_SQL = (
+    "SELECT g.groupType, g.difficulty, g.raidDifficulty, lc.name, "
+    "c.name, c.level, c.class, c.online, gm2.subgroup, gm2.memberFlags "
+    "FROM acore_characters.group_member gm "
+    "JOIN acore_characters.`groups` g ON g.guid = gm.guid "
+    "JOIN acore_characters.characters lc ON lc.guid = g.leaderGuid "
+    "JOIN acore_characters.group_member gm2 ON gm2.guid = g.guid "
+    "JOIN acore_characters.characters c ON c.guid = gm2.memberGuid "
+    "WHERE gm.memberGuid = {g} "
+    "ORDER BY gm2.subgroup, c.name")
+
+
+def _fmt_group(raw):
+    if not raw:
+        return "not in any group"
+    rows = [l.split("\t") for l in raw.splitlines()]
+    gtype, diff, raiddiff, leader = int(rows[0][0]), rows[0][1], rows[0][2], rows[0][3]
+    if gtype & 0x02:
+        kind = "raid"
+        d = {0: "10N", 1: "25N", 2: "10H", 3: "25H"}.get(int(raiddiff), raiddiff)
+    elif gtype & 0x01:
+        kind, d = "battleground", ""
+    else:
+        kind = "party"
+        d = {0: "normal", 1: "heroic"}.get(int(diff), diff)
+    head = "%s%s led by %s, %d member(s)" % (kind, (" " + d) if d else "", leader, len(rows))
+    mem = []
+    for r in rows:
+        name, lvl, cls, online, sub, flags = r[4], r[5], r[6], r[7], r[8], int(r[9])
+        fl = []
+        if flags & 0x01:
+            fl.append("assistant")
+        if flags & 0x02:
+            fl.append("main tank")
+        if flags & 0x04:
+            fl.append("main assist")
+        mem.append("%s (lvl %s %s, subgroup %s%s) %s" % (
+            name, lvl, CLASSES.get(int(cls), "class" + cls), sub,
+            (", " + "/".join(fl)) if fl else "",
+            "ONLINE" if online == "1" else "OFFLINE"))
+    return head + ": " + "; ".join(mem)
+
+
+def group_text(name):
+    """Formatted group/raid view of a toon via the read-only DB."""
+    if not re.fullmatch(r"[A-Za-z]+", name):
+        return "bad toon name %r" % name
+    return _fmt_group(_mysql(GROUP_SQL.replace("{g}", _guid_sub(name))))
+
+
+def group_members(name):
+    """Member names of the group `name` is in ([] if none). Name is validated."""
+    if not re.fullmatch(r"[A-Za-z]+", name):
+        return []
+    rows = _mysql("SELECT c.name FROM acore_characters.group_member gm "
+                  "JOIN acore_characters.group_member gm2 ON gm2.guid = gm.guid "
+                  "JOIN acore_characters.characters c ON c.guid = gm2.memberGuid "
+                  "WHERE gm.memberGuid = " + _guid_sub(name))
+    return [l.strip() for l in rows.splitlines() if l.strip()]
+
+
 # ---------------------------------------------------------------------------
 # SOAP (optional): live worldserver-console access for the location query.
 # One operation only: ns1:executeCommand over HTTP Basic auth with a game
@@ -428,6 +513,9 @@ DB_QUERIES = {
     "played": ("playtime and last logout",
                 "SELECT level, xp, totaltime, leveltime, logout_time, online "
                 "FROM acore_characters.characters WHERE name='{n}'", _fmt_played),
+    "raid": ("the group/raid a toon is in: party/raid + difficulty, leader, "
+             "members (level/class/online/subgroup/role flags)",
+             GROUP_SQL, _fmt_group),
 }
 
 
@@ -574,10 +662,16 @@ def is_master_cmd(cmd):
     return any(cmd == mc or cmd.startswith(mc + " ") for mc in MASTER_CMDS)
 
 
+def is_group_cmd(cmd):
+    return any(cmd == gc or cmd.startswith(gc + " ") for gc in GROUP_CMDS)
+
+
 def order_line(bot, cmd):
     """FIFO line for an order: master cmds go to the server, others are /w to the bot."""
     if is_master_cmd(cmd):
         return ".playerbots %s %s" % (cmd, bot)
+    if is_group_cmd(cmd):
+        return ".group remove %s" % bot
     return "/w %s %s" % (bot, cmd)
 
 
@@ -585,11 +679,46 @@ def validate(order, bots):
     bot = str(order.get("bot", ""))
     cmd = str(order.get("cmd", ""))
     low = cmd.strip().lower()
+    if low == "group remove" or low.startswith("group remove "):
+        # normalize {"bot": X, "cmd": "group remove Y"} -> target Y (or X)
+        target = cmd.strip()[len("group remove"):].strip() or bot
+        if not re.fullmatch(r"[A-Za-z]+", target):
+            return "SKIP: bad group remove target %r" % target
+        order["bot"] = target
+        order["cmd"] = "group remove"
+        bot, cmd, low = target, "group remove", "group remove"
     if any(low == f or low.startswith(f + " ") for f in FORBIDDEN):
         return "SKIP %s: FORBIDDEN command (purity rails - always refused): %r" % (bot, cmd)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "
                 "online as a bot (DIRECTOR_HANDPLAY)" % bot)
+    if low == "group remove":
+        # may only ever hit a CURRENT member of Leo's own group (live DB check),
+        # never Leo himself. Bot members are rewritten to the plain "leave"
+        # whisper (LeaveGroupAction - works with SEC_PLAYER, no GM needed);
+        # human members go out as '.group remove <name>' from Leo's session,
+        # which needs Leo's account to hold rbac_perm_command_group_remove
+        # (Console::No command - SOAP cannot run it; see GROUP_CMDS note).
+        if bot.lower() == LEO.lower():
+            return "SKIP: cannot remove Leo from his own group"
+        try:
+            members = group_members(LEO)
+        except Exception as e:
+            return "SKIP group remove: group lookup failed: %s" % e
+        if not members:
+            return "SKIP group remove: %s is not in a group" % LEO
+        if bot not in members:
+            return "SKIP %s: not a member of %s's group (members: %s)" % (
+                bot, LEO, ",".join(members))
+        acct = (_sender_account(bot) or "").lower()
+        bot_pfx = ACCOUNT_LIKE.lower().rstrip("%")
+        if (acct.startswith(bot_pfx)
+                and not acct.startswith(MASTER_ACCOUNT.lower().rstrip("%"))
+                and not acct.startswith(SHELL_ACCOUNT.lower().rstrip("%"))):
+            order["cmd"] = "leave"   # bot leaves by itself - no GM needed
+            cmd, low = "leave", "leave"
+        else:
+            return None               # human member: '.group remove <name>' line
     if is_master_cmd(cmd):
         all_bots = census(online_only=False)
         if bot not in all_bots:
@@ -848,6 +977,10 @@ def daemon():
                     print("daemon: [%s] thinking (model %s)..." % (sender, MODEL))
                     roster_msg = ("Live roster (name, account, level, map, status): "
                                   + roster_text(census(online_only=False)))
+                    try:
+                        roster_msg += "\nLeo's group: " + group_text(LEO)
+                    except Exception as e:
+                        roster_msg += "\nLeo's group: lookup failed (%s)" % e
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
                     reply = llm_retry(conv)
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
@@ -942,7 +1075,7 @@ def run_file(path, go, pace):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["chat", "run", "census", "daemon"])
+    ap.add_argument("mode", choices=["chat", "run", "census", "group", "daemon"])
     ap.add_argument("file", nargs="?")
     ap.add_argument("--go", action="store_true", help="actually send (default dry-run)")
     ap.add_argument("--pace", type=float, default=2.0)
@@ -950,6 +1083,8 @@ if __name__ == "__main__":
     if args.mode == "census":
         for n, b in census().items():
             print(n, b)
+    elif args.mode == "group":
+        print(group_text(args.file or LEO))
     elif args.mode == "run":
         if not args.file:
             sys.exit("run needs a JSON file")

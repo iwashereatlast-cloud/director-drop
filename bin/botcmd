@@ -38,6 +38,7 @@ botcmd - Chazbot control
   botcmd director restart|status      LLM daemon
   botcmd director log [N]             last N lines of daemon.log
   botcmd director watch               live tail -f of daemon.log (Ctrl-C to stop)
+  botcmd director raid [toon]         group/raid of a toon from the DB (default Leo: leader, members)
   botcmd director deploy              git pull + compile check + restart
   botcmd director commands            Leo's command list (parsed live)
   botcmd roster census                live who's-online (read-only DB)
@@ -140,6 +141,7 @@ case "${1:-}" in
       status) director_status ;;
       log) director_log "${3:-40}" ;;
       watch) tail -f "$BOTCMD_DIRECTOR_LOG" ;;
+      raid) director_raid "${3:-}" ;;
       deploy) director_deploy ;;
       commands) director_commands ;;
       *) usage; exit 1 ;;
