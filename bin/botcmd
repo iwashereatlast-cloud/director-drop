@@ -45,10 +45,13 @@ botcmd - Chazbot control
   botcmd roster ritual                summon full roster (G1-safe)
   botcmd roster add <toon>            bring one bot online (hand-play refused)
   botcmd roster remove <toon>         stand one down (works on hand-play too)
+  botcmd go <toon> <zone...>          walk one bot to a zone now (go travel; G1 refused)
   botcmd states show                  state layout: conf + online + live
   botcmd states apply [bot|all]       push conf states to online bots
   botcmd states edit                  edit ~/.botcmd-states.conf
-  botcmd states presets               built-in strategy presets
+  botcmd states presets               built-in strategy presets (+ zone recipes)
+  botcmd states bots                  pick a bot (paginated) -> set its default state
+  botcmd states zones [level]         vanilla level->zone table (for go travel)
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd system worldserver           ac-worldserver check
   botcmd system soap                  SOAP gate status + live test
@@ -116,6 +119,7 @@ EOF
       7) launch; printf '%s' "press Enter... "; IFS= read -r _x ;;
       8) overall_status; printf '%s' "press Enter... "; IFS= read -r _x ;;
       9) master_menu ;;
+      ""|b|back) exit 0 ;;
       0) exit 0 ;;
       *) warn "invalid choice" ;;
     esac
@@ -146,6 +150,9 @@ case "${1:-}" in
       commands) director_commands ;;
       *) usage; exit 1 ;;
     esac ;;
+  go)
+    shift
+    roster_go "$@" ;;
   roster)
     case "${2:-}" in
       census) roster_census ;;
@@ -157,6 +164,8 @@ case "${1:-}" in
   states)
     case "${2:-}" in
       show) states_show ;;
+      bots) states_pick_and_set ;;
+      zones) states_zones "${3:-}" ;;
       apply) states_apply "${3:-all}" ;;
       edit) states_edit ;;
       presets) states_presets ;;

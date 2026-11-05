@@ -20,6 +20,8 @@ BOTCMD_BOT_TOONS="${BOTCMD_BOT_TOONS:-}"
 # ^ space-separated toon names that are BOTS even if they sit on the selected
 #   master account - excluded from the auto human list when rotating (e.g. "Golbez")
 BOTCMD_WATCH_GUILD="${BOTCMD_WATCH_GUILD:-Special FXc}"
+BOTCMD_SHELL_ACCOUNT="${BOTCMD_SHELL_ACCOUNT:-i_was_cmd}"
+# ^ Leo's headless-shell account - its toons (Leo) are excluded from bot pickers.
 BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
 
 # G1 hard rule (mirrors DIRECTOR_HANDPLAY in director.py): these five are
@@ -94,4 +96,49 @@ user_unit_state() {  # $1 = unit name; prints active/inactive/unknown
   else
     echo unknown
   fi
+}
+
+# generic "key<sep>value" ini setter used by master.sh (_conf_set) and
+# states.sh (_states_conf_set): updates in place or appends; empty value
+# removes the key. awk-based so values may contain sed-special chars.
+_ini_set() {  # $1=file $2=key $3=value (empty removes) $4=separator (default "=")
+  local f="$1" k="$2" v="$3" sep="${4:-=}" tmp
+  touch "$f" 2>/dev/null || return 1
+  tmp=$(mktemp) || return 1
+  awk -v k="$k" -v v="$v" -v sep="$sep" '
+    BEGIN { pat = "^" k "[[:space:]]*" sep; line = (sep == "=" ? k sep v : k sep " " v) }
+    $0 ~ pat { if (v != "") print line; found = 1; next }
+    { print }
+    END { if (!found && v != "") print line }
+  ' "$f" > "$tmp" && cat "$tmp" > "$f"
+  local rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# POST one worldserver console command to the SOAP endpoint (shared by
+# system.sh _soap_run and anything else that needs it - the envelope/netrc/
+# curl boilerplate lives HERE once). Prints "HTTP_CODE" then the stripped
+# response text; prints just "000" on connection failure; rc 1 = gate not armed.
+_soap_post() {  # $1 = console command
+  local url user pass cmdxml envelope resp code body netrc rc
+  [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ] || return 1
+  url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
+  user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
+  pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
+  cmdxml=$(printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g')
+  envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>'"$cmdxml"'</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
+  # credentials via a 0600 netrc file, never -u on the cmdline (visible in /proc)
+  netrc=$(mktemp) || return 1
+  (umask 077 && printf 'default login %s password %s\n' "$user" "$pass" > "$netrc")
+  resp=$(curl -s --max-time 10 --netrc --netrc-file "$netrc" \
+    -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
+    -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null)
+  rc=$?
+  rm -f "$netrc"
+  [ $rc -eq 0 ] || { echo "000"; return 0; }
+  code=$(printf '%s' "$resp" | tail -n 1)
+  body=$(printf '%s' "$resp" | sed '$d')
+  printf '%s\n' "$code"
+  printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | sed 's/^ *//'
 }

@@ -53,6 +53,7 @@ EOF
       3) leo_status; pause ;;
       4) leo_chat 40; pause ;;
       5) return 0 ;;
+      ""|b|back) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

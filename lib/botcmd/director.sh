@@ -121,6 +121,7 @@ EOF
       6) tail -f "$BOTCMD_DIRECTOR_LOG" ;;
       7) director_raid "${BOTCMD_LEO:-Leo}"; pause ;;
       8) return 0 ;;
+      ""|b|back) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

@@ -50,6 +50,7 @@ EOF
       2) watchdog_journal 20; pause ;;
       3) watchdog_conf_edit ;;
       4) return 0 ;;
+      ""|b|back) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

@@ -177,3 +177,24 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
     # 4. I_WAS_HERE5TH is already in RITUAL_ACCOUNTS defaults now; if you keep
     #    a ~/.leo-watchdog.conf, add it there too. Verify:
     python3 director.py census        # Golbez listed under I_WAS_HERE5TH
+
+## botcmd UI: states picker, zone travel, blank-Enter-back
+
+- Menus: blank Enter (or `b`/`back`) = up one screen, everywhere.
+- States -> "Pick a bot -> set its default state": paginated list of every
+  watched alt bot (bot accounts + watched guild, minus G1 hand-play minus Leo),
+  10 per page - keys `1-9,0` pick, `n`/`p` change page, or type a toon name.
+  The state menu shows `[x]` on the bot's current conf state; picking a preset
+  writes `Name: preset` into ~/.botcmd-states.conf (apply with `botcmd states apply`).
+- Zone travel (verified vs mod-playerbots @ e88cc40): `go travel <zone>` matches
+  destination titles by name (case-insensitive) and the engine level-filters
+  destinations (TravelMgr level ranges vs bot level); rpg grind/quest/gather
+  scans units near the bot's position, so send the bot to the zone FIRST:
+    botcmd go <toon> <zone...>        # walk one bot now (G1 refused)
+    botcmd states zones               # vanilla level->zone table
+    conf recipe:  Gau: go travel Westfall ;; nc +new rpg,+grind,-follow
+    via Leo:      /w Leo "send Gau to Westfall to grind"  (ORDER_RULES carries the table)
+- Leo's instant ack whisper is now one of 24 random lines per message
+  (customize: DIRECTOR_ACK="a;b;c" in ~/.director.env; empty disables).
+- Leo says "I can't do that - <reason>" when a request is outside the
+  whitelist/roster instead of improvising (ORDER_RULES).

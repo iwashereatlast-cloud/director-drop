@@ -31,7 +31,7 @@ Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
-import argparse, base64, fcntl, html, json, os, re, subprocess, sys, time, urllib.error, urllib.request
+import argparse, base64, fcntl, html, json, os, random, re, subprocess, sys, time, urllib.error, urllib.request
 from xml.sax.saxutils import escape as _xml_escape
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,9 +92,20 @@ MYSQL_TIMEOUT = float(os.environ.get("DIRECTOR_MYSQL_TIMEOUT", "20"))
 LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "240"))
 # ^ cap on the Ollama call; a cold/slow model or a queue of turns can otherwise
 #   stall the single-threaded loop for minutes
-ACK = os.environ.get("DIRECTOR_ACK", "one moment...")
+_ACK_DEFAULT = ";".join([
+    "one moment...", "stand by...", "aye...", "on it...", "give me a second...",
+    "checking the ledgers...", "plotting a course...", "rallying the units...",
+    "sharpening the blades...", "reading the map...", "consulting the roster...",
+    "aye aye...", "standing by...", "one tick...", "hold the line...",
+    "mustering the troops...", "eyes on the horizon...", "wait for it...",
+    "on my word...", "at your service...", "right away...", "moving out...",
+    "the wheels turn...", "give me a breath..."])
+ACK_RAW = os.environ.get("DIRECTOR_ACK", _ACK_DEFAULT)
 # ^ whispered back IMMEDIATELY when a master line is received, so a slow LLM turn
-#   never looks like silence. Set DIRECTOR_ACK= (empty) to disable.
+#   never looks like silence. DIRECTOR_ACK="a;b;c" = your own ';'-separated list,
+#   one picked at random per line (default: the 24 built-ins above).
+#   Set DIRECTOR_ACK= (empty) to disable the ack entirely.
+ACKS = [a.strip() for a in ACK_RAW.split(";") if a.strip()] if ACK_RAW.strip() else []
 
 # profession skill ids -> short codes for the roster (character_skills.skill)
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
@@ -169,6 +180,8 @@ Rules:
   * Gathering mats: cmd "nc +new rpg,+gather,-follow" then cmd "rpg status do gather". ONLY for bots whose roster jobs include herb or mine - the server refuses others (no skinning in gather mode).
   * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
+- If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
+- Zone travel: cmd "go travel <zone name>" walks a unit to a named zone (matched by name, case-insensitive; the engine level-filters destinations, and rpg grind/quest/gather scans units near the unit's position - send it to the zone FIRST, then the rpg order). Vanilla level brackets: 1-10 Elwynn/Dun Morogh/Teldrassil/Mulgore; 10-20 Westfall/Loch Modan/Darkshore/Barrens; 20-30 Redridge/Wetlands/Duskwood/Ashenvale/Silverpine/Hillsbrad; 30-40 Desolace/Arathi/Alterac/STV/Badlands/Dustwallow/Thousand Needles; 40-50 Tanaris/Feralas/Hinterlands/Swamp of Sorrows/Azshara; 50-60 WPL/EPL/Burning Steppes/Silithus/Winterspring/Un'Goro/Felwood.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
 - The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST)}
 
@@ -188,6 +201,7 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "A unit's roster casts field lists the exact spell names you may order that unit to cast (cmd \"cast <spell name>\"). "
            "When reporting counts, count the roster entries carefully; if unsure, list names instead of numbers. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
+           "If you cannot do what is asked, say 'I can't do that' plus a one-line reason - never bluff. "
            "Bots grind solo with rpg+grind strategies already set.")
 
 
@@ -207,17 +221,8 @@ def census(online_only=True):
          "SELECT guildid FROM acore_characters.guild WHERE name='" + WATCH_GUILD + "'))"
          + (" AND c.online=1" if online_only else "") +
          " ORDER BY a.username, c.name;")
-    env = dict(os.environ)
-    env.pop("MYSQL_PWD", None)  # let the defaults file supply credentials
-    try:
-        out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
-                             capture_output=True, text=True, env=env, timeout=MYSQL_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("mysql timed out after %ss (census) - DB hung?" % MYSQL_TIMEOUT)
-    if out.returncode != 0:
-        raise RuntimeError("census failed: " + out.stderr.strip())
     bots = {}
-    for line in out.stdout.strip().splitlines():
+    for line in _mysql(q).splitlines():
         name, acct, level, mapid, online, guildid, skills = line.split("\t")
         jobs = ""
         if skills and skills != "NULL":
@@ -250,16 +255,7 @@ def masters():
          "WHERE name='" + WATCH_GUILD + "') "
          "AND a.username NOT LIKE '" + ACCOUNT_LIKE + "' "
          "AND a.username NOT LIKE '" + SHELL_ACCOUNT + "%');")
-    env = dict(os.environ)
-    env.pop("MYSQL_PWD", None)
-    try:
-        out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", q],
-                             capture_output=True, text=True, env=env, timeout=MYSQL_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("mysql timed out after %ss (masters) - DB hung?" % MYSQL_TIMEOUT)
-    if out.returncode != 0:
-        raise RuntimeError("masters failed: " + out.stderr.strip())
-    return set(l.strip().lower() for l in out.stdout.strip().splitlines() if l.strip())
+    return set(l.strip().lower() for l in _mysql(q).splitlines() if l.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +764,16 @@ def say(recipient, msg, guild=False):
         send_line(("/g " if guild else "/w %s " % recipient) + chunk, 0.5)
 
 
+def _llm_fail_say(sender, e, channel):
+    """Whisper the master why the LLM turn failed (timeout gets the GPU hint).
+    One place, so both daemon call sites stay identical."""
+    if "timed out" in str(e).lower():
+        say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
+            % (MODEL, LLM_TIMEOUT), guild=(channel == "guild"))
+    else:
+        say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+
+
 def execute(orders, bots, pace, dry):
     plan = []
     for o in orders:
@@ -949,8 +955,8 @@ def daemon():
                     say(sender, "line too long (max 300 chars) - ignored.")
                     continue
                 print("daemon: [%s] (%s): %s" % (sender, channel, text))
-                if ACK:
-                    say(sender, ACK, guild=(channel == "guild"))
+                if ACKS:
+                    say(sender, random.choice(ACKS), guild=(channel == "guild"))
                 low = text.lower().strip()
                 if CONFIRM and low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
@@ -988,11 +994,7 @@ def daemon():
                         print("daemon: raw llm reply: %r" % reply[:800])
                 except Exception as e:
                     conv.pop()
-                    if "timed out" in str(e).lower():
-                        say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
-                            % (MODEL, LLM_TIMEOUT), guild=(channel == "guild"))
-                    else:
-                        say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+                    _llm_fail_say(sender, e, channel)
                     continue
                 conv.append({"role": "assistant", "content": reply})
                 obj = parse_orders(reply)
@@ -1012,11 +1014,7 @@ def daemon():
                             print("daemon: raw llm reply (post-queries): %r" % reply[:800])
                     except Exception as e:
                         conv.pop()
-                        if "timed out" in str(e).lower():
-                            say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
-                                % (MODEL, LLM_TIMEOUT), guild=(channel == "guild"))
-                        else:
-                            say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+                        _llm_fail_say(sender, e, channel)
                         continue
                     conv.append({"role": "assistant", "content": reply})
                     obj = parse_orders(reply)

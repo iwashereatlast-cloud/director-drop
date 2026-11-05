@@ -16,6 +16,11 @@ Raw commands also work - separate multiple with ';;', e.g.:
   Crono: nc +new rpg,+grind,-follow ;; rpg status go grind
 Gotcha (receipt 2026-11-03): "new rpg" is ONE strategy name with a space -
 remove it as the single token "-new rpg", never "-new,-rpg".
+Zone recipes (go travel FIRST - the engine level-filters destinations and rpg
+scans near the bot's position; see 'botcmd states zones' for the table):
+  Gau:  go travel Westfall ;; nc +new rpg,+grind,-follow
+  Marle: go travel Feralas ;; nc +new rpg,+gather,-follow ;; rpg status do gather
+  (one-shot instead: botcmd go Gau Westfall)
 EOF
 }
 
@@ -31,27 +36,12 @@ state_expand() {  # $1 = conf value
   esac
 }
 
-# live strategy via SOAP .playerbots inspect (needs the gate armed; prints
-# nothing on any failure - the table then shows "-")
-_states_inspect() {  # $1 = bot name, $2 = query word
-  [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ] || return 1
-  local url user pass envelope body netrc rc
-  url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
-  user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
-  pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
-  envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>.playerbots inspect '"$1 $2"'</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
-  # credentials via a 0600 netrc file, never -u on the cmdline (visible in /proc)
-  netrc=$(mktemp) || return 1
-  (umask 077 && printf 'default login %s password %s\n' "$user" "$pass" > "$netrc")
-  body=$(curl -s --max-time 5 --netrc --netrc-file "$netrc" \
-    -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
-    -d "$envelope" "$url" 2>/dev/null)
-  rc=$?
-  rm -f "$netrc"
-  [ $rc -eq 0 ] || return 1
-  printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | cut -c1-46 | sed 's/^ *//'
-  [ -n "$(printf '%s' "$body" | tr -d ' ')" ] || return 1
-}
+# NOTE: there is NO read-only way to see a bot's LIVE strategy set:
+# '.playerbots inspect' does not exist in mod-playerbots @ e88cc40 and
+# '.playerbots bot <name> ...' is Console::No (needs an active in-game session),
+# so SOAP cannot run it either. The old _states_inspect() called a nonexistent
+# command AND duplicated the SOAP envelope code - removed. states_show shows
+# your conf; verify live behavior in the chat log (botcmd leo chat 40).
 
 _states_conf_entries() {  # prints "name<TAB>value" per conf line
   [ -r "$BOTCMD_STATES_CONF" ] || return 1
@@ -73,19 +63,18 @@ states_show() {
     warn "start one: botcmd states edit   (presets: botcmd states presets)"
     return 1
   fi
-  local n v online live g1
-  printf '%-12s %-8s %-30s %s\n' "BOT" "STATUS" "CONF STATE" "LIVE (SOAP inspect)"
+  local n v online g1
+  printf '%-12s %-8s %-34s\n' "BOT" "STATUS" "CONF STATE"
   while IFS=$'\t' read -r n v; do
     if is_handplay "$n"; then g1=" (G1)"; else g1=""; fi
     online=$(_states_online "$n")
     [ "$online" = "1" ] && online="ONLINE" || { [ "$online" = "0" ] && online="off" || online="?"; }
-    live=$(_states_inspect "$n" strategy)
-    [ -n "$live" ] || live="-"
-    printf '%-12s %-8s %-30s %s\n' "$n$g1" "$online" "$(printf '%s' "$v" | cut -c1-30)" "$live"
+    printf '%-12s %-8s %-34s\n' "$n$g1" "$online" "$(printf '%s' "$v" | cut -c1-34)"
   done < /tmp/.botcmd-entries.$$
   rm -f /tmp/.botcmd-entries.$$
   echo
   warn "purity rule: states are sent by YOU (apply), never auto-applied on login"
+  warn "no read-only live-strategy view exists (.playerbots bot is in-game only) - verify live in: botcmd leo chat 40"
 }
 
 states_apply() {  # $1 = bot name or "all" (default)
@@ -138,27 +127,150 @@ EOF
   "${EDITOR:-nano}" "$BOTCMD_STATES_CONF"
 }
 
+# every watched alt bot except G1 hand-play and Leo's shell account:
+# prints "name<TAB>level<TAB>online<TAB>account"
+_states_all_bots() {
+  db_ro -N -B -e "SELECT c.name, c.level, c.online, LOWER(a.username) FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid WHERE (a.username LIKE '$BOTCMD_ACCOUNT_LIKE' OR gm.guildid IN (SELECT guildid FROM acore_characters.guild WHERE name='$BOTCMD_WATCH_GUILD')) AND a.username NOT LIKE '${BOTCMD_SHELL_ACCOUNT}%' ORDER BY c.online DESC, c.name" 2>/dev/null \
+    | awk -F'\t' -v hp="$BOTCMD_HANDPLAY" 'BEGIN{n=split(hp,a," "); for(i=1;i<=n;i++) e[tolower(a[i])]=1} !e[tolower($1)] {print}'
+}
+
+_states_conf_get() {  # $1=name -> conf value or empty
+  [ -r "$BOTCMD_STATES_CONF" ] || return 0
+  awk -F: -v n="$1" '!/^[[:space:]]*#/ && NF>1 {k=$1; gsub(/[[:space:]]/,"",k); if (tolower(k)==tolower(n)) {sub(/^[^:]*:[[:space:]]*/,""); gsub(/[[:space:]]+$/,""); print; exit}}' "$BOTCMD_STATES_CONF"
+}
+
+_states_conf_set() {  # $1=name $2=value (empty removes the line)
+  _ini_set "$BOTCMD_STATES_CONF" "$1" "$2" ":"
+}
+
+# paginated bot picker; prints the chosen name, rc 1 = backed out (blank/b/back)
+states_pick_bot() {
+  local -a rows=()
+  local total pagesize=10 page=0 pages i slot name lvl onl acct cur c
+  mapfile -t rows < <(_states_all_bots)
+  total=${#rows[@]}
+  if [ "$total" -eq 0 ]; then
+    errmsg "no alt bots in census (accounts like '$BOTCMD_ACCOUNT_LIKE' + guild '$BOTCMD_WATCH_GUILD', minus G1, minus Leo)"
+    return 1
+  fi
+  pages=$(( (total + pagesize - 1) / pagesize ))
+  while :; do
+    clear 2>/dev/null || :
+    hdr "Pick a bot - page $((page + 1))/$pages, $total bots  (blank=back, n=next page, p=prev page, or type a name)" >&2
+    i=$((page * pagesize)); slot=1
+    while [ "$i" -lt "$total" ] && [ "$slot" -le "$pagesize" ]; do
+      IFS=$'\t' read -r name lvl onl acct <<< "${rows[$i]}"
+      cur=$(_states_conf_get "$name"); [ -n "$cur" ] || cur="-"
+      [ "$onl" = "1" ] && onl="ONLINE" || onl="off"
+      printf '%2d. %-12s lvl %-3s %-6s %-16s state: %s\n' "$slot" "$name" "$lvl" "$onl" "$acct" "$cur" >&2
+      i=$((i + 1)); slot=$((slot + 1))
+    done
+    printf '%s' "choice: " >&2; IFS= read -r c
+    case "$c" in
+      ""|b|back) return 1 ;;
+      n) [ $((page + 1)) -lt "$pages" ] && page=$((page + 1)) ;;
+      p) [ "$page" -gt 0 ] && page=$((page - 1)) ;;
+      [0-9])
+        slot=$(( c == 0 ? 10 : c ))
+        i=$((page * pagesize + slot - 1))
+        if [ "$i" -lt "$total" ]; then
+          IFS=$'\t' read -r name _ _ _ <<< "${rows[$i]}"
+          printf '%s' "$name"; return 0
+        fi
+        warn "no bot on slot $slot this page" >&2 ;;
+      *)
+        local canon
+        canon=$(printf '%s\n' "${rows[@]}" | awk -F'\t' -v n="$c" 'tolower($1)==tolower(n){print $1; exit}')
+        if [ -n "$canon" ]; then
+          printf '%s' "$canon"; return 0
+        fi
+        errmsg "'$c' is not a watched alt bot (or is G1)" >&2; sleep 1 ;;
+    esac
+  done
+}
+
+# state menu for one bot, [x] marks the current conf state
+states_set_bot() {  # $1 = bot name
+  local bot="$1" cur c preset i p
+  if is_handplay "$bot"; then errmsg "REFUSED: $bot is hand-play (G1) - never set states on them"; return 1; fi
+  cur=$(_states_conf_get "$bot")
+  while :; do
+    clear 2>/dev/null || :
+    hdr "Default state for $bot  (conf: $BOTCMD_STATES_CONF)"
+    printf 'current conf state: %s\n\n' "${cur:-(none set)}"
+    i=0
+    for p in grind quest gather follow idle; do
+      i=$((i + 1))
+      if [ "$cur" = "$p" ]; then printf '[x] %d. %s\n' "$i" "$p"
+      else printf '[ ] %d. %s\n' "$i" "$p"; fi
+    done
+    cat <<'EOF'
+ 0. Remove from conf
+    blank Enter = back
+EOF
+    printf '%s' "choice: "; IFS= read -r c
+    case "$c" in
+      ""|b|back) return 0 ;;
+      0) _states_conf_set "$bot" "" && okmsg "$bot removed from states conf"; return 0 ;;
+      1|2|3|4|5)
+        case "$c" in 1) preset=grind;; 2) preset=quest;; 3) preset=gather;; 4) preset=follow;; 5) preset=idle;; esac
+        if _states_conf_set "$bot" "$preset"; then
+          okmsg "$bot: $preset   (push it live with: botcmd states apply $bot)"
+        else
+          errmsg "write to $BOTCMD_STATES_CONF failed"
+        fi
+        return 0 ;;
+      *) warn "invalid choice" ;;
+    esac
+  done
+}
+
+states_pick_and_set() {
+  local bot
+  bot=$(states_pick_bot) || return 0
+  [ -n "$bot" ] || return 0
+  states_set_bot "$bot"
+}
+
+# vanilla level -> zone table for 'go travel <zone>'
+states_zones() {
+  hdr "Vanilla level -> zone   (send with: botcmd go <toon> <zone>  or  /w <toon> go travel <zone>)"
+  cat <<'EOF'
+ 1-10   Elwynn Forest, Dun Morogh, Teldrassil, Mulgore        (racial starts)
+10-20   Westfall, Loch Modan, Darkshore, The Barrens
+20-30   Redridge Mountains, Wetlands, Duskwood, Ashenvale, Silverpine Forest, Hillsbrad Foothills
+30-40   Desolace, Arathi Highlands, Alterac Mountains, Stranglethorn Vale, Badlands, Dustwallow Marsh, Thousand Needles
+40-50   Tanaris, Feralas, The Hinterlands, Swamp of Sorrows, Azshara
+50-60   Western Plaguelands, Eastern Plaguelands, Burning Steppes, Silithus, Winterspring, Un'Goro Crater, Felwood
+EOF
+  echo "destinations match by name (case-insensitive) and are level-filtered by the engine;"
+  echo "rpg grind/quest/gather scans near the bot, so go travel <zone> FIRST, then the rpg order."
+}
+
 states_menu() {
   local c n
   while :; do
     clear 2>/dev/null || :
     hdr "States (who does what: per-bot strategies)"
     cat <<'EOF'
- 1. Show states table (conf + online + live)
- 2. Apply ALL states (online bots only)
- 3. Apply ONE bot's state
- 4. Edit states conf
- 5. Show presets
- 6. Return to main menu
+ 1. States table (conf + online)
+ 2. Pick a bot -> set its default state   (paginated, [x] = current)
+ 3. Apply ALL states (online bots only)
+ 4. Apply ONE bot's state
+ 5. Edit states conf
+ 6. Show presets + level->zone table
+ 7. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
+      ""|b|back) return 0 ;;
       1) states_show; pause ;;
-      2) states_apply all; pause ;;
-      3) printf '%s' "bot name: "; IFS= read -r n; states_apply "$n"; pause ;;
-      4) states_edit ;;
-      5) states_presets; pause ;;
-      6) return 0 ;;
+      2) states_pick_and_set; pause ;;
+      3) states_apply all; pause ;;
+      4) printf '%s' "bot name: "; IFS= read -r n; states_apply "$n"; pause ;;
+      5) states_edit ;;
+      6) states_presets; echo; states_zones; pause ;;
+      7) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

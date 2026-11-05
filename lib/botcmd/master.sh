@@ -31,15 +31,7 @@ _master_toons() {  # $1=account -> "Name Name* ..." (* = online)
 }
 
 _conf_set() {  # $1=key $2=value -> update-or-append KEY="value" in ~/.botcmd.conf
-  local f="$HOME/.botcmd.conf" k="$1" v="$2" tmp
-  touch "$f"
-  tmp=$(mktemp) || return 1
-  if grep -q "^${k}=" "$f"; then
-    sed "s|^${k}=.*|${k}=\"${v}\"|" "$f" > "$tmp"
-  else
-    { cat "$f"; echo "${k}=\"${v}\""; } > "$tmp"
-  fi
-  cat "$tmp" > "$f" && rm -f "$tmp"
+  _ini_set "$HOME/.botcmd.conf" "$1" "\"$2\"" "="
 }
 
 master_show() {
@@ -103,9 +95,9 @@ master_menu() {
   local c
   while :; do
     master_show
-    printf '%s' "select account number/name to make master (0=back): "
+    printf '%s' "select account number/name to make master (blank or 0 = back): "
     IFS= read -r c
-    [ "$c" = "0" ] && return 0
+    [ -z "$c" ] || [ "$c" = "0" ] && return 0
     [ -n "$c" ] && master_set "$c"
   done
 }
