@@ -23,6 +23,8 @@ durable 'quest' state = nc +new rpg + quests in the log; read it back with:
   botcmd states verify                        # verdict = 'nc ?' strategy membership; rpg status = info
   botcmd states probe all "nc ?"              # raw list (goes to master Leo)
   botcmd states probe all "rpg status do quest"   # shows per-bot error whispers
+  botcmd states probe Locke "quests all"      # live quest log via whisper (TellMaster = master only, ListQuestsActions.cpp:11-40)
+  botcmd states probe Locke "rpg do quest 153"    # set DO_QUEST by id/link WITHOUT needing it in the log (StartRpgDoQuestAction, NewRpgAction.cpp:227-244) - still ALLOW_ALL
 Gotcha (receipt 2026-11-03): "new rpg" is ONE strategy name with a space -
 remove it as the single token "-new rpg", never "-new,-rpg".
 Zone recipes (go travel FIRST - the engine level-filters destinations and rpg

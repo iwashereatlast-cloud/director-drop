@@ -202,6 +202,35 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
     #    a ~/.leo-watchdog.conf, add it there too. Verify:
     python3 director.py census        # Golbez listed under I_WAS_HERE5TH
 
+## Account linking (trusted accounts) - required before addaccount of another account
+- Cross-account altbots need a LINK: `add`/`addaccount` of a toon on ANOTHER
+  account is refused unless that account is linked to the master's
+  ("Failure: You are not allowed to control bot <name>") -
+  PlayerbotMgr.cpp:110-116 and :747. Gate flag: `Playerbots.AllowTrustedAccountBots=1`
+  (default on - playerbots.conf.dist:167, PlayerbotAIConfig.cpp:186).
+- Links/keys live in the playerbots DB (`PlayerbotsDatabaseInfo`, dist default
+  `acore_playerbots`, playerbots.conf.dist:2527):
+  - `playerbots_account_links(account_id, linked_account_id)` - `link` inserts
+    BOTH directions (PlayerbotMgr.cpp:1957-1963); `IsAccountLinked` reads it (:244-250).
+  - `playerbots_account_keys(account_id, security_key)` - key stored as SHA-256 hex
+    (PlayerbotMgr.cpp:1894-1913).
+- In-game commands, SEC_PLAYER + Console::No (PlayerbotCommandScript.cpp:29-32),
+  run from ANY toon in a client:
+    .playerbots account setKey <key>           # on a toon of the account TO BE linked
+    .playerbots account link <ACCOUNT> <key>   # from Leo (I_WAS_CMD): links ACCOUNT in
+    .playerbots account linkedAccounts         # list (system message to the issuer)
+    .playerbots account unlink <ACCOUNT>       # removes both directions (:2011-2020)
+- botcmd wrappers (queued to Leo's FIFO): `botcmd roster link` (list),
+  `roster link check <ACCT>`, `roster link <ACCT> <KEY>`, `roster link setkey <KEY>`,
+  `roster link unlink <ACCT>` (Roster menu -> 8). The ritual warns per
+  RITUAL_ACCOUNT when it is not linked to the shell account. Read-only DB view:
+  acore_playerbots.playerbots_account_links.
+- Typical fix for "Golbez (on I_WAS_HERE5TH) never gets bot AI":
+    1) client-login any I_WAS_HERE5TH toon -> `.playerbots account setKey mykey` -> logout
+    2) `botcmd roster link I_WAS_HERE5TH mykey`      (queued to Leo)
+    3) `botcmd roster link check I_WAS_HERE5TH`      -> IS linked
+    4) `botcmd roster ritual`                        -> addaccount I_WAS_HERE5TH attaches AI
+
 ## botcmd UI: states picker, zone travel, blank-Enter-back
 
 - Menus: blank Enter (or `b`/`back`) = up one screen, everywhere.
@@ -303,3 +332,33 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   and whether the menu lock is held, each with a fix hint. leo-watchdog also
   logs a WARNING into the journal when it sees more than one daemon or more
   than one leo shell.
+
+## Quest & RPG whisper commands (wiki Playerbot-Commands + source @ e88cc40)
+- `rpg status do quest [id]` is NOT deprecated at e88cc40: TellRpgStatusAction
+  (NewRpgAction.cpp:45-225) implements it (RPG_DO_QUEST branch :183-215), but SETs
+  need master/GM (:60-69, else "Only your master or a GM can change my rpg status.")
+  and the quest must already be in the bot's log with status INCOMPLETE/COMPLETE,
+  else "Invalid quest" / "No quest available; use 'do quest <id>'" whispered to the issuer.
+  Bare `rpg status` (read) is prefix-listed in unsecuredCommands (PlayerbotAI.cpp:1011)
+  -> INVITE level, replies to the issuer. Every other command needs ALLOW_ALL at
+  execution (PlayerbotAI.cpp:1092-1096: requiredLevel = unsecured-prefix ? INVITE : ALLOW_ALL;
+  re-checked silently on execution, :642-647).
+- `rpg do quest <id|quest-link>` is a SEPARATE command (StartRpgDoQuestAction,
+  NewRpgAction.cpp:227-244): ChangeToDoQuest WITHOUT requiring the quest in the log,
+  whispers "Start to do quest <id>" to the issuer. Despite the wiki's note it is still
+  ALLOW_ALL at e88cc40 ("rpg do quest" is not in unsecuredCommands) - master/GM only.
+- Both drive the NEW rpg engine (NewRpgInfo) - they only take effect while the
+  new-rpg strategy is enabled; with it toggled off the state machine is not ticking.
+- Quest log via whisper (TellMaster - MASTER-only reply, ListQuestsActions.cpp:11-40):
+    quests                -> "--- Summary --- Total: X / 25 (incompleted: .., completed: ..)"
+    quests all            -> full log with links (Incompleted / Completed sections)
+    quests co | quests in -> completed / incompleted only
+    quests travel         -> per-quest destinations/points summary (where the bot can go)
+    quests travel detail  -> full detail incl. "[Active] traveling <dist> to <title>"
+  Live from Leo: /w Locke quests all   |   via botcmd: botcmd states probe Locke "quests all"
+  Fleet-wide read-only from the DB instead: botcmd states quests [bot|all]
+  (character_queststatus; 1=COMPLETE 3=INCOMPLETE 5=FAILED 6=REWARDED).
+- Other wiki quest commands (ChatTriggerContext.h: accept/drop/talk/rpg do quest):
+  `accept [quest|*]`, `drop [quest]` (DropQuestAction), `r [item]` (choose reward),
+  `[quest link]` (objectives status), `talk` (selected NPC), `u [game object]`,
+  plus `los` (visible objects/creatures), `stats`, `who`, `spells` - all ALLOW_ALL.

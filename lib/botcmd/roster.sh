@@ -38,6 +38,13 @@ roster_ritual() {
     warn "log those toons out first, then re-run the ritual - until they have bot AI they never answer /w"
   fi
   for a in $BOTCMD_RITUAL_ACCOUNTS; do
+    _roster_link_ok "$a"; local lrc=$?
+    if [ "$lrc" = "1" ]; then
+      warn "NOT LINKED to $BOTCMD_SHELL_ACCOUNT - 'addaccount $a' will be refused ('You are not allowed to control bot ...', PlayerbotMgr.cpp:110-116,747)"
+      warn "  fix: setKey on $a (on one of its toons in a client: .playerbots account setKey <KEY>), then: botcmd roster link $a <KEY>"
+    elif [ "$lrc" = "2" ]; then
+      warn "cannot verify link of $a (playerbots DB unreadable?) - in-game as Leo: .playerbots account linkedAccounts"
+    fi
     if game_send ".playerbots bot addaccount $a"; then okmsg "queued: addaccount $a"; sleep 1; fi
   done
   for b in $BOTCMD_RITUAL_BOTS; do
@@ -160,6 +167,110 @@ roster_down() {  # $1 = toon name or "all" - get online toons offline so addacco
   _roster_down_one "$target"
 }
 
+# Is account $1 linked to the shell account in the playerbots DB?
+# rc: 0 = linked, 1 = not linked, 2 = cannot tell (DB/table unreadable).
+# Source: IsAccountLinked (PlayerbotMgr.cpp:244-250) reads
+# acore_playerbots.playerbots_account_links(account_id, linked_account_id);
+# the access check that needs it is PlayerbotMgr.cpp:110-116 (+:747 addaccount).
+_roster_link_ok() {
+  local acct="$1" q
+  case "$acct" in ""|*[!A-Za-z0-9_]*) return 2 ;; esac
+  q=$(db_ro -N -B -e "SELECT COUNT(*) FROM acore_playerbots.playerbots_account_links l JOIN acore_auth.account a ON a.id=l.account_id JOIN acore_auth.account s ON s.id=l.linked_account_id WHERE (UPPER(a.username)=UPPER('$acct') AND UPPER(s.username)=UPPER('$BOTCMD_SHELL_ACCOUNT')) OR (UPPER(s.username)=UPPER('$acct') AND UPPER(a.username)=UPPER('$BOTCMD_SHELL_ACCOUNT'))" 2>/dev/null | head -n 1)
+  [ -z "$q" ] && return 2
+  case "$q" in *[!0-9]*) return 2 ;; esac
+  [ "$q" -ge 1 ] 2>/dev/null && return 0
+  return 1
+}
+
+# Account linking for cross-account altbots ("trusted accounts"):
+#   Playerbots.AllowTrustedAccountBots=1 (default: playerbots.conf.dist:167,
+#   PlayerbotAIConfig.cpp:186). add/addaccount of a toon on ANOTHER account is
+#   allowed only if that account is linked to the master's (PlayerbotMgr.cpp:110-116,747).
+#   Links/keys live in the playerbots DB (PlayerbotsDatabaseInfo, dist: acore_playerbots,
+#   playerbots.conf.dist:2527): playerbots_account_links (both directions inserted,
+#   PlayerbotMgr.cpp:1957-1963) and playerbots_account_keys (SHA-256 hex, :1894-1913).
+#   In-game commands are SEC_PLAYER + Console::No (PlayerbotCommandScript.cpp:29-32):
+#     .playerbots account setKey <key>           - run on a toon of the account TO BE linked
+#     .playerbots account link <ACCOUNT> <key>   - run from Leo; links ACCOUNT into I_WAS_CMD
+#     .playerbots account linkedAccounts         - list (PSendSysMessage to issuer)
+#     .playerbots account unlink <ACCOUNT>       - deletes both directions (:2011-2020)
+roster_link() {  # botcmd roster link [list] | check <ACCT> | <ACCT> <KEY> | setkey <KEY> | unlink <ACCT>
+  local sub="${1:-list}" acct="${2:-}" key="${3:-}" rows a rc
+  case "$sub" in
+    list|"")
+      hdr "Account links (read-only: acore_playerbots.playerbots_account_links + acore_auth.account)"
+      rows=$(db_ro -t -e "SELECT a.username AS account, la.username AS linked_to FROM acore_playerbots.playerbots_account_links l JOIN acore_auth.account a ON a.id=l.account_id LEFT JOIN acore_auth.account la ON la.id=l.linked_account_id ORDER BY a.username, la.username" 2>/dev/null)
+      if [ -z "$rows" ]; then
+        warn "no rows - or acore_playerbots not readable with the RO identity (PlayerbotsDatabaseInfo default: acore_playerbots, playerbots.conf.dist:2527)"
+        warn "live check instead, in-game as Leo: .playerbots account linkedAccounts (PlayerbotCommandScript.cpp:31)"
+        return 1
+      fi
+      printf '%s\n' "$rows"
+      echo
+      for a in $BOTCMD_RITUAL_ACCOUNTS; do
+        _roster_link_ok "$a"; rc=$?
+        case "$rc" in
+          0) okmsg "$a: linked to $BOTCMD_SHELL_ACCOUNT - addaccount will attach its toons" ;;
+          1) warn "$a: NOT linked to $BOTCMD_SHELL_ACCOUNT - 'addaccount $a' refused; fix: botcmd roster link $a <KEY> (setKey on $a first)" ;;
+          *) warn "$a: link state unknown (playerbots DB unreadable)" ;;
+        esac
+      done
+      return 0
+      ;;
+    check)
+      [ -n "$acct" ] || { errmsg "usage: botcmd roster link check <ACCOUNT>"; return 1; }
+      case "$acct" in *[!A-Za-z0-9_]*) errmsg "account names are letters/digits/underscore - '$acct' rejected"; return 1 ;; esac
+      hdr "Link check: $acct vs shell account $BOTCMD_SHELL_ACCOUNT"
+      _roster_link_ok "$acct"; rc=$?
+      case "$rc" in
+        0) okmsg "$acct IS linked to $BOTCMD_SHELL_ACCOUNT (both directions stored, PlayerbotMgr.cpp:1957-1963) - add/addaccount from Leo passes the linked-account check (PlayerbotMgr.cpp:110-116, :747)"; return 0 ;;
+        1) warn "$acct is NOT linked to $BOTCMD_SHELL_ACCOUNT - add/addaccount of its toons is refused ('Failure: You are not allowed to control bot ...')"
+           warn "fix: 1) on a toon of $acct in a client: .playerbots account setKey <KEY>   (SHA-256 stored, PlayerbotMgr.cpp:1894-1913)"
+           warn "     2) from Leo: botcmd roster link $acct <KEY>   (or in-game: .playerbots account link $acct <KEY>)"
+           warn "     3) verify: botcmd roster link check $acct  /  in-game .playerbots account linkedAccounts"
+           return 1 ;;
+        *) warn "cannot read acore_playerbots.playerbots_account_links with the RO identity - in-game as Leo: .playerbots account linkedAccounts"; return 1 ;;
+      esac
+      ;;
+    setkey)
+      [ -n "$acct" ] || { errmsg "usage: botcmd roster link setkey <KEY>"; return 1; }
+      case "$acct" in *[!A-Za-z0-9_.-]*) errmsg "key must be letters/digits/_/./- only - rejected"; return 1 ;; esac
+      [ "${#acct}" -ge 4 ] || { errmsg "key must be at least 4 chars - rejected"; return 1; }
+      hdr "Set security key on Leo's account ($BOTCMD_SHELL_ACCOUNT)"
+      warn "this lets OTHER accounts link INTO $BOTCMD_SHELL_ACCOUNT - keep the key private"
+      if game_send ".playerbots account setKey $acct"; then okmsg "queued: .playerbots account setKey (SHA-256 hex into acore_playerbots.playerbots_account_keys, PlayerbotMgr.cpp:1894-1913)"; return 0; fi
+      return 1
+      ;;
+    unlink)
+      [ -n "$acct" ] || { errmsg "usage: botcmd roster link unlink <ACCOUNT>"; return 1; }
+      case "$acct" in *[!A-Za-z0-9_]*) errmsg "account names are letters/digits/underscore - '$acct' rejected"; return 1 ;; esac
+      hdr "Unlink $acct from $BOTCMD_SHELL_ACCOUNT"
+      if game_send ".playerbots account unlink $acct"; then okmsg "queued: .playerbots account unlink $acct (both directions deleted, PlayerbotMgr.cpp:2011-2020)"; return 0; fi
+      return 1
+      ;;
+    *)
+      # link <ACCT> <KEY>
+      case "$sub" in *[!A-Za-z0-9_]*) errmsg "account names are letters/digits/underscore - '$sub' rejected"; return 1 ;; esac
+      if [ "$(printf '%s' "$sub" | tr '[:lower:]' '[:upper:]')" = "$(printf '%s' "$BOTCMD_SHELL_ACCOUNT" | tr '[:lower:]' '[:upper:]')" ]; then
+        errmsg "REFUSED: linking the shell account to itself is a no-op"; return 1
+      fi
+      [ -n "$acct" ] || { errmsg "usage: botcmd roster link <ACCOUNT> <KEY>"; return 1; }
+      case "$acct" in *[!A-Za-z0-9_.-]*) errmsg "key must be letters/digits/_/./- only - rejected"; return 1 ;; esac
+      [ "${#acct}" -ge 4 ] || { errmsg "key must be at least 4 chars - rejected"; return 1; }
+      hdr "Link $sub into Leo's account ($BOTCMD_SHELL_ACCOUNT)"
+      warn "prereq: the key must already be set ON $sub - on one of its toons in a client: .playerbots account setKey $acct"
+      warn "        (else the link answers 'Invalid security key', PlayerbotMgr.cpp:1929-1949)"
+      if game_send ".playerbots account link $sub $acct"; then
+        okmsg "queued: .playerbots account link $sub <key> - inserts BOTH directions (PlayerbotMgr.cpp:1957-1963)"
+        warn "verify: botcmd roster link check $sub   (in-game as Leo: .playerbots account linkedAccounts)"
+        warn "then:   botcmd roster ritual  -> addaccount $sub attaches bot AI to its toons"
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+}
+
 # one-command repair: kick every online watched toon (they cannot have bot AI
 # while their human session is up), then ritual (attaches AI on fresh login),
 # then verify the live rpg statuses
@@ -187,7 +298,8 @@ roster_menu() {
  5. Send a bot to a zone (go travel)
  6. Kick a toon out (SOAP .kick - no game client needed)
  7. FIX roster: kick all online bots + ritual + verify
- 8. Return to main menu   (blank Enter = back)
+ 8. Account links (list | check ACCT | ACCT KEY | setkey KEY | unlink ACCT)
+ 9. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -202,7 +314,9 @@ EOF
          pause ;;
       6) printf '%s' "toon to kick (or 'all'): "; IFS= read -r n; roster_down "$n"; pause ;;
       7) roster_fix; pause ;;
-      8) return 0 ;;
+      8) printf '%s' "link args (list | check I_WAS_HERE5TH | I_WAS_HERE5TH mykey | setkey mykey | unlink I_WAS_HERE5TH): "; IFS= read -r lnk
+         roster_link $lnk; pause ;;
+      9) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done
