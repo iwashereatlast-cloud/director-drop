@@ -214,15 +214,16 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   its `/w` lines, because a whisper to a toon not in the world is a harmless no-op
   and the DB flag is not ground truth anyway (worldserver boot resets ALL flags to
   0 - Main.cpp:520 - and real logins rewrite them async - CharacterHandler.cpp:921).
-  The flag is printed inline as info only; `botcmd states verify` (rpg status
-  read-back) is the source of truth for who actually received the orders.
+  The flag is printed inline as info only; `botcmd states verify` ('nc ?' +
+  rpg status read-back) is the source of truth for who actually received the orders.
   `botcmd states verify all force` additionally probes bots the DB flags offline.
 - `botcmd states probe [bot|all] [force] [cmd...]` is a raw whisper passthrough
   (default `nc ?`): Leo sends `/w <bot> <cmd>` and ALL reply lines per bot are
-  printed (verify keeps only the last line per bot - probe shows error whispers
-  too, e.g. `No quest available; use 'do quest <id>'`). Source notes:
-  `nc ?`/`co ?` list ALL registered strategies of that engine and reply via
-  TellMaster to the MASTER only (Engine.cpp:695); `rpg status do quest` needs a
+  printed (verify reads the `Strategies:` line for its verdict - probe shows ALL
+  lines, e.g. `No quest available; use 'do quest <id>'`). Source notes:
+  `nc ?`/`co ?` list the ENABLED strategies of that engine (Engine.cpp:524
+  ListStrategies; +/- at :676-694) and reply via TellMaster to the MASTER only
+  (Engine.cpp:695); `rpg status do quest` needs a
   quest with a POI in the bot's log or it refuses (NewRpgAction.cpp:183-215);
   on IDLE the new-rpg engine re-rolls the status by RpgStatusProbWeight
   (NewRpgAction.cpp:250-256) - that is the REST/GO_GRIND/WANDER flip-flopping.
@@ -231,7 +232,8 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   machine and includes questing - see the `nc ?` list). `rpg status do quest`
   only SETS (by id, or the first log quest with a POI) and refuses with
   `No quest available` when the log has none (NewRpgAction.cpp:183-215) -
-  which is why verify showed MISMATCH on bots with empty quest logs. See the
+  which is why the old status-based verify showed MISMATCH on bots with empty
+  quest logs (verify now checks `nc ?` membership instead). See the
   actual quest log per bot, read-only from the DB: `botcmd states quests [bot|all]`
   (character_queststatus; 1=COMPLETE 3=INCOMPLETE 5=FAILED 6=REWARDED).
 - Zone travel (verified vs mod-playerbots @ e88cc40): `go travel <zone>` matches
@@ -254,13 +256,22 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   argument it opens a `[x]` picker in the same style as the per-bot state menu
   (the box is ticked when every watched bot currently has that same state).
 - After a set-all / apply-all, Leo automatically whispers each online bot
-  `rpg status` and botcmd tabulates the replies (`botcmd states verify
-  [bot|all]`, States menu -> 8): conf vs live `Status: GO_GRIND / DO_QUEST /
-  DO_GATHER / IDLE ...` with OK / MISMATCH / NO REPLY per bot. Source-verified:
-  `rpg status` with no args whispers back `NewRpgInfo::ToString()`
-  (NewRpgAction.cpp, TellRpgStatusAction). The full nc strategy set itself has
-  no read-only view (`.playerbots bot` is in-game only).
-  Any `[name] [whisper]:` reply line is captured (not just `Status:` lines);
+  `nc ?` AND `rpg status`, and botcmd tabulates the replies (`botcmd states
+  verify [bot|all]`, States menu -> 8). The VERDICT comes from `nc ?` strategy
+  MEMBERSHIP vs the conf: `nc ?` whispers `ListStrategies()` = the ENABLED
+  strategies only (Engine.cpp:524-538; +/- add/removeStrategy at :676-694) via
+  TellMaster to the bot's MASTER (Engine.cpp:695, PlayerbotAI.cpp:3170) - so a
+  `Strategies:` reply also proves Leo is that bot's master. Presets are
+  strategy SETS, not rpg states: conf `quest` = `nc +new rpg,+quest,-grind,...`
+  shows up as `quest`+`new rpg` present and `grind`/`gather`/`follow` absent in
+  the `nc ?` list, while `rpg status` (NewRpgInfo::ToString(),
+  NewRpgAction.cpp) is a TRANSIENT state that re-rolls on IDLE
+  (RpgStatusProbWeight, NewRpgAction.cpp:250-256) - shown as the LIVE column
+  for info, never the verdict; DO_QUEST only appears while a quest POI is
+  active (:183-215), which is why the old status-based verify showed MISMATCH
+  on bots with empty quest logs. OK / MISMATCH (nc: missing [..] still on [..])
+  / NO REPLY per bot. Any `[name] [whisper]:` reply line is captured (not just
+  `Status:` lines);
   `BOTCMD_VERIFY_DEBUG=1` additionally dumps the raw new log lines, and
   `BOTCMD_VERIFY_WAIT=<seconds>` changes the default 20s collect window.
   The table also shows each bot's live GROUP/LEADER (read-only DB

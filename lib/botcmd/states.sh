@@ -19,8 +19,9 @@ RPG semantics (mod-playerbots @ e88cc40): 'rpg status do quest' needs a quest wi
 a POI in the bot's log - else the bot whispers "No quest available" and keeps its
 status (NewRpgAction.cpp:183-215); when the status hits IDLE the new-rpg engine
 re-rolls it randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256). So a
-durable 'quest' state = nc +new rpg + quests in the log; see replies live with:
-  botcmd states probe all "nc ?"              # strategy list (goes to master Leo)
+durable 'quest' state = nc +new rpg + quests in the log; read it back with:
+  botcmd states verify                        # verdict = 'nc ?' strategy membership; rpg status = info
+  botcmd states probe all "nc ?"              # raw list (goes to master Leo)
   botcmd states probe all "rpg status do quest"   # shows per-bot error whispers
 Gotcha (receipt 2026-11-03): "new rpg" is ONE strategy name with a space -
 remove it as the single token "-new rpg", never "-new,-rpg".
@@ -52,15 +53,15 @@ state_expand() {  # $1 = conf value
   esac
 }
 
-# NOTE: the full LIVE strategy set (nc +/-) has no read-only view:
-# '.playerbots inspect' does not exist in mod-playerbots @ e88cc40 and
-# '.playerbots bot <name> ...' is Console::No (needs an active in-game session),
-# so SOAP cannot run it either. The old _states_inspect() called a nonexistent
-# command AND duplicated the SOAP envelope code - removed. BUT the rpg status
-# IS readable: '/w <bot> rpg status' (no args) whispers back
-# NewRpgInfo::ToString() -> "Status: GO_GRIND / DO_QUEST / DO_GATHER / IDLE ..."
-# (source: src/Ai/World/Rpg/Action/NewRpgAction.cpp TellRpgStatusAction::Execute).
-# states_verify() uses exactly that to read back what each bot is doing.
+# NOTE: the LIVE strategy set IS readable after all: 'nc ?' whispers
+# ListStrategies() - the ENABLED strategies only (Engine.cpp:524-538; the +/-
+# toggles at Engine.cpp:676-694 add/remove from that same map) - via TellMaster
+# to the bot's MASTER only (Engine.cpp:695, PlayerbotAI.cpp:3170), so the
+# 'Strategies:' reply also proves mastership. states_verify() uses it for the
+# verdict. 'rpg status' (no args) whispers back NewRpgInfo::ToString() ->
+# "Status: GO_GRIND / DO_QUEST / ... " - a TRANSIENT state that re-rolls on
+# IDLE by RpgStatusProbWeight (NewRpgAction.cpp:250-256), shown as info only.
+# ('.playerbots bot <name>' is Console::No - SOAP cannot run it.)
 
 _states_conf_entries() {  # prints "name<TAB>value" per conf line
   [ -r "$BOTCMD_STATES_CONF" ] || return 1
@@ -93,7 +94,7 @@ states_show() {
   rm -f /tmp/.botcmd-entries.$$
   echo
   warn "purity rule: states are sent by YOU (apply), never auto-applied on login"
-  warn "full nc strategy set has no read-only view - read back the rpg status with: botcmd states verify"
+  warn "read back live strategies ('nc ?') + rpg status with: botcmd states verify"
 }
 
 states_apply() {  # $1 = bot name or "all" (default). NO online gate: every conf bot gets
@@ -353,15 +354,23 @@ _grp_kind() {
   esac
 }
 
-# Read-back verification: Leo whispers 'rpg status' to each online target bot
-# (via the FIFO, exactly like an order), then we collect the "[Name] [whisper]:
-# Status: X" replies from the shell log and tabulate conf vs live status.
-# Source-verified: 'rpg status' with no args whispers back NewRpgInfo::ToString().
+# Read-back verification: Leo whispers 'nc ?' AND 'rpg status' to each online
+# target bot (via the FIFO, exactly like an order), then we collect the
+# "[Name] [whisper]: ..." replies from the shell log and tabulate conf vs live.
+# Source-verified @ e88cc40: 'nc ?' whispers ListStrategies() - the ENABLED
+# strategy names (Engine.cpp:524-538; +/- add/removeStrategy at :676-694) -
+# via TellMaster to the bot's MASTER only (Engine.cpp:695, PlayerbotAI.cpp:3170).
+# 'rpg status' (no args) whispers NewRpgInfo::ToString() ("Status: X ...") - a
+# TRANSIENT rpg state (re-rolls on IDLE by RpgStatusProbWeight, NewRpgAction.cpp:
+# 250-256). The verdict for a strategy preset comes from 'nc ?' MEMBERSHIP (a
+# preset like 'quest' is a strategy SET, not an rpg status - DO_QUEST only shows
+# while a quest POI is active, NewRpgAction.cpp:183-215, so bots with empty quest
+# logs never show it); the rpg status is shown as info only.
 states_verify() {  # $1 = bot name or "all" (default all online watched bots);
                     # $2 = "force" (or BOTCMD_VERIFY_FORCE=1) also probes bots the DB flags offline
   local target="${1:-all}" force="${2:-}" log="$BOTCMD_SHELL_LOG" start n online
   [ "${BOTCMD_VERIFY_FORCE:-0}" = "1" ] && force=force
-  hdr "Verify live states (Leo whispers 'rpg status' to online bots, reads replies)"
+  hdr "Verify live states (Leo whispers 'nc ?' + 'rpg status'; verdict = nc strategy membership)"
   if [ ! -r "$log" ]; then
     errmsg "no $log - is the Leo shell up? (botcmd leo status)"
     return 1
@@ -416,28 +425,30 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
     fi
   fi
   start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
-  declare -A reply=()
+  declare -A reply=() replies=()
   # one scan of everything appended to the log since the probe started
   scan_new() {
     tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: .*' || true
   }
-  record() {  # $1 = raw matched line
+  record() {  # $1 = raw matched line - keeps the last line AND all lines per bot
     local who txt
     who=${1%%]*}; who=${who#\[}
     txt=${1#*\[whisper\]: }
     reply[$who]="$txt"
+    replies[$who]+="$txt"$'\n'
   }
   local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 line all sent=0
   # send probes one by one and scan after EACH send, so early replies are
   # never missed even when the post-send wait window is short
   for n in "${targets[@]}"; do
+    game_send "/w $n nc ?" && sent=$((sent + 1))
     game_send "/w $n rpg status" && sent=$((sent + 1))
     while IFS= read -r line; do
       [ -n "$line" ] && record "$line"
     done <<< "$(scan_new)"
     sleep 1
   done
-  okmsg "sent 'rpg status' to $sent/${#targets[@]} bot(s) - collecting replies (up to ${max}s more)..."
+  okmsg "sent 'nc ?' + 'rpg status' (${#targets[@]} bot(s), $sent whispers) - collecting replies (up to ${max}s more)..."
   while [ "$waited" -lt "$max" ]; do
     while IFS= read -r line; do
       [ -n "$line" ] && record "$line"
@@ -449,16 +460,28 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
   done
   echo
   printf '%-12s %-8s %-14s %-40s %s\n' "BOT" "CONF" "GRP" "LIVE(reply)" "VERDICT"
-  local conf txt st verdict exp grp
+  local conf txt st verdict grp strat status members norm missing extra wants nots w detail
+  local -a warr=()
+  # preset -> expected nc strategy membership (want ON / want OFF).
+  # 'new rpg' is ONE strategy name containing a space - split on ',' only.
   for n in "${targets[@]}"; do
     conf=$(_states_conf_get "$n"); [ -n "$conf" ] || conf="-"
-    txt=${reply[$n]:-}
+    txt=${replies[$n]:-}
     grp="-"
     if [ -n "${g_guid[$n]:-}" ]; then
       grp="$(_grp_kind "${g_type[$n]:-}"):${g_leader[$n]:-?}"
     fi
-    if [ -z "$txt" ]; then
+    strat=$(printf '%s' "$txt" | grep -a '^Strategies: ' | head -n 1)
+    status=$(printf '%s' "$txt" | grep -a '^Status: ' | head -n 1)
+    # LIVE column: transient rpg status if we got one (info), else the strategy list
+    if [ -n "$status" ]; then
+      st=$(printf '%s' "$status" | cut -c1-40); st=${st#Status: }
+    elif [ -n "$strat" ]; then
+      st=$(printf '%s' "$strat" | cut -c1-40)
+    else
       st="-"
+    fi
+    if [ -z "$txt" ]; then
       if [ -n "$force" ] && [ "${t_on[$n]:-}" != "1" ]; then
         verdict="db:offline - no reply expected unless the toon is actually online as a bot"
       elif [ -z "${g_guid[$n]:-}" ]; then
@@ -469,26 +492,56 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
         verdict="NO REPLY [group] in a group led by ${g_leader[$n]:-?} that Leo is not in (bot not leader -> TALK -> silent); grant I_WAS_CMD gmlevel or botcmd roster fix"
       fi
     else
-      st=$(printf '%s' "$txt" | head -n 1 | cut -c1-40)
-      case "$st" in Status:*) st=${st#Status: } ;; esac
       case "$conf" in
-        grind)  exp="GO_GRIND" ;;
-        quest)  exp="DO_QUEST" ;;
-        gather) exp="DO_GATHER" ;;
-        idle)   exp="IDLE" ;;
-        *)      exp="" ;;
+        grind|quest|gather|follow|idle)
+          case "$conf" in
+            grind)  wants="new rpg,grind";  nots="quest,gather,follow" ;;
+            quest)  wants="new rpg,quest";  nots="grind,gather,follow" ;;
+            gather) wants="new rpg,gather"; nots="grind,quest,follow" ;;
+            follow) wants="follow";         nots="" ;;
+            idle)   wants="";               nots="new rpg,grind,quest,gather,follow" ;;
+          esac
+          if [ -n "$strat" ]; then
+            members=${strat#Strategies: }
+            norm=",$members,"
+            norm=$(printf '%s' "$norm" | sed 's/, */,/g')
+            missing=""; extra=""
+            if [ -n "$wants" ]; then
+              IFS=',' read -ra warr <<< "$wants"
+              for w in "${warr[@]}"; do
+                case "$norm" in *",$w,"*) : ;; *) missing+="$w " ;; esac
+              done
+            fi
+            if [ -n "$nots" ]; then
+              IFS=',' read -ra warr <<< "$nots"
+              for w in "${warr[@]}"; do
+                case "$norm" in *",$w,"*) extra+="$w " ;; esac
+              done
+            fi
+            missing=$(printf '%s' "$missing" | xargs); extra=$(printf '%s' "$extra" | xargs)
+            if [ -z "$missing" ] && [ -z "$extra" ]; then
+              verdict="OK (nc: $conf strategies on)"
+            else
+              detail=""
+              [ -n "$missing" ] && detail+="missing [$missing] "
+              [ -n "$extra" ] && detail+="still on [$extra] "
+              verdict="MISMATCH (nc: $detail)- push conf with: botcmd states apply; if STILL off after apply, the nc SET was silently erased (needs ALLOW_ALL - Leo not master/GM) [master]"
+            fi
+          elif [ -n "$status" ]; then
+            verdict="rpg answered (INVITE ok) but 'nc ?' no reply - 'nc' needs ALLOW_ALL (master/GM), else the SET is silently erased (PlayerbotAI.cpp:642-647); or RepeatDelay dedupe on repeated text - rerun verify [master]"
+          else
+            verdict="reply shown (not a strategy list): $(printf '%s' "$txt" | head -n 1 | cut -c1-60)"
+          fi
+          ;;
+        *) verdict="custom conf - replies shown" ;;
       esac
-      if [ -z "$exp" ]; then
-        verdict="custom/follow conf - reply shown"
-      elif printf '%s' "$txt" | head -n 1 | grep -q "Status: $exp"; then
-        verdict="OK ($exp)"
-      else
-        verdict="MISMATCH (want $exp) - push conf with: botcmd states apply; if it STILL mismatches after apply, the SET was silently erased (needs ALLOW_ALL - Leo not master/GM) [master]"
-      fi
     fi
     printf '%-12s %-8s %-14s %-40s %s\n' "$n" "$conf" "$grp" "$st" "$verdict"
   done
   echo
+  warn "read-back: 'nc ?' lists ENABLED strategies only (Engine.cpp:524 ListStrategies; +/- at :676-694) and replies via TellMaster to the bot's"
+  warn "           MASTER (PlayerbotAI.cpp:3170) - a 'Strategies:' reply also proves Leo is that bot's master. 'rpg status' is transient"
+  warn "           (re-rolls on IDLE by RpgStatusProbWeight, NewRpgAction.cpp:250-256), shown as info only; DO_QUEST needs a quest POI in the log (:183-215)."
   warn "tags: [no-ai] no bot AI attached (add/addaccount refuse online toons - PlayerbotMgr.cpp:733; bot remove works online - PlayerbotMgr.cpp:756);"
   warn "      [group]/[master] Leo's level from that bot is below ALLOW_ALL (PlayerbotSecurity.cpp LevelFor; silent erase PlayerbotAI.cpp:642-647; deny suppressed for bot senders :190)"
   warn "fix: grant gmlevel on I_WAS_CMD (CanBeGameMaster -> ALLOW_ALL, PlayerbotSecurity.cpp:31) and/or botcmd roster fix to re-master via ritual"
@@ -645,7 +698,7 @@ states_menu() {
  5. Apply ONE bot's state
  6. Edit states conf
  7. Show presets + level->zone table
- 8. Verify live states now (rpg status read-back; CLI 'verify all force' also probes DB-offline bots)
+ 8. Verify live states now ('nc ?' strategy read-back + rpg status; CLI 'verify all force' also probes DB-offline bots)
  9. Probe any command (default 'nc ?' - lists strategies; replies go to master Leo)
 10. Return to main menu   (blank Enter = back)
 EOF
