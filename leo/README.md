@@ -212,6 +212,15 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   The flag is printed inline as info only; `botcmd states verify` (rpg status
   read-back) is the source of truth for who actually received the orders.
   `botcmd states verify all force` additionally probes bots the DB flags offline.
+- `botcmd states probe [bot|all] [force] [cmd...]` is a raw whisper passthrough
+  (default `nc ?`): Leo sends `/w <bot> <cmd>` and ALL reply lines per bot are
+  printed (verify keeps only the last line per bot - probe shows error whispers
+  too, e.g. `No quest available; use 'do quest <id>'`). Source notes:
+  `nc ?`/`co ?` list ALL registered strategies of that engine and reply via
+  TellMaster to the MASTER only (Engine.cpp:695); `rpg status do quest` needs a
+  quest with a POI in the bot's log or it refuses (NewRpgAction.cpp:183-215);
+  on IDLE the new-rpg engine re-rolls the status by RpgStatusProbWeight
+  (NewRpgAction.cpp:250-256) - that is the REST/GO_GRIND/WANDER flip-flopping.
 - Zone travel (verified vs mod-playerbots @ e88cc40): `go travel <zone>` matches
   destination titles by name (case-insensitive) and the engine level-filters
   destinations (TravelMgr level ranges vs bot level); rpg grind/quest/gather

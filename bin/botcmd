@@ -56,6 +56,7 @@ botcmd - Chazbot control
   botcmd states zones [level]         vanilla level->zone table (for go travel)
   botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|follow|idle)
   botcmd states verify [bot|all] [force]  Leo whispers 'rpg status' to bots; tabulates conf vs live reply + live group/leader (why a bot may be silent); force = also probe DB-offline bots
+  botcmd states probe [bot|all] [force] [cmd...]   raw whisper probe (default 'nc ?' - lists strategies, replies to master Leo); prints ALL reply lines per bot
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd watchdog procs               duplicate-process audit (daemons, leo shell, menu lock)
   botcmd system worldserver           ac-worldserver check
@@ -192,6 +193,7 @@ case "${1:-}" in
       zones) states_zones "${3:-}" ;;
       setall) states_setall "${3:-}" ;;
       verify) states_verify "${3:-all}" "${4:-}" ;;
+      probe) states_probe "${@:3}" ;;
       apply) states_apply "${3:-all}" ;;
       edit) states_edit ;;
       presets) states_presets ;;

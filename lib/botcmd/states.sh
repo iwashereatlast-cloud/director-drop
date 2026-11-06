@@ -14,6 +14,13 @@ Built-in presets (conf value = the preset word):
   idle     nc -new rpg,-grind,-gather ; rpg status idle   (stand down)
 Raw commands also work - separate multiple with ';;', e.g.:
   Crono: nc +new rpg,+grind,-follow ;; rpg status go grind
+RPG semantics (mod-playerbots @ e88cc40): 'rpg status do quest' needs a quest with
+a POI in the bot's log - else the bot whispers "No quest available" and keeps its
+status (NewRpgAction.cpp:183-215); when the status hits IDLE the new-rpg engine
+re-rolls it randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256). So a
+durable 'quest' state = nc +new rpg + quests in the log; see replies live with:
+  botcmd states probe all "nc ?"              # strategy list (goes to master Leo)
+  botcmd states probe all "rpg status do quest"   # shows per-bot error whispers
 Gotcha (receipt 2026-11-03): "new rpg" is ONE strategy name with a space -
 remove it as the single token "-new rpg", never "-new,-rpg".
 Zone recipes (go travel FIRST - the engine level-filters destinations and rpg
@@ -485,6 +492,75 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
   warn "full reply text: botcmd leo chat 60   (daemon.log also logs these replies as dropped bot-sender lines - expected)"
 }
 
+# Generic whisper probe: Leo sends '/w <bot> <command>' and we print EVERY
+# '[bot] [whisper]: ...' reply line from the shell log (verify keeps only the
+# last line per bot - probe shows all of them, e.g. "No quest available").
+# Source notes: 'nc ?'/'co ?' list ALL registered strategies of that engine and
+# reply via TellMaster -> MASTER only (Engine.cpp:695) - Leo gets them because
+# the ritual/raid makes Leo master (and gmlevel gives ALLOW_ALL anyway).
+# 'rpg status do quest' needs a quest with a POI in the bot's log, else the bot
+# whispers "No quest available; use 'do quest <id>'" and keeps its old status
+# (NewRpgAction.cpp:183-215); on IDLE the new-rpg engine re-rolls the status
+# randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256). NOTE: the probe
+# command runs FOR REAL (rpg status do X sets it) - it is a passthrough.
+states_probe() {  # $1 = bot|all (default all DB-online watched bots); $2 = force (optional); rest = command (default "nc ?")
+  local target="${1:-all}" force="" log="$BOTCMD_SHELL_LOG" start n online line
+  [ $# -gt 0 ] && shift
+  if [ "${1:-}" = "force" ]; then force=1; shift; fi
+  [ "${BOTCMD_VERIFY_FORCE:-0}" = "1" ] && force=1
+  local probe="${*:-nc ?}"
+  if [ -z "$probe" ] || ! printf '%s' "$probe" | grep -qE '^[A-Za-z0-9 ?+,\.:-]+$'; then
+    errmsg "probe charset: letters/digits/space and ? + - , . : only - '$probe' rejected"
+    return 1
+  fi
+  hdr "Probe: Leo whispers '/w <bot> $probe' - prints ALL whisper replies (command runs for real)"
+  if [ ! -r "$log" ]; then errmsg "no $log - is the Leo shell up? (botcmd leo status)"; return 1; fi
+  local -a targets=()
+  if [ "$target" = "all" ]; then
+    while IFS=$'\t' read -r n _ online _; do
+      if [ "$online" = "1" ] || [ -n "$force" ]; then targets+=("$n"); fi
+    done < <(_states_all_bots)
+  else
+    case "$target" in
+      *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; return 1 ;;
+    esac
+    if is_handplay "$target"; then errmsg "REFUSED: $target is hand-play (G1) - never commanded"; return 1; fi
+    targets+=("$target")
+  fi
+  if [ "${#targets[@]}" -eq 0 ]; then warn "no watched bots to probe right now"; return 1; fi
+  start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
+  local -a raw=()
+  scan_new() { tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: .*' || true; }
+  collect() { while IFS= read -r line; do [ -n "$line" ] && raw+=("$line"); done <<< "$(scan_new)"; }
+  local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 sent=0 all
+  for n in "${targets[@]}"; do
+    game_send "/w $n $probe" && sent=$((sent + 1))
+    collect
+    sleep 1
+  done
+  okmsg "sent '/w <bot> $probe' to $sent/${#targets[@]} bot(s) - collecting replies (up to ${max}s more)..."
+  while [ "$waited" -lt "$max" ]; do
+    collect
+    all=1
+    for n in "${targets[@]}"; do
+      if [ "${#raw[@]}" -eq 0 ] || ! printf '%s\n' "${raw[@]}" | grep -q "^\[$n\] \[whisper\]:"; then all=0; fi
+    done
+    [ "$all" = "1" ] && break
+    sleep 1; waited=$((waited + 1))
+  done
+  echo
+  for n in "${targets[@]}"; do
+    printf '%-12s ' "$n"
+    if [ "${#raw[@]}" -gt 0 ] && printf '%s\n' "${raw[@]}" | grep -q "^\[$n\] \[whisper\]:"; then
+      printf '%s\n' "${raw[@]}" | grep "^\[$n\] \[whisper\]:" | awk '!seen[$0]++' | sed 's/^\[[A-Za-z]*\] \[whisper\]: /  reply: /' | head -n 6
+    else
+      echo "NO REPLY"
+    fi
+  done
+  echo
+  warn "raw log: botcmd leo chat 60   (daemon.log logs these as dropped bot-sender lines - expected)"
+}
+
 # set EVERY watched alt bot's conf to one preset, then apply (which verifies).
 # $1 = optional preset; no arg -> interactive [x] picker (states_pick_preset).
 states_setall() {  # $1 = grind|quest|gather|follow|idle (optional)
@@ -520,7 +596,8 @@ states_menu() {
  6. Edit states conf
  7. Show presets + level->zone table
  8. Verify live states now (rpg status read-back; CLI 'verify all force' also probes DB-offline bots)
- 9. Return to main menu   (blank Enter = back)
+ 9. Probe any command (default 'nc ?' - lists strategies; replies go to master Leo)
+10. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -533,7 +610,8 @@ EOF
       6) states_edit ;;
       7) states_presets; echo; states_zones; pause ;;
       8) states_verify all; pause ;;
-      9) return 0 ;;
+      9) states_probe all; pause ;;
+      10) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done
