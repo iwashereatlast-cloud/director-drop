@@ -21,10 +21,17 @@ status (NewRpgAction.cpp:183-215); when the status hits IDLE the new-rpg engine
 re-rolls it randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256). So a
 durable 'quest' state = nc +new rpg + quests in the log; read it back with:
   botcmd states verify                        # verdict = 'nc ?' strategy membership; rpg status = info
+  botcmd states tune [bot|all]                # read-modify-write apply: probe 'nc ?'/'co ?', whisper ONLY the diff (full push on no reply), then verify
   botcmd states probe all "nc ?"              # raw list (goes to master Leo)
   botcmd states probe all "rpg status do quest"   # shows per-bot error whispers
   botcmd states probe Locke "quests all"      # live quest log via whisper (TellMaster = master only, ListQuestsActions.cpp:11-40)
   botcmd states probe Locke "rpg do quest 153"    # set DO_QUEST by id/link WITHOUT needing it in the log (StartRpgDoQuestAction, NewRpgAction.cpp:227-244) - still ALLOW_ALL
+Mail/vendor/bank (probe passes item links; all ALLOW_ALL except sendmail which is
+unsecured/INVITE - replies go to master Leo; see README 'Mail / vendor / bank'):
+  botcmd states probe all "mail ?"               # list each bot's mailbox (needs mailbox nearby)
+  botcmd states probe Locke "sendmail |cffffffff|Hitem:16896:0:0:0:0:0:0:0:0|h[Major Soulstone]|h|r"   # mail ONE item to Leo
+  botcmd states probe all "s vendor"             # sell what the vendor buys; also: s gray | s green all | s <item link>
+  botcmd states probe Locke "repair"             # repair at a repair vendor; bank via "bank ?" (banker nearby)
 Gotcha (receipt 2026-11-03): "new rpg" is ONE strategy name with a space -
 remove it as the single token "-new rpg", never "-new,-rpg".
 Zone recipes (go travel FIRST - the engine level-filters destinations and rpg
@@ -53,6 +60,82 @@ state_expand() {  # $1 = conf value
     idle)   printf '%s\n' 'nc -new rpg,-grind,-quest,-gather,-follow' 'rpg status idle' ;;
     *)      printf '%s\n' "$1" | sed 's/ *;; */\n/g' ;;
   esac
+}
+
+# preset word -> expected nc strategy membership as "wants<TAB>nots" (csv).
+# 'new rpg' is ONE strategy name containing a space - tokens split on ',' only.
+# Used by states_verify (verdict) and states_tune (diff-apply) so both agree.
+_preset_wants_nots() {  # $1 = preset word; prints "wants|nots"; rc 1 = not a preset
+  # NOTE: separator is '|' not TAB - under 'IFS=$'\t' read' consecutive tabs
+  # collapse (tab is IFS whitespace), which would swap empty fields (idle preset).
+  case "$1" in
+    grind)  printf 'new rpg,grind|quest,gather,follow\n' ;;
+    quest)  printf 'new rpg,quest|grind,gather,follow\n' ;;
+    gather) printf 'new rpg,gather|grind,quest,follow\n' ;;
+    follow) printf 'follow|\n' ;;
+    idle)   printf '|new rpg,grind,quest,gather,follow\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---- diff-apply (tune) helpers ----
+# Parse a conf value into per-engine wants/nots from its nc/co lines.
+# prints one line per engine: "nc<TAB>wants<TAB>nots" / "co<TAB>wants<TAB>nots".
+# rc 1 when an engine line has a non +/- token (e.g. '~' toggle) - caller then
+# pushes that engine's original lines verbatim (cannot diff a toggle).
+_conf_engine_wants() {  # $1 = conf value (preset word or raw ';;'-separated cmds)
+  local v="$1" line rest tok engine rc=0 pw
+  local wants_nc="" nots_nc="" wants_co="" nots_co="" bad_nc=0 bad_co=0
+  pw=$(_preset_wants_nots "$v")   # captured - must NOT leak to stdout
+  if [ -n "$pw" ]; then
+    IFS='|' read -r wants_nc nots_nc <<< "$pw"
+    printf 'nc|%s|%s\n' "$wants_nc" "$nots_nc"
+    return 0
+  fi
+  local -a toks=()
+  while IFS= read -r line; do
+    case "$line" in
+      "nc "*) engine=nc; rest="${line#nc }" ;;
+      "co "*) engine=co; rest="${line#co }" ;;
+      *) continue ;;
+    esac
+    IFS=',' read -ra toks <<< "$rest"
+    for tok in "${toks[@]}"; do
+      tok=$(printf '%s' "$tok" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      case "$tok" in
+        +*) if [ "$engine" = nc ]; then wants_nc+="${wants_nc:+,}${tok#+}"; else wants_co+="${wants_co:+,}${tok#+}"; fi ;;
+        -*) if [ "$engine" = nc ]; then nots_nc+="${nots_nc:+,}${tok#-}"; else nots_co+="${nots_co:+,}${tok#-}"; fi ;;
+        *)  if [ "$engine" = nc ]; then bad_nc=1; else bad_co=1; fi ;;
+      esac
+    done
+  done < <(state_expand "$v")
+  [ "$bad_nc" = "1" ] && rc=1
+  [ "$bad_co" = "1" ] && rc=1
+  if [ -n "$wants_nc$nots_nc" ] || [ "$bad_nc" = "1" ]; then printf 'nc|%s|%s\n' "$wants_nc" "$nots_nc"; fi
+  if [ -n "$wants_co$nots_co" ] || [ "$bad_co" = "1" ]; then printf 'co|%s|%s\n' "$wants_co" "$nots_co"; fi
+  return $rc
+}
+
+# Compute the toggle string needed to go from an enabled set to wants/nots.
+# $1 = "Strategies: a, b, c" reply (or ""), $2 = wants csv, $3 = nots csv.
+# prints "+a,+b,-c" (empty = in sync). Empty $1 prints "!" (no info -> caller
+# falls back to a full push).
+_strategies_diff() {
+  local reply="$1" wants="$2" nots="$3"
+  [ -z "$reply" ] && { printf '!'; return 0; }
+  local members="${reply#Strategies: }" norm w out="" missing="" extra=""
+  norm=",$members,"; norm=$(printf '%s' "$norm" | sed 's/, */,/g')
+  local -a warr=()
+  if [ -n "$wants" ]; then
+    IFS=',' read -ra warr <<< "$wants"
+    for w in "${warr[@]}"; do case "$norm" in *",$w,"*) : ;; *) missing+="${missing:+,}+$w" ;; esac; done
+  fi
+  if [ -n "$nots" ]; then
+    IFS=',' read -ra warr <<< "$nots"
+    for w in "${warr[@]}"; do case "$norm" in *",$w,"*) extra+="${extra:+,}-$w" ;; esac; done
+  fi
+  out="$missing"; [ -n "$extra" ] && out+="${out:+,}$extra"
+  printf '%s' "$out"
 }
 
 # NOTE: the LIVE strategy set IS readable after all: 'nc ?' whispers
@@ -132,6 +215,139 @@ states_apply() {  # $1 = bot name or "all" (default). NO online gate: every conf
   rm -f /tmp/.botcmd-apply.$$
   echo
   okmsg "states pushed to $applied bot(s)${refused:+, $refused refused (G1)} - whispers to offline toons are no-ops; read back with: botcmd states verify"
+  if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
+    echo
+    states_verify all
+  fi
+}
+
+# Read-modify-write apply: probe each conf bot with 'nc ?' (plus 'co ?' when its
+# conf uses co), diff the ENABLED strategy list against the conf's wants/nots,
+# and whisper ONLY the needed toggles ("nc +a,-b"). Bots that do not answer
+# (offline / no bot AI / not master) get the FULL push as a fallback - a whisper
+# to a toon that is not in the world is a harmless no-op anyway. Non-strategy
+# conf lines (rpg status do quest, go travel, ...) are always sent as-is.
+# Engine semantics: ChangeStrategy splits on ',' only, '?' -> TellMaster(
+# ListStrategies()) = ENABLED strategies (Engine.cpp:524,676-695); 'nc' needs
+# ALLOW_ALL (master/GM) at execution (PlayerbotAI.cpp:1092-1096) - with gmlevel
+# on I_WAS_CMD that holds. Replies are tagged "[Name] [whisper]: Strategies: .."
+# so the nc and co passes are unambiguous.
+states_tune() {  # $1 = bot|all (default all conf bots)
+  local target="${1:-all}" log="$BOTCMD_SHELL_LOG"
+  hdr "Tune states -> $target (probe 'nc ?'/'co ?' first, whisper only the diff)"
+  if [ ! -r "$log" ]; then errmsg "no $log - is the Leo shell up? (botcmd leo status)"; return 1; fi
+  if ! _states_conf_entries > /tmp/.botcmd-tune.$$ 2>/dev/null; then
+    warn "no conf: $BOTCMD_STATES_CONF (botcmd states edit)"; return 1
+  fi
+  local -a targets=()
+  local n v
+  if [ "$target" = "all" ]; then
+    while IFS=$'\t' read -r n v; do targets+=("$n"); done < /tmp/.botcmd-tune.$$
+  else
+    case "$target" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; rm -f /tmp/.botcmd-tune.$$; return 1 ;; esac
+    targets+=("$target")
+  fi
+  local refused=0
+  local -a live=()
+  for n in "${targets[@]}"; do
+    if is_handplay "$n"; then errmsg "REFUSED: $n is hand-play (G1) - never commanded"; refused=$((refused+1)); continue; fi
+    live+=("$n")
+  done
+  rm -f /tmp/.botcmd-tune.$$
+  [ "${#live[@]}" -eq 0 ] && { warn "no tunable bots in conf"; return 1; }
+
+  declare -A want_co=() strat_nc=() strat_co=()
+  local eng w nn
+  for n in "${live[@]}"; do
+    while IFS='|' read -r eng w nn; do
+      [ "$eng" = co ] && want_co[$n]=1
+    done < <(_conf_engine_wants "$(_states_conf_get "$n")")
+  done
+
+  # pass 1: 'nc ?' to every live bot; pass 2: 'co ?' only to bots with a co line
+  local start; start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
+  local max="${BOTCMD_TUNE_WAIT:-5}" waited line who txt
+  tune_scan() { tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: Strategies: .*' || true; }
+  tune_probe() {  # $1 = "nc ?"|"co ?", rest = bot names
+    local cmd="$1"; shift
+    local -a ns=("$@") all_done
+    for n in "${ns[@]}"; do game_send "/w $n $cmd" || true; sleep 1; done
+    waited=0
+    while [ "$waited" -lt "$max" ]; do
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        who=${line%%]*}; who=${who#\[}
+        txt=${line#*\[whisper\]: }
+        case "$cmd" in
+          "nc ?") strat_nc[$who]="$txt" ;;
+          "co ?") strat_co[$who]="$txt" ;;
+        esac
+      done <<< "$(tune_scan)"
+      all_done=1
+      for n in "${ns[@]}"; do
+        if [ "$cmd" = "nc ?" ]; then [ -n "${strat_nc[$n]:-}" ] || all_done=0
+        else [ -n "${strat_co[$n]:-}" ] || all_done=0; fi
+      done
+      [ "$all_done" = "1" ] && break
+      sleep 1; waited=$((waited + 1))
+    done
+    start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}   # next pass scans only new lines
+  }
+  tune_probe "nc ?" "${live[@]}"
+  local -a co_names=()
+  for n in "${live[@]}"; do [ -n "${want_co[$n]:-}" ] && co_names+=("$n"); done
+  [ "${#co_names[@]}" -gt 0 ] && tune_probe "co ?" "${co_names[@]}"
+
+  local applied=0 synced=0 pushed=0 online cmd delta parse_out parse_rc w_nc nn_nc w_co nn_co
+  local -a lines=() nc_lines=() co_lines=() other=()
+  for n in "${live[@]}"; do
+    v=$(_states_conf_get "$n")
+    online=$(_states_online "$n")
+    [ "$online" = "1" ] && online="db:online" || online="db:offline"
+    lines=(); nc_lines=(); co_lines=(); other=()
+    mapfile -t lines < <(state_expand "$v")
+    for cmd in "${lines[@]}"; do
+      case "$cmd" in
+        "nc "*) nc_lines+=("$cmd") ;;
+        "co "*) co_lines+=("$cmd") ;;
+        *) other+=("$cmd") ;;
+      esac
+    done
+    parse_rc=0; parse_out=$(_conf_engine_wants "$v") || parse_rc=1
+    w_nc=""; nn_nc=""; w_co=""; nn_co=""
+    while IFS='|' read -r eng w nn; do
+      [ "$eng" = nc ] && { w_nc="$w"; nn_nc="$nn"; }
+      [ "$eng" = co ] && { w_co="$w"; nn_co="$nn"; }
+    done <<< "$parse_out"
+    if [ "${#nc_lines[@]}" -gt 0 ]; then
+      if [ "$parse_rc" = "1" ]; then delta="!"; else delta=$(_strategies_diff "${strat_nc[$n]:-}" "$w_nc" "$nn_nc"); fi
+      if [ "$delta" = "!" ]; then
+        for cmd in "${nc_lines[@]}"; do game_send "/w $n $cmd" && okmsg "queued: /w $n $cmd   ($online, no/bad nc ? reply -> full push)"; sleep 1; done
+        pushed=$((pushed + 1))
+      elif [ -n "$delta" ]; then
+        game_send "/w $n nc $delta" && okmsg "queued: /w $n nc $delta   ($online, diff from 'nc ?')"
+        sleep 1; applied=$((applied + 1))
+      else
+        synced=$((synced + 1))
+      fi
+    fi
+    if [ "${#co_lines[@]}" -gt 0 ]; then
+      if [ "$parse_rc" = "1" ]; then delta="!"; else delta=$(_strategies_diff "${strat_co[$n]:-}" "$w_co" "$nn_co"); fi
+      if [ "$delta" = "!" ]; then
+        for cmd in "${co_lines[@]}"; do game_send "/w $n $cmd" && okmsg "queued: /w $n $cmd   ($online, no/bad co ? reply -> full push)"; sleep 1; done
+      elif [ -n "$delta" ]; then
+        game_send "/w $n co $delta" && okmsg "queued: /w $n co $delta   ($online, diff from 'co ?')"
+        sleep 1
+      fi
+    fi
+    # non-strategy lines always go through (rpg status do quest, go travel, ...)
+    for cmd in "${other[@]}"; do
+      game_send "/w $n $cmd" && okmsg "queued: /w $n $cmd   ($online)"; sleep 1
+    done
+  done
+  echo
+  okmsg "tune done: $applied bot(s) got a diff whisper, $synced already in sync (no nc whisper), $pushed full-pushed (no reply)${refused:+, $refused refused (G1)}"
+  warn "read back with: botcmd states verify"
   if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
     echo
     states_verify all
@@ -496,13 +712,7 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
     else
       case "$conf" in
         grind|quest|gather|follow|idle)
-          case "$conf" in
-            grind)  wants="new rpg,grind";  nots="quest,gather,follow" ;;
-            quest)  wants="new rpg,quest";  nots="grind,gather,follow" ;;
-            gather) wants="new rpg,gather"; nots="grind,quest,follow" ;;
-            follow) wants="follow";         nots="" ;;
-            idle)   wants="";               nots="new rpg,grind,quest,gather,follow" ;;
-          esac
+          IFS='|' read -r wants nots <<< "$(_preset_wants_nots "$conf")"
           if [ -n "$strat" ]; then
             members=${strat#Strategies: }
             norm=",$members,"
@@ -614,8 +824,16 @@ states_probe() {  # $1 = bot|all (default all DB-online watched bots); $2 = forc
   if [ "${1:-}" = "force" ]; then force=1; shift; fi
   [ "${BOTCMD_VERIFY_FORCE:-0}" = "1" ] && force=1
   local probe="${*:-nc ?}"
-  if [ -z "$probe" ] || ! printf '%s' "$probe" | grep -qE '^[A-Za-z0-9 ?+,\.:-]+$'; then
-    errmsg "probe charset: letters/digits/space and ? + - , . : only - '$probe' rejected"
+  # allow-list; '[]|' added so item links pass: |cff..|Hitem:..|h[Name]|h|r.
+  # Control chars are rejected FIRST: grep works line-wise, so a newline inside
+  # $probe would otherwise split into two FIFO lines (= injected 2nd command).
+  case "$probe" in
+    ""|*$'\n'*|*$'\r'*|*$'\t'*)
+      errmsg "probe must be one line without control chars - rejected"
+      return 1 ;;
+  esac
+  if ! printf '%s' "$probe" | grep -qE '^[]|[A-Za-z0-9 ?+,.:-]+$'; then
+    errmsg "probe charset: letters/digits/space and ? + - , . : | [ ] only (item links ok) - '$probe' rejected"
     return 1
   fi
   hdr "Probe: Leo whispers '/w <bot> $probe' - prints ALL whisper replies (command runs for real)"
@@ -702,7 +920,8 @@ states_menu() {
  7. Show presets + level->zone table
  8. Verify live states now ('nc ?' strategy read-back + rpg status; CLI 'verify all force' also probes DB-offline bots)
  9. Probe any command (default 'nc ?' - lists strategies; replies go to master Leo)
-10. Return to main menu   (blank Enter = back)
+10. Tune: probe 'nc ?'/'co ?' first, whisper only the diff (then verify)
+11. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -716,7 +935,8 @@ EOF
       7) states_presets; echo; states_zones; pause ;;
       8) states_verify all; pause ;;
       9) states_probe all; pause ;;
-      10) return 0 ;;
+      10) states_tune all; pause ;;
+      11) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

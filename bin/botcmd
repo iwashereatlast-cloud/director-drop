@@ -56,6 +56,7 @@ botcmd - Chazbot control
   botcmd go <toon> <zone...>          walk one bot to a zone now (go travel; G1 refused)
   botcmd states show                  state layout: conf + online + live
   botcmd states apply [bot|all]       push conf states: /w nc/co to EVERY conf bot (no online gate - offline toons are a no-op; verify shows who answered)
+  botcmd states tune [bot|all]        read-modify-write apply: probe 'nc ?' (+ 'co ?' if conf uses co) per bot, whisper ONLY the needed nc/co toggles; full push when a bot does not answer; then verify
   botcmd states edit                  edit ~/.botcmd-states.conf
   botcmd states presets               built-in strategy presets (+ zone recipes)
   botcmd states bots                  pick a bot (paginated) -> set its default state
@@ -214,6 +215,7 @@ case "${1:-}" in
       probe) states_probe "${@:3}" ;;
       quests) states_quests "${3:-all}" ;;
       apply) states_apply "${3:-all}" ;;
+      tune) states_tune "${3:-all}" ;;
       edit) states_edit ;;
       presets) states_presets ;;
       *) usage; exit 1 ;;

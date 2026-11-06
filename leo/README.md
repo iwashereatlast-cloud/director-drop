@@ -368,3 +368,59 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   `accept [quest|*]`, `drop [quest]` (DropQuestAction), `r [item]` (choose reward),
   `[quest link]` (objectives status), `talk` (selected NPC), `u [game object]`,
   plus `los` (visible objects/creatures), `stats`, `who`, `spells` - all ALLOW_ALL.
+
+## Tune: read-modify-write apply (`botcmd states tune [bot|all]`, States menu 10)
+
+`states apply` blind-pushes the whole conf preset to every bot. `states tune` does
+what you'd do by hand: Leo whispers `/w <bot> nc ?` (and `co ?` when the bot's conf
+uses `co`) first, the tool reads back the ENABLED strategy list
+(`Strategies: ...` via TellMaster -> master Leo; the `nc` engine needs ALLOW_ALL =
+master/GM, Engine.cpp:524/676-695, PlayerbotAI.cpp:1092-1096), diffs it against
+the conf's wants/nots (same `_preset_wants_nots` table `verify` uses), and whispers
+ONLY the needed toggles, e.g. `/w Gau nc +quest,-grind`. Bots already in sync get
+NO nc whisper; bots that don't answer (offline / no bot AI / not master) get the
+full push as a fallback (a whisper to an offline toon is a no-op anyway).
+Non-strategy conf lines (`rpg status do quest`, `go travel ...`) are always sent
+as-is. Runs `states verify` afterwards. `BOTCMD_TUNE_WAIT` (default 5s) =
+per-pass reply wait.
+
+## Mail / vendor / bank whisper commands (source-verified @ e88cc40)
+
+Send from the human CLI with `botcmd states probe <bot> "<cmd>"` (the probe charset
+now accepts item links: `|cff..|Hitem:..|h[Name]|h|r`). All replies go to the
+bot's MASTER (Leo) via TellMaster. All of these need ALLOW_ALL (master/GM) at
+execution EXCEPT `sendmail`, which is in `unsecuredCommands` (INVITE,
+PlayerbotAI.cpp:1002-1012).
+
+- `mail ?` — list mailbox: `=== Mailbox ===` then `#n subject, items/money, days`
+  (MailAction.cpp TellMailProcessor). Needs a mailbox gameobject nearby, else
+  "There is no mailbox nearby" (TellError).
+- `mail take <filter>` / `mail delete <filter>` / `mail read <filter>` —
+  filter = empty/`*` (all), `1-3` (1-based index range), `1,3` (index list)
+  (MailProcessor::filterList). `take` also grabs COD money and checks bag space.
+- `sendmail <item link>` — mail ONE item to the issuer's MASTER (Leo) —
+  SendMailAction; needs `Playerbots.BotSendMailEnabled=1` (default 1,
+  playerbots.conf.dist:798) and a mailbox nearby ("There is no mailbox nearby").
+  `sendmail <money>` (e.g. `10g`, ChatHelper::parseMoney) sends money instead.
+  More than one item -> "You can not request more than one item".
+  So: `botcmd states probe Locke "sendmail |cffffffff|Hitem:16896:0:0:0:0:0:0:0:0|h[Major Soulstone]|h|r"`
+  ships one item to Leo. NOTE: mail goes TO LEO (the master); there is no
+  "sendmail <item> <other player>" form in this build.
+- `s gray` | `s *` — sell all poor-quality items (SellAction). `s vendor` — sell
+  items the vendor actually buys (SellVendorItemsVisitor). `s <quality> [all]`
+  e.g. `s green all` (parseItemQuality). `s <item link>` — sell a specific item.
+  Needs a vendor NPC nearby (UNIT_NPC_FLAG_VENDOR); receipts via TellMaster.
+  Usage error text: `s gray/*/vendor/<quality> [all]/[item link]`. (`s` is the
+  short trigger, `sell` the full one.)
+- `repair` — RepairAllAction at a repair vendor (UNIT_NPC_FLAG_REPAIR nearby).
+- `bank` / `bank ?` — list bank contents (BankAction; needs a banker nearby,
+  "Cannot find banker nearby"); deposit/withdraw per BankAction.
+- `wts [item link]` — "what to sell": item-usage advice (WtsAction).
+- NO auction-house command in this build (no `ah` trigger in
+  ChatCommandHandlerStrategy).
+
+Purity note: director.py's FORBIDDEN list blocks `sell`/`buy`/`repair`/`bank`/
+`destroy` from LLM-issued orders (Baron rails), so Leo-the-LLM won't vendor on his
+own; `sendmail` and `mail` ARE whitelisted, so Leo can mail via chat orders. The
+`botcmd states probe` passthrough above is human-driven and not gated by that
+whitelist — the in-game master/GM gate still applies.
