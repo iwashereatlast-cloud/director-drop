@@ -93,6 +93,66 @@ roster_go() {  # botcmd go <toon> <zone words...> -> /w <toon> go travel <zone>
   warn "receipt: botcmd leo chat 40  (bot answers 'Traveling to <zone>'; destinations are level-filtered by the engine)"
 }
 
+# Kick a toon's session via SOAP '.kick' (Console::Yes, rbac command_kick -
+# needs gmlevel 3 on I_WAS_CMD, same grant as '.group remove'). This logs a
+# toon out WITHOUT the game client or a worldserver restart, so the ritual's
+# addaccount can attach bot AI on the fresh login.
+_roster_kick() {  # $1 = toon name
+  local out code
+  if out=$(_soap_run ".kick $1" 2>/dev/null); then
+    code=$(printf '%s\n' "$out" | head -n 1)
+    if [ "$code" = "200" ]; then
+      okmsg "kicked $1 via SOAP .kick - offline now, the ritual can add them as a bot"
+      return 0
+    fi
+    warn "SOAP .kick $1 -> HTTP $code: $(printf '%s\n' "$out" | tail -n +2 | head -c 120)"
+    return 1
+  fi
+  # SOAP gate not armed - fall back to Leo's own session (same rbac perm needed)
+  if game_send ".kick $1"; then
+    okmsg "queued via Leo's session: .kick $1   (result shows in the worldserver console)"
+    return 0
+  fi
+  errmsg "kick $1 failed - arm SOAP (botcmd system arm) and check Leo is up (botcmd leo status)"
+  return 1
+}
+
+roster_down() {  # $1 = toon name or "all" - log online toons out so addaccount can bot-ify them
+  local target="${1:-}" n on acct rc=0
+  [ -z "$target" ] && { errmsg "usage: botcmd roster down <toon|all>"; return 1; }
+  if [ "$target" = "all" ]; then
+    on=$(_roster_online_watched)   # G1 and Leo's shell account already excluded
+    if [ -z "$on" ]; then okmsg "no online watched bots to kick right now"; return 0; fi
+    for n in $on; do _roster_kick "$n" || rc=1; sleep 1; done
+    echo
+    if [ "$rc" = "0" ]; then
+      okmsg "kicked $(printf '%s ' $on | wc -w) toon(s) - now run: botcmd roster ritual"
+    else
+      warn "some kicks failed - see above; re-run the ritual for the rest"
+    fi
+    return $rc
+  fi
+  case "$target" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; return 1 ;; esac
+  if is_handplay "$target"; then errmsg "REFUSED: $target is hand-play (G1) - never kicked (that session could be you)"; return 1; fi
+  acct=$(db_ro -N -B -e "SELECT LOWER(a.username) FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account WHERE c.name='$target'" 2>/dev/null | head -n 1)
+  case "$acct" in "${BOTCMD_SHELL_ACCOUNT}"*) errmsg "REFUSED: $target is on Leo's shell account ($acct) - never kicked"; return 1 ;; esac
+  _roster_kick "$target"
+}
+
+# one-command repair: kick every online watched toon (they cannot have bot AI
+# while their human session is up), then ritual (attaches AI on fresh login),
+# then verify the live rpg statuses
+roster_fix() {
+  hdr "Roster fix: kick online watched toons -> ritual -> verify"
+  warn "kicks every ONLINE watched toon (never G1, never Leo) - the only way to make"
+  warn "addaccount attach bot AI: add/addaccount refuse online toons (module design)"
+  roster_down all || warn "some kicks failed - continuing anyway"
+  sleep 3
+  roster_ritual
+  echo
+  states_verify all
+}
+
 roster_menu() {
   local c n z
   while :; do
@@ -104,7 +164,9 @@ roster_menu() {
  3. Add a bot
  4. Remove a bot
  5. Send a bot to a zone (go travel)
- 6. Return to main menu   (blank Enter = back)
+ 6. Kick a toon out (SOAP .kick - no game client needed)
+ 7. FIX roster: kick all online bots + ritual + verify
+ 8. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -117,7 +179,9 @@ EOF
          printf '%s' "zone (e.g. Westfall, Barrens, Feralas - botcmd states zones): "; IFS= read -r z
          [ -n "$n" ] && [ -n "$z" ] && roster_go "$n" $z
          pause ;;
-      6) return 0 ;;
+      6) printf '%s' "toon to kick (or 'all'): "; IFS= read -r n; roster_down "$n"; pause ;;
+      7) roster_fix; pause ;;
+      8) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done

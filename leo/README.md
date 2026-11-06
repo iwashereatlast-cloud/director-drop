@@ -59,6 +59,15 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
   the toons currently ONLINE and warns: log them out first, then re-run the
   ritual. Until a toon has bot AI it will never answer `/w <toon> rpg status`
   (`botcmd states verify` shows NO REPLY for it).
+- WHY offline is required (module design, not our choice): a playerbot is a
+  separate headless WorldSession the worldserver creates; `add`/`addaccount`/
+  `login` refuse any toon already in the world (`FindPlayer(guid)` check in
+  PlayerbotMgr.cpp) and there is no path that attaches bot AI to a live human
+  session. `bot remove` works while online because it logs the bot session
+  out. To get a toon offline without the game client or a worldserver restart:
+  `botcmd roster down <toon|all>` (SOAP `.kick` - Console::Yes, needs gmlevel 3
+  on I_WAS_CMD, same grant as `.group remove`), or `botcmd roster fix` =
+  kick all online watched bots -> ritual -> verify, one command.
 - director.py daemon (Leo's brain) runs as leo-director.service (see below).
 - Bot-sender gate (2026-11-05 fix): senders on bot accounts (i_was_here% except
   the master account) or on Leo's shell account (i_was_cmd) are dropped by a

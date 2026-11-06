@@ -45,6 +45,8 @@ botcmd - Chazbot control
   botcmd roster ritual                summon full roster (G1-safe)
   botcmd roster add <toon>            bring one bot online (hand-play refused)
   botcmd roster remove <toon>         stand one down (works on hand-play too)
+  botcmd roster down <toon|all>       kick toon(s) out via SOAP .kick (gmlevel 3 on I_WAS_CMD) so the ritual can re-add them as bots
+  botcmd roster fix                   kick all online watched bots -> ritual -> verify (one command)
   botcmd go <toon> <zone...>          walk one bot to a zone now (go travel; G1 refused)
   botcmd states show                  state layout: conf + online + live
   botcmd states apply [bot|all]       push conf states to online bots
@@ -179,6 +181,8 @@ case "${1:-}" in
       ritual) roster_ritual ;;
       add) roster_add "${3:-}" ;;
       remove) roster_remove "${3:-}" ;;
+      down) roster_down "${3:-}" ;;
+      fix) roster_fix ;;
       *) usage; exit 1 ;;
     esac ;;
   states)
