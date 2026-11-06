@@ -117,26 +117,47 @@ _roster_kick() {  # $1 = toon name
   return 1
 }
 
-roster_down() {  # $1 = toon name or "all" - log online toons out so addaccount can bot-ify them
+# Graceful first: '.playerbots bot remove <toon>' works on any REGISTERED bot
+# while online (LogoutPlayerBot logs the bot session out). Only if the toon is
+# STILL online afterwards (plain character session, no bot AI - remove answers
+# "not your bot") do we kick via SOAP, so the ritual's addaccount can attach
+# bot AI on the fresh login.
+_roster_down_one() {  # $1 = toon name
+  local n="$1" on
+  game_send ".playerbots bot remove $n" && okmsg "queued: bot remove $n (graceful - works if $n is a registered bot)"
+  sleep "${BOTCMD_DOWN_WAIT:-3}"
+  on=$(db_ro -N -B -e "SELECT online FROM acore_characters.characters WHERE name='$n'" 2>/dev/null | head -n 1)
+  if [ "$on" = "1" ]; then
+    warn "$n still online after 'bot remove' (not a registered bot - plain session) -> SOAP .kick"
+    _roster_kick "$n"
+  else
+    okmsg "$n is offline now - the ritual can add them as a bot"
+  fi
+}
+
+roster_down() {  # $1 = toon name or "all" - get online toons offline so addaccount can bot-ify them
   local target="${1:-}" n on acct rc=0
   [ -z "$target" ] && { errmsg "usage: botcmd roster down <toon|all>"; return 1; }
   if [ "$target" = "all" ]; then
     on=$(_roster_online_watched)   # G1 and Leo's shell account already excluded
-    if [ -z "$on" ]; then okmsg "no online watched bots to kick right now"; return 0; fi
-    for n in $on; do _roster_kick "$n" || rc=1; sleep 1; done
+    if [ -z "$on" ]; then okmsg "no online watched toons to take down right now"; return 0; fi
+    for n in $on; do _roster_down_one "$n" || rc=1; done
     echo
     if [ "$rc" = "0" ]; then
-      okmsg "kicked $(printf '%s ' $on | wc -w) toon(s) - now run: botcmd roster ritual"
+      okmsg "$(printf '%s ' $on | wc -w) toon(s) handled - now run: botcmd roster ritual"
     else
-      warn "some kicks failed - see above; re-run the ritual for the rest"
+      warn "some toons could not be taken down - see above; re-run the ritual for the rest"
     fi
     return $rc
   fi
   case "$target" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; return 1 ;; esac
-  if is_handplay "$target"; then errmsg "REFUSED: $target is hand-play (G1) - never kicked (that session could be you)"; return 1; fi
+  if is_handplay "$target"; then
+    errmsg "REFUSED: $target is hand-play (G1) - use 'botcmd roster remove $target' for the bot-remediation case; down never touches G1"
+    return 1
+  fi
   acct=$(db_ro -N -B -e "SELECT LOWER(a.username) FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account WHERE c.name='$target'" 2>/dev/null | head -n 1)
   case "$acct" in "${BOTCMD_SHELL_ACCOUNT}"*) errmsg "REFUSED: $target is on Leo's shell account ($acct) - never kicked"; return 1 ;; esac
-  _roster_kick "$target"
+  _roster_down_one "$target"
 }
 
 # one-command repair: kick every online watched toon (they cannot have bot AI

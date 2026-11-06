@@ -64,10 +64,14 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
   `login` refuse any toon already in the world (`FindPlayer(guid)` check in
   PlayerbotMgr.cpp) and there is no path that attaches bot AI to a live human
   session. `bot remove` works while online because it logs the bot session
-  out. To get a toon offline without the game client or a worldserver restart:
-  `botcmd roster down <toon|all>` (SOAP `.kick` - Console::Yes, needs gmlevel 3
-  on I_WAS_CMD, same grant as `.group remove`), or `botcmd roster fix` =
-  kick all online watched bots -> ritual -> verify, one command.
+  out (LogoutPlayerBot) - so for any REGISTERED bot, `botcmd roster remove
+  <toon>` is the graceful way down, no kick needed. `nc +`/`co +` etc. also
+  work live on a running bot via whisper - offline is only needed to CONVERT
+  a plain online toon into a bot. `botcmd roster down <toon|all>` automates
+  that: `bot remove` first, and only if the toon is STILL online afterwards
+  (plain session, remove answers "not your bot") it falls back to SOAP `.kick`
+  (Console::Yes, needs gmlevel 3 on I_WAS_CMD, same grant as `.group remove`).
+  `botcmd roster fix` = down all -> ritual -> verify, one command.
 - director.py daemon (Leo's brain) runs as leo-director.service (see below).
 - Bot-sender gate (2026-11-05 fix): senders on bot accounts (i_was_here% except
   the master account) or on Leo's shell account (i_was_cmd) are dropped by a
