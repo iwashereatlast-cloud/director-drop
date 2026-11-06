@@ -61,7 +61,7 @@ botcmd - Chazbot control
   botcmd states presets               built-in strategy presets (+ zone recipes)
   botcmd states bots                  pick a bot (paginated) -> set its default state
   botcmd states zones [level]         vanilla level->zone table (for go travel)
-  botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|follow|idle)
+  botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|leveling|follow|idle)
   botcmd states verify [bot|all] [force]  Leo whispers 'nc ?' + 'rpg status'; verdict = nc strategy membership vs conf (Engine.cpp:524; TellMaster->master PlayerbotAI.cpp:3170), rpg status shown as info + live group/leader (why a bot may be silent); force = also probe DB-offline bots
   botcmd states probe [bot|all] [force] [cmd...]   raw whisper probe (default 'nc ?' - lists strategies, replies to master Leo); prints ALL reply lines per bot
   botcmd states quests [bot|all]      read-only quest-log view from character_queststatus (what 'rpg status do quest' can pick from)

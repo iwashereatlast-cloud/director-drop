@@ -10,6 +10,8 @@ Built-in presets (conf value = the preset word):
   grind    nc +new rpg,+grind,-quest,-gather,-follow
   quest    nc +new rpg,+quest,-grind,-gather,-follow     (nc-only since PR #34: 'rpg status do quest' removed - only works with a quest+POI already in the log, else it just asks for an id)
   gather   nc +new rpg,+gather,-grind,-quest,-follow ; rpg status do gather (needs Herbalism/Mining)
+  leveling nc +new rpg,+quest,+grind,+gather,-follow   (quest+grind+gather combined; the gather
+           strategy no-ops on bots without Herbalism/Mining, so it is safe fleet-wide)
   follow   nc +follow                 (follow-duty: cling to master; NOTE "+new +follow" is a silent no-op - strategies split on ',' only)
   idle     nc -new rpg,-grind,-quest,-gather,-follow ; rpg status idle   (stand down)
 See what quests a bot actually has (read-only DB): botcmd states quests [bot|all]
@@ -61,6 +63,7 @@ state_expand() {  # $1 = conf value
     grind)  printf '%s\n' 'nc +new rpg,+grind,-quest,-gather,-follow' ;;
     quest)  printf '%s\n' 'nc +new rpg,+quest,-grind,-gather,-follow' ;;
     gather) printf '%s\n' 'nc +new rpg,+gather,-grind,-quest,-follow' 'rpg status do gather' ;;
+    leveling) printf '%s\n' 'nc +new rpg,+quest,+grind,+gather,-follow' ;;
     follow) printf '%s\n' 'nc +follow' ;;
     idle)   printf '%s\n' 'nc -new rpg,-grind,-quest,-gather,-follow' 'rpg status idle' ;;
     *)      printf '%s\n' "$1" | sed 's/ *;; */\n/g' ;;
@@ -77,6 +80,7 @@ _preset_wants_nots() {  # $1 = preset word; prints "wants|nots"; rc 1 = not a pr
     grind)  printf 'new rpg,grind|quest,gather,follow\n' ;;
     quest)  printf 'new rpg,quest|grind,gather,follow\n' ;;
     gather) printf 'new rpg,gather|grind,quest,follow\n' ;;
+    leveling) printf 'new rpg,quest,grind,gather|follow\n' ;;
     follow) printf 'follow|\n' ;;
     idle)   printf '|new rpg,grind,quest,gather,follow\n' ;;
     *) return 1 ;;
@@ -372,7 +376,7 @@ states_edit() {
     warn "no conf yet - creating a starter conf"
     cat > "$BOTCMD_STATES_CONF" <<'EOF'
 # botcmd states conf - one line per bot:  Name: preset-or-commands
-# presets: grind quest gather follow idle   (botcmd states presets)
+# presets: grind quest gather leveling follow idle   (botcmd states presets)
 # raw commands work too - separate multiple with ';;'
 # Crono: grind
 # Edge: follow
@@ -471,7 +475,7 @@ states_set_bot() {  # $1 = bot name
     hdr "Default state for $bot  (conf: $BOTCMD_STATES_CONF)"
     printf 'current conf state: %s\n\n' "${cur:-(none set)}"
     i=0
-    for p in grind quest gather follow idle; do
+    for p in grind quest gather leveling follow idle; do
       i=$((i + 1))
       if [ "$cur" = "$p" ]; then printf '[x] %d. %s\n' "$i" "$p"
       else printf '[ ] %d. %s\n' "$i" "$p"; fi
@@ -484,8 +488,8 @@ EOF
     case "$c" in
       ""|b|back) return 0 ;;
       0) _states_conf_set "$bot" "" && okmsg "$bot removed from states conf"; return 0 ;;
-      1|2|3|4|5)
-        case "$c" in 1) preset=grind;; 2) preset=quest;; 3) preset=gather;; 4) preset=follow;; 5) preset=idle;; esac
+      1|2|3|4|5|6)
+        case "$c" in 1) preset=grind;; 2) preset=quest;; 3) preset=gather;; 4) preset=leveling;; 5) preset=follow;; 6) preset=idle;; esac
         if _states_conf_set "$bot" "$preset"; then
           okmsg "$bot: $preset   (push it live with: botcmd states apply $bot)"
         else
@@ -523,7 +527,7 @@ EOF
 # ticked when EVERY watched bot currently has that same conf state.
 # Menu goes to stderr; only the chosen preset is printed on stdout (rc 1 = back).
 states_pick_preset() {
-  local presets=(grind quest gather follow idle) c i p vals nbots uniq_n uniform=""
+  local presets=(grind quest gather leveling follow idle) c i p vals nbots uniq_n uniform=""
   nbots=$(_states_all_bots | wc -l)
   vals=$(_states_all_bots | while IFS=$'\t' read -r n _ _ _; do _states_conf_get "$n"; done)
   uniq_n=$(printf '%s\n' "$vals" | grep -v '^$' | sort -u | wc -l)
@@ -548,7 +552,7 @@ states_pick_preset() {
     printf '%s' "choice: " >&2; IFS= read -r c
     case "$c" in
       ""|b|back) return 1 ;;
-      1|2|3|4|5) printf '%s' "${presets[$((c - 1))]}"; return 0 ;;
+      1|2|3|4|5|6) printf '%s' "${presets[$((c - 1))]}"; return 0 ;;
       *) warn "invalid choice" >&2 ;;
     esac
   done
@@ -723,7 +727,7 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
       fi
     else
       case "$conf" in
-        grind|quest|gather|follow|idle)
+        grind|quest|gather|leveling|follow|idle)
           IFS='|' read -r wants nots <<< "$(_preset_wants_nots "$conf")"
           if [ -n "$strat" ]; then
             members=${strat#Strategies: }
@@ -898,15 +902,15 @@ states_probe() {  # $1 = bot|all (default all DB-online watched bots); $2 = forc
 
 # set EVERY watched alt bot's conf to one preset, then apply (which verifies).
 # $1 = optional preset; no arg -> interactive [x] picker (states_pick_preset).
-states_setall() {  # $1 = grind|quest|gather|follow|idle (optional)
+states_setall() {  # $1 = grind|quest|gather|leveling|follow|idle (optional)
   local preset="${1:-}" n count=0
   if [ -z "$preset" ]; then
     preset=$(states_pick_preset) || { warn "cancelled - nothing written (blank Enter = back)"; return 0; }
     okmsg "picker selected: $preset"
   fi
   case "$preset" in
-    grind|quest|gather|follow|idle) ;;
-    *) errmsg "usage: botcmd states setall [grind|quest|gather|follow|idle]   (no arg = [x] picker)"; return 1 ;;
+    grind|quest|gather|leveling|follow|idle) ;;
+    *) errmsg "usage: botcmd states setall [grind|quest|gather|leveling|follow|idle]   (no arg = [x] picker)"; return 1 ;;
   esac
   hdr "Set ALL alt bots to '$preset' (conf + apply online + verify)"
   while IFS=$'\t' read -r n _ _ _; do

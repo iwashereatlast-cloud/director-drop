@@ -335,7 +335,7 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
 - Master screen quits on Q (blank Enter is "back" in every submenu; at the
   master screen Enter just redraws, so you can spam Enter safely).
 - `botcmd states setall [preset]` (or States menu -> 3) writes one preset
-  (grind|quest|gather|follow|idle) into the conf for EVERY watched alt bot
+  (grind|quest|gather|leveling|follow|idle) into the conf for EVERY watched alt bot
   (G1 and Leo excluded) and applies it to all online bots in one go. With no
   argument it opens a `[x]` picker in the same style as the per-bot state menu
   (the box is ticked when every watched bot currently has that same state).

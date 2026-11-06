@@ -55,7 +55,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 |---|---|---|
 | `botcmd states show/edit/presets/zones` | conf table, editor, help, zone table | HARNESS (menus) |
 | `botcmd states bots` | paginated picker -> set conf state | HARNESS |
-| `botcmd states setall [preset]` | conf for every bot + apply + verify | HARNESS |
+| `botcmd states setall [preset]` | conf for every bot + apply + verify; presets: grind, quest, gather, **leveling** (= quest+grind+gather, #35), follow, idle | HARNESS |
 | `botcmd states apply [bot\|all]` | **THE set-state path**: since #34 read-modify-write — probe `nc ?`/`co ?`, whisper only the diff, full push on no reply, then verify | LIVE for the push (`queued: /w ...` in serverpc logs); probe+diff shape is #34 |
 | `botcmd states tune [bot\|all]` | was a separate menu-10 option | **REMOVED as a separate path (#34)** — now an alias of `apply` |
 | `botcmd states verify [bot\|all] [force]` | read-back: verdict = `nc ?` strategy membership vs conf | **LIVE** (VERDICT tables in serverpc logs) |
