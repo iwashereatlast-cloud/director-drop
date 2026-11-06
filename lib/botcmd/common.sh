@@ -33,6 +33,9 @@ BOTCMD_HANDPLAY="Cecil Rydia Shadow Vivi Aeris Aerith"
 # Summon ritual (mirrors the watchdog AUTORITUAL): account I_WAS_HERE1ST is
 # deliberately absent. Do not add it.
 BOTCMD_RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
+# single extra bots for the ritual - ONLY needed for bots on an account NOT in
+# BOTCMD_RITUAL_ACCOUNTS (e.g. a bot on the 1ST/master account, which is never
+# addaccount'd). roster_ritual skips any bot already covered by addaccount.
 BOTCMD_RITUAL_BOTS="Golbez"
 
 [ -r "$HOME/.botcmd.conf" ] && . "$HOME/.botcmd.conf"

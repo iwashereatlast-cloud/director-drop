@@ -17,6 +17,7 @@ OFF_H=22
 GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"
 AUTORITUAL=1
 RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
+# only needed for bots NOT on a RITUAL_ACCOUNTS account (covered bots are skipped)
 RITUAL_BOTS="Golbez"
 FIFO=/tmp/leo.in
 [ -f "$CONF" ] && . "$CONF"
@@ -69,7 +70,20 @@ fi
 
 if [ "$AUTORITUAL" = "1" ] && [ "$leo" = "1" ] && [ "$prev_leo" = "0" ]; then
   for a in $RITUAL_ACCOUNTS; do printf '%s\n' ".playerbots bot addaccount $a"; done > "$FIFO"
-  for b in $RITUAL_BOTS; do printf '%s\n' ".playerbots bot add $b"; done >> "$FIFO"
+  for b in $RITUAL_BOTS; do
+    case "$b" in *[!A-Za-z0-9]*) echo "watchdog: skip ritual bot '$b' (bad name)"; continue ;; esac
+    # addaccount covers every toon on a RITUAL_ACCOUNTS account - skip bots already covered
+    bacct=$(q "SELECT LOWER(a.username) FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account WHERE c.name='$b'")
+    covered=0
+    for a in $RITUAL_ACCOUNTS; do
+      [ "$(printf '%s' "$a" | tr '[:lower:]' '[:upper:]')" = "$(printf '%s' "$bacct" | tr '[:lower:]' '[:upper:]')" ] && covered=1
+    done
+    if [ "$covered" = "1" ]; then
+      echo "watchdog: skip 'bot add $b' - $b is on ${bacct:-unknown}, already covered by addaccount"
+    else
+      printf '%s\n' ".playerbots bot add $b" >> "$FIFO"
+    fi
+  done
   echo "watchdog: ritual queued (accounts: $RITUAL_ACCOUNTS bots: $RITUAL_BOTS)"
 fi
 

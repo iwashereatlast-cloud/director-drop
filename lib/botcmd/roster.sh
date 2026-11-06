@@ -41,6 +41,19 @@ roster_ritual() {
     if game_send ".playerbots bot addaccount $a"; then okmsg "queued: addaccount $a"; sleep 1; fi
   done
   for b in $BOTCMD_RITUAL_BOTS; do
+    case "$b" in *[!A-Za-z0-9]*) errmsg "bad ritual bot name '$b' - skipped"; continue ;; esac
+    # addaccount already adds EVERY toon on a RITUAL_ACCOUNTS account - a single
+    # 'bot add' is only needed for bots on accounts NOT in that list (e.g. a bot
+    # on the 1ST/master account). Skip covered bots to avoid console noise.
+    local bacct covered=0 a2
+    bacct=$(db_ro -N -B -e "SELECT LOWER(a.username) FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account WHERE c.name='$b'" 2>/dev/null | head -n 1)
+    for a2 in $BOTCMD_RITUAL_ACCOUNTS; do
+      [ "$(printf '%s' "$a2" | tr '[:lower:]' '[:upper:]')" = "$(printf '%s' "$bacct" | tr '[:lower:]' '[:upper:]')" ] && covered=1
+    done
+    if [ "$covered" = "1" ]; then
+      warn "skip 'bot add $b': $b is on ${bacct:-unknown}, already covered by addaccount in this ritual"
+      continue
+    fi
     if game_send ".playerbots bot add $b"; then okmsg "queued: bot add $b"; sleep 1; fi
   done
   warn "bots come up IDLE - strategies stay a manual spree (purity rule)"

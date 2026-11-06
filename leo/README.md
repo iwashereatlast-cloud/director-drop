@@ -34,7 +34,7 @@ OFF_H=22                                        # server-local hour to go offlin
 GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"  # space-separated toon names (both Aeri* spellings until verified in the DB: SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%')
 AUTORITUAL=1                                    # 1 = ritual after Leo logs in
 RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
-RITUAL_BOTS="Golbez"
+RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUAL_ACCOUNTS account (covered bots are skipped automatically)
 # NEVER add the account you hand-play on to RITUAL_ACCOUNTS - hand-play toons
 # are never bots. (Default master account is I_WAS_HERE1ST - see 'botcmd master'.)
 
