@@ -80,41 +80,42 @@ states_show() {
   warn "full nc strategy set has no read-only view - read back the rpg status with: botcmd states verify"
 }
 
-states_apply() {  # $1 = bot name or "all" (default)
+states_apply() {  # $1 = bot name or "all" (default). NO online gate: every conf bot gets
+                    # its /w lines - a whisper to a toon that is not in the world is a
+                    # harmless no-op ("No player named ..."), and characters.online is
+                    # NOT ground truth (worldserver boot resets all flags to 0 -
+                    # Main.cpp:520 - and login rewrites them async - CharacterHandler.cpp:921).
+                    # The DB flag is printed inline as info only; states_verify read-back
+                    # is the source of truth for who actually received the orders.
   local target="${1:-all}"
-  hdr "Apply states -> $target"
+  hdr "Apply states -> $target (whispers every conf bot; db online flag shown as info only)"
   if ! _states_conf_entries > /tmp/.botcmd-apply.$$ 2>/dev/null; then
     warn "no conf: $BOTCMD_STATES_CONF (botcmd states edit)"
     return 1
   fi
-  local n v online cmd applied=0 skipped=0
+  local n v online cmd applied=0 refused=0
   while IFS=$'\t' read -r n v; do
     if [ "$target" != "all" ] && [ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$target" | tr '[:upper:]' '[:lower:]')" ]; then
       continue
     fi
     if is_handplay "$n"; then
       errmsg "REFUSED: $n is hand-play (G1) - never commanded"
+      refused=$((refused + 1))
       continue
     fi
     online=$(_states_online "$n")
-    if [ "$online" != "1" ]; then
-      warn "skip $n: not online"
-      skipped=$((skipped + 1))
-      continue
-    fi
+    [ "$online" = "1" ] && online="db:online" || online="db:offline"
     while IFS= read -r cmd; do
-      if game_send "/w $n $cmd"; then okmsg "queued: /w $n $cmd"; sleep 1; fi
+      if game_send "/w $n $cmd"; then okmsg "queued: /w $n $cmd   ($online)"; sleep 1; fi
     done < <(state_expand "$v")
     applied=$((applied + 1))
   done < /tmp/.botcmd-apply.$$
   rm -f /tmp/.botcmd-apply.$$
   echo
-  okmsg "states pushed to $applied bot(s), $skipped skipped (offline)"
+  okmsg "states pushed to $applied bot(s)${refused:+, $refused refused (G1)} - whispers to offline toons are no-ops; read back with: botcmd states verify"
   if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
     echo
     states_verify all
-  else
-    warn "bots answer strategy changes in chat - botcmd leo chat 40  (or read back: botcmd states verify $target)"
   fi
 }
 
@@ -340,17 +341,22 @@ _grp_kind() {
 # (via the FIFO, exactly like an order), then we collect the "[Name] [whisper]:
 # Status: X" replies from the shell log and tabulate conf vs live status.
 # Source-verified: 'rpg status' with no args whispers back NewRpgInfo::ToString().
-states_verify() {  # $1 = bot name or "all" (default all online watched bots)
-  local target="${1:-all}" log="$BOTCMD_SHELL_LOG" start n online
+states_verify() {  # $1 = bot name or "all" (default all online watched bots);
+                    # $2 = "force" (or BOTCMD_VERIFY_FORCE=1) also probes bots the DB flags offline
+  local target="${1:-all}" force="${2:-}" log="$BOTCMD_SHELL_LOG" start n online
+  [ "${BOTCMD_VERIFY_FORCE:-0}" = "1" ] && force=force
   hdr "Verify live states (Leo whispers 'rpg status' to online bots, reads replies)"
   if [ ! -r "$log" ]; then
     errmsg "no $log - is the Leo shell up? (botcmd leo status)"
     return 1
   fi
   local -a targets=()
+  declare -A t_on=()
   if [ "$target" = "all" ]; then
     while IFS=$'\t' read -r n _ online _; do
-      [ "$online" = "1" ] && targets+=("$n")
+      if [ "$online" = "1" ] || [ -n "$force" ]; then
+        targets+=("$n"); t_on[$n]=$online
+      fi
     done < <(_states_all_bots)
   else
     case "$target" in
@@ -360,8 +366,11 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
       errmsg "REFUSED: $target is hand-play (G1) - never commanded"; return 1
     fi
     online=$(_states_online "$target")
-    if [ "$online" != "1" ]; then warn "$target is not online - nothing to verify"; return 1; fi
-    targets+=("$target")
+    if [ "$online" != "1" ]; then
+      if [ -z "$force" ]; then warn "$target is not online - nothing to verify (or: states verify $target force)"; return 1; fi
+      warn "$target shows offline in DB - probing anyway (force)"
+    fi
+    targets+=("$target"); t_on[$target]=$online
   fi
   if [ "${#targets[@]}" -eq 0 ]; then
     warn "no online watched bots to verify right now"
@@ -434,7 +443,9 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
     fi
     if [ -z "$txt" ]; then
       st="-"
-      if [ -z "${g_guid[$n]:-}" ]; then
+      if [ -n "$force" ] && [ "${t_on[$n]:-}" != "1" ]; then
+        verdict="db:offline - no reply expected unless the toon is actually online as a bot"
+      elif [ -z "${g_guid[$n]:-}" ]; then
         verdict="NO REPLY [no-ai] groupless, so Leo should have INVITE - bot AI off / not added as a bot? shell down? try: botcmd roster ritual"
       elif [ -n "$leo_grp" ] && [ "${g_guid[$n]}" = "$leo_grp" ]; then
         verdict="NO REPLY [master] same group as Leo but bot's master != Leo (deny text suppressed for bot senders); grant I_WAS_CMD gmlevel or botcmd roster fix"
@@ -504,11 +515,11 @@ states_menu() {
  1. States table (conf + online)
  2. Pick a bot -> set its default state   (paginated, [x] = current)
  3. Set ALL bots to ONE state   ([x] picker; conf + apply + verify)
- 4. Apply ALL states from conf (online bots only, then verify)
+ 4. Apply ALL states from conf (whispers every conf bot, then verify)
  5. Apply ONE bot's state
  6. Edit states conf
  7. Show presets + level->zone table
- 8. Verify live states now (Leo whispers 'rpg status' to online bots)
+ 8. Verify live states now (rpg status read-back; CLI 'verify all force' also probes DB-offline bots)
  9. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c

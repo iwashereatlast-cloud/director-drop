@@ -205,6 +205,13 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   10 per page - keys `1-9` or `10+` pick a slot on the page, `0`/`n` next page, `p` prev, blank = back, or type a toon name (G1 names get a specific refusal).
   The state menu shows `[x]` on the bot's current conf state; picking a preset
   writes `Name: preset` into ~/.botcmd-states.conf (apply with `botcmd states apply`).
+- `botcmd states apply` does NOT gate on `characters.online`: every conf bot gets
+  its `/w` lines, because a whisper to a toon not in the world is a harmless no-op
+  and the DB flag is not ground truth anyway (worldserver boot resets ALL flags to
+  0 - Main.cpp:520 - and real logins rewrite them async - CharacterHandler.cpp:921).
+  The flag is printed inline as info only; `botcmd states verify` (rpg status
+  read-back) is the source of truth for who actually received the orders.
+  `botcmd states verify all force` additionally probes bots the DB flags offline.
 - Zone travel (verified vs mod-playerbots @ e88cc40): `go travel <zone>` matches
   destination titles by name (case-insensitive) and the engine level-filters
   destinations (TravelMgr level ranges vs bot level); rpg grind/quest/gather

@@ -49,13 +49,13 @@ botcmd - Chazbot control
   botcmd roster fix                   kick all online watched bots -> ritual -> verify (one command)
   botcmd go <toon> <zone...>          walk one bot to a zone now (go travel; G1 refused)
   botcmd states show                  state layout: conf + online + live
-  botcmd states apply [bot|all]       push conf states to online bots
+  botcmd states apply [bot|all]       push conf states: /w nc/co to EVERY conf bot (no online gate - offline toons are a no-op; verify shows who answered)
   botcmd states edit                  edit ~/.botcmd-states.conf
   botcmd states presets               built-in strategy presets (+ zone recipes)
   botcmd states bots                  pick a bot (paginated) -> set its default state
   botcmd states zones [level]         vanilla level->zone table (for go travel)
   botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|follow|idle)
-  botcmd states verify [bot|all]      Leo whispers 'rpg status' to online bots; tabulates conf vs live reply + live group/leader (shows why a bot may be silent: Leo not master / not in its group)
+  botcmd states verify [bot|all] [force]  Leo whispers 'rpg status' to bots; tabulates conf vs live reply + live group/leader (why a bot may be silent); force = also probe DB-offline bots
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd watchdog procs               duplicate-process audit (daemons, leo shell, menu lock)
   botcmd system worldserver           ac-worldserver check
@@ -191,7 +191,7 @@ case "${1:-}" in
       bots) locked states_pick_and_set ;;
       zones) states_zones "${3:-}" ;;
       setall) states_setall "${3:-}" ;;
-      verify) states_verify "${3:-all}" ;;
+      verify) states_verify "${3:-all}" "${4:-}" ;;
       apply) states_apply "${3:-all}" ;;
       edit) states_edit ;;
       presets) states_presets ;;
