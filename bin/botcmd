@@ -107,7 +107,7 @@ overall_status() {
 main_menu() {
   local c
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "Chazbot control - $(date '+%a %H:%M')"
     cat <<'EOF'
  1. Leo        (game client shell: online / off / status / chat log)
@@ -144,7 +144,11 @@ EOF
 # commands (status, watch, roster census, ...) are deliberately NOT locked.
 menu_lock() {
   local lock="$HOME/.botcmd.lock" pid
-  exec 9>"$lock" 2>/dev/null || return 0
+  # '{ exec 9>"$lock"; } 2>/dev/null' on purpose: a bare 'exec 9>"$lock" 2>/dev/null'
+  # (exec with no command) makes BOTH redirections permanent - stderr of the whole
+  # menu session would be swallowed, hiding errors/tracebacks and the bot picker's
+  # stderr menu (options would look dead). The braces scope 2>/dev/null to the exec.
+  { exec 9>"$lock"; } 2>/dev/null || return 0
   if flock -n 9 2>/dev/null; then
     printf '%s\n' "$$" > "$lock.pid"
     return 0

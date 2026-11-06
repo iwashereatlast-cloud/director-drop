@@ -288,7 +288,7 @@ roster_fix() {
 roster_menu() {
   local c n z
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "Roster (bots + watched guild)"
     cat <<'EOF'
  1. Who's online (census)

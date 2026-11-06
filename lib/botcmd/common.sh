@@ -53,6 +53,21 @@ warn()   { printf '%s\n' "${C_Y}$*${C_N}"; }
 errmsg() { printf '%s\n' "${C_R}$*${C_N}"; }
 pause()  { printf '%s' "${C_N}press Enter... "; IFS= read -r _unused; }
 
+# ---- menu screen redraw ----
+# Plain 'clear || :' silently no-ops when TERM is unset/dumb or terminfo is
+# missing (common with Windows ssh clients) - menus then SCROLL instead of
+# refreshing. cls prefers terminfo 'clear' on a real tty, falls back to raw
+# ANSI (xterm & co), and emits NOTHING when stdout is piped (keeps captured
+# output clean). BOTCMD_NO_REFRESH=1 forces scroll/append mode on purpose.
+cls() {
+  [ "${BOTCMD_NO_REFRESH:-0}" = "1" ] && return 0
+  [ -t 1 ] || return 0
+  if [ -n "${TERM:-}" ] && [ "$TERM" != "dumb" ] && command -v clear >/dev/null 2>&1 && clear >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '\033[H\033[2J\033[3J'
+}
+
 # ---- helpers ----
 
 # send one chat/console line to Leo's FIFO. Recreates the FIFO after a

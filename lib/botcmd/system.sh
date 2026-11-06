@@ -101,7 +101,7 @@ system_grants() {
 system_menu() {
   local c cmd
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "System (worldserver / SOAP / DB / console)"
     cat <<'EOF'
  1. worldserver status

@@ -29,6 +29,12 @@ Do NOT enable leo.service itself - the watchdog owns when Leo runs.
 
 ## Knobs (optional): create $HOME/.leo-watchdog.conf
 
+# botcmd UI knob (goes in ~/.botcmd.conf, not here):
+#   BOTCMD_NO_REFRESH=1   menus append (scroll) instead of redrawing in place.
+#   Default: menus redraw via cls() - terminfo 'clear' when TERM is usable,
+#   raw ANSI fallback when TERM is unset/dumb (Windows ssh clients), and no
+#   output at all when piped (captured output stays clean).
+
 ON_H=8                                          # server-local hour to come online
 OFF_H=22                                        # server-local hour to go offline
 GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"  # space-separated toon names (both Aeri* spellings until verified in the DB: SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%')

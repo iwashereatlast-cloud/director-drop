@@ -37,7 +37,7 @@ leo_chat() {  # $1 = number of lines
 leo_menu() {
   local c
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "Leo control (game client shell)"
     cat <<'EOF'
  1. Bring Leo online

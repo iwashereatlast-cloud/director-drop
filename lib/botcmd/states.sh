@@ -183,7 +183,7 @@ states_pick_bot() {
   fi
   pages=$(( (total + pagesize - 1) / pagesize ))
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "Pick a bot - page $((page + 1))/$pages, $total bots  (1-9 or 10+ = slot on this page, 0 or n = next page, p = prev, blank = back, or type a name)" >&2
     i=$((page * pagesize)); slot=1
     while [ "$i" -lt "$total" ] && [ "$slot" -le "$pagesize" ]; do
@@ -239,7 +239,7 @@ states_set_bot() {  # $1 = bot name
   if is_handplay "$bot"; then errmsg "REFUSED: $bot is hand-play (G1) - never set states on them"; return 1; fi
   cur=$(_states_conf_get "$bot")
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "Default state for $bot  (conf: $BOTCMD_STATES_CONF)"
     printf 'current conf state: %s\n\n' "${cur:-(none set)}"
     i=0
@@ -303,7 +303,7 @@ states_pick_preset() {
     uniform=$(printf '%s\n' "$vals" | grep -v '^$' | head -n 1)
   fi
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "Set ALL bots to one state ($nbots watched bots)" >&2
     if [ -n "$uniform" ]; then
       printf 'all bots currently have conf state: %s\n\n' "$uniform" >&2
@@ -690,7 +690,7 @@ states_setall() {  # $1 = grind|quest|gather|follow|idle (optional)
 states_menu() {
   local c n
   while :; do
-    clear >/dev/null 2>&1 || :
+    cls
     hdr "States (who does what: per-bot strategies)"
     cat <<'EOF'
  1. States table (conf + online)
