@@ -64,7 +64,7 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
   ("player already logged in" - PlayerbotMgr.cpp ProcessBotCommand); bot AI
   is only attached on a fresh login. `botcmd roster ritual` therefore prints
   the toons currently ONLINE and warns: log them out first, then re-run the
-  ritual. Until a toon has bot AI it will never answer `/w <toon> rpg status`
+  ritual. Until a toon has bot AI it will never answer `/w <toon> nc ?`
   (`botcmd states verify` shows NO REPLY for it).
 - WHY offline is required (module design, not our choice): a playerbot is a
   separate headless WorldSession the worldserver creates; `add`/`addaccount`/
@@ -296,12 +296,13 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   its `/w` lines, because a whisper to a toon not in the world is a harmless no-op
   and the DB flag is not ground truth anyway (worldserver boot resets ALL flags to
   0 - Main.cpp:520 - and real logins rewrite them async - CharacterHandler.cpp:921).
-  The flag is printed inline as info only; `botcmd states verify` ('nc ?' +
-  rpg status read-back) is the source of truth for who actually received the orders.
+  The flag is printed inline as info only; `botcmd states verify` (pure 'nc ?'/'co ?'
+  whisper read-back - the state table is built from the replies alone) is the source of
+  truth for who actually received the orders.
   `botcmd states verify all force` additionally probes bots the DB flags offline.
 - `botcmd states probe [bot|all] [force] [cmd...]` is a raw whisper passthrough
   (default `nc ?`): Leo sends `/w <bot> <cmd>` and ALL reply lines per bot are
-  printed (verify reads the `Strategies:` line for its verdict - probe shows ALL
+  printed (verify reads the `Strategies:` reply line for its verdict - probe shows ALL
   lines, e.g. `No quest available; use 'do quest <id>'`). Source notes:
   `nc ?`/`co ?` list the ENABLED strategies of that engine (Engine.cpp:524
   ListStrategies; +/- at :676-694) and reply via TellMaster to the MASTER only
@@ -340,38 +341,33 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   argument it opens a `[x]` picker in the same style as the per-bot state menu
   (the box is ticked when every watched bot currently has that same state).
 - After a set-all / apply-all, Leo automatically whispers each online bot
-  `nc ?` AND `rpg status`, and botcmd tabulates the replies (`botcmd states
-  verify [bot|all]`, States menu -> 8). The VERDICT comes from `nc ?` strategy
-  MEMBERSHIP vs the conf: `nc ?` whispers `ListStrategies()` = the ENABLED
-  strategies only (Engine.cpp:524-538; +/- add/removeStrategy at :676-694) via
-  TellMaster to the bot's MASTER (Engine.cpp:695, PlayerbotAI.cpp:3170) - so a
-  `Strategies:` reply also proves Leo is that bot's master. Presets are
-  strategy SETS, not rpg states: conf `quest` = `nc +new rpg,+quest,-grind,...`
-  shows up as `quest`+`new rpg` present and `grind`/`gather`/`follow` absent in
-  the `nc ?` list, while `rpg status` (NewRpgInfo::ToString(),
-  NewRpgAction.cpp) is a TRANSIENT state that re-rolls on IDLE
-  (RpgStatusProbWeight, NewRpgAction.cpp:250-256) - shown as the LIVE column
-  for info, never the verdict; DO_QUEST only appears while a quest POI is
-  active (:183-215), which is why the old status-based verify showed MISMATCH
-  on bots with empty quest logs. OK / MISMATCH (nc: missing [..] still on [..])
-  / NO REPLY per bot. Any `[name] [whisper]:` reply line is captured (not just
-  `Status:` lines);
-  `BOTCMD_VERIFY_DEBUG=1` additionally dumps the raw new log lines, and
-  `BOTCMD_VERIFY_WAIT=<seconds>` changes the default 20s collect window.
-  The table also shows each bot's live GROUP/LEADER (read-only DB
-  `groups`/`group_member`, backticked - RESERVED word in MySQL 8) plus Leo's
-  own group, because silence is usually a security-level issue, not missing
-  AI: `LevelFor` (PlayerbotSecurity.cpp) gives Leo ALLOW_ALL only as the
-  bot's master, INVITE if the bot is groupless or leads its group, else
-  TALK; bot senders get no deny whisper (PlayerbotSecurity.cpp:190) and
-  under-level queued commands are erased silently (PlayerbotAI.cpp:642-647).
-  Verdict tags: `[no-ai]` = no bot AI attached (groupless bot should answer -
-  run `botcmd roster ritual`); `[group]` = bot sits in a group Leo is not in
-  / is not leader of; `[master]` = same group as Leo but master != Leo, or
-  the `rpg status` probe answered but the ALLOW_ALL set was dropped.
-  Fix for [group]/[master]: grant gmlevel on `I_WAS_CMD` (CanBeGameMaster ->
-  ALLOW_ALL from every bot, PlayerbotSecurity.cpp:31, needs RBAC_PERM_COMMAND_GM)
-  and/or `botcmd roster fix` after Leo re-masters them. Master churn:
+  `nc ?` (plus `co ?` when the bot's conf uses `co`), and botcmd tabulates the
+  replies (`botcmd states verify [bot|all]`, States menu -> 8). The table is
+  built PURELY from those whisper replies - no DB group map, no group column,
+  no group banner, and no `rpg status` whisper (`rpg status` is a TRANSIENT
+  state that re-rolls on IDLE by RpgStatusProbWeight, NewRpgAction.cpp:250-256
+  - it never reflected the strategy set anyway). The VERDICT comes from `nc ?`
+  strategy MEMBERSHIP vs the conf: `nc ?` whispers `ListStrategies()` = the
+  ENABLED strategies only (Engine.cpp:524-538; +/- add/removeStrategy at
+  :676-694) via TellMaster to the bot's MASTER (Engine.cpp:695,
+  PlayerbotAI.cpp:3170) - so a `Strategies:` reply also proves Leo is that
+  bot's master. Presets are strategy SETS, not rpg states: conf `quest` =
+  `nc +new rpg,+quest,-grind,...` shows up as `quest`+`new rpg` present and
+  `grind`/`gather`/`follow` absent in the `nc ?` list. Columns:
+  BOT / CONF / NC(live) / CO(live) / VERDICT. Verdicts per bot:
+  `OK (nc: <conf> on)` / `MISMATCH (nc: missing [..] still on [..]) - push
+  with: botcmd states apply` / `NO REPLY [no-ai] ...` / custom confs show
+  `custom conf - replies shown`; `verify all force` also probes DB-offline
+  bots (row marked `db:offline - no reply expected...`).
+  `BOTCMD_VERIFY_DEBUG=1` additionally dumps the raw new `[name] [whisper]:`
+  log lines, and `BOTCMD_VERIFY_WAIT=<seconds>` changes the default 20s
+  collect window. A silent bot that answered whispers before is a
+  master/level issue, not missing AI: `LevelFor` (PlayerbotSecurity.cpp)
+  gives Leo ALLOW_ALL only as the bot's master; under-level queued commands
+  are erased silently (PlayerbotAI.cpp:642-647) and bot senders get no deny
+  whisper (PlayerbotSecurity.cpp:190). Fix: `botcmd roster fix` to re-master
+  via the ritual, and/or grant gmlevel 3 on `I_WAS_CMD` (CanBeGameMaster ->
+  ALLOW_ALL from every bot, PlayerbotSecurity.cpp:31). Master churn:
   Leo's logout nulls his bots' master (RandomPlayerbotMgr.cpp:2677) and a
   human logging into their group takes master (RandomPlayerbotMgr.cpp:2748).
 - Leo can broadcast too: /w Leo "send everyone to Barrens to grind" -> the

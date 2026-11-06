@@ -23,7 +23,7 @@ quest' is NOT sent anymore (it needs a quest with a POI in the bot's log - else
 when the status hits IDLE the new-rpg engine re-rolls it randomly by
 RpgStatusProbWeight (NewRpgAction.cpp:250-256). A durable 'quest' state = the nc
 strategies (new rpg + quest) + quests in the log; read it back with:
-  botcmd states verify                        # verdict = 'nc ?' strategy membership; rpg status = info
+  botcmd states verify                        # verdict = 'nc ?'/'co ?' strategy membership vs conf (table built from the replies alone)
   botcmd states apply [bot|all]               # set-state = read-modify-write: probe 'nc ?'/'co ?', whisper ONLY the diff (full push on no reply), then verify
   botcmd states probe all "nc ?"              # raw list (goes to master Leo)
   botcmd states probe all "rpg status do quest"   # MANUAL only - shows per-bot error whispers (not sent by presets anymore)
@@ -188,7 +188,7 @@ states_show() {
   rm -f /tmp/.botcmd-entries.$$
   echo
   warn "purity rule: states are sent by YOU (apply), never auto-applied on login"
-  warn "read back live strategies ('nc ?') + rpg status with: botcmd states verify"
+  warn "read back live strategies ('nc ?'/'co ?') with: botcmd states verify"
 }
 
 # Blind full push - fallback when the shell log is unreadable or BOTCMD_APPLY_FULL=1.
@@ -558,59 +558,27 @@ states_pick_preset() {
   done
 }
 
-# Live group/leader map from the characters DB (read-only). `groups` is a
-# RESERVED word in MySQL 8 - always backtick-quote it. Same schema as
-# director.py GROUP_SQL (Group.cpp persists create/member-add/leader/type).
-# prints: name<TAB>groupGuid<TAB>leaderName<TAB>groupType   (empty guid = groupless)
-# args are toon names, charset-validated ([A-Za-z0-9]) before they reach SQL.
-_states_group_map() {
-  local -a names=() q="" n
-  for n in "$@"; do
-    case "$n" in
-      ""|*[!A-Za-z0-9]*) errmsg "bad toon name '$n' - skipped in group lookup"; continue ;;
-    esac
-    names+=("$n")
-  done
-  [ "${#names[@]}" -eq 0 ] && return 0
-  for n in "${names[@]}"; do q+="'$n',"; done
-  q=${q%,}
-  db_ro -N -B -e "SELECT c.name, COALESCE(g.guid,''), COALESCE(lc.name,''), COALESCE(g.groupType,'') FROM acore_characters.characters c LEFT JOIN acore_characters.group_member gm ON gm.memberGuid=c.guid LEFT JOIN acore_characters.\`groups\` g ON g.guid=gm.guid LEFT JOIN acore_characters.characters lc ON lc.guid=g.leaderGuid WHERE c.name IN ($q)" 2>/dev/null
-}
-
-# groupType -> party/raid/bg ('-' when groupless). bit 0x01 = battleground,
-# bit 0x02 = raid (Group.h enum GroupType) - same decode as director.py.
-_grp_kind() {
-  case "${1:-}" in
-    "") echo "-" ;;
-    *)  if [ $(( ${1:-0} & 0x02 )) -ne 0 ]; then echo "raid"
-        elif [ $(( ${1:-0} & 0x01 )) -ne 0 ]; then echo "bg"
-        else echo "party"; fi ;;
-  esac
-}
-
-# Read-back verification: Leo whispers 'nc ?' AND 'rpg status' to each online
-# target bot (via the FIFO, exactly like an order), then we collect the
-# "[Name] [whisper]: ..." replies from the shell log and tabulate conf vs live.
-# Source-verified @ e88cc40: 'nc ?' whispers ListStrategies() - the ENABLED
-# strategy names (Engine.cpp:524-538; +/- add/removeStrategy at :676-694) -
-# via TellMaster to the bot's MASTER only (Engine.cpp:695, PlayerbotAI.cpp:3170).
-# 'rpg status' (no args) whispers NewRpgInfo::ToString() ("Status: X ...") - a
-# TRANSIENT rpg state (re-rolls on IDLE by RpgStatusProbWeight, NewRpgAction.cpp:
-# 250-256). The verdict for a strategy preset comes from 'nc ?' MEMBERSHIP (a
-# preset like 'quest' is a strategy SET, not an rpg status - DO_QUEST only shows
-# while a quest POI is active, NewRpgAction.cpp:183-215, so bots with empty quest
-# logs never show it); the rpg status is shown as info only.
+# Read-back verification, built PURELY from whisper replies: Leo whispers
+# 'nc ?' to every target (plus 'co ?' when the bot's conf uses co), we collect
+# the "[Name] [whisper]: Strategies: ..." lines from the shell log and tabulate
+# conf vs live. No DB group map, no 'rpg status' (transient - re-rolls on IDLE
+# by RpgStatusProbWeight, NewRpgAction.cpp:250-256).
+# Source-verified @ e88cc40: 'nc ?'/'co ?' whisper ListStrategies() - the ENABLED
+# strategies (Engine.cpp:524-538; +/- at :676-694) - via TellMaster to the bot's
+# MASTER only (Engine.cpp:695, PlayerbotAI.cpp:3170), so a 'Strategies:' reply
+# also proves Leo is that bot's master. Verdict = strategy MEMBERSHIP vs conf
+# (a preset like 'quest' is a strategy SET, not an rpg status).
 states_verify() {  # $1 = bot name or "all" (default all online watched bots);
                     # $2 = "force" (or BOTCMD_VERIFY_FORCE=1) also probes bots the DB flags offline
-  local target="${1:-all}" force="${2:-}" log="$BOTCMD_SHELL_LOG" start n online
+  local target="${1:-all}" force="${2:-}" log="$BOTCMD_SHELL_LOG" start off n online
   [ "${BOTCMD_VERIFY_FORCE:-0}" = "1" ] && force=force
-  hdr "Verify live states (Leo whispers 'nc ?' + 'rpg status'; verdict = nc strategy membership)"
+  hdr "Verify live states (Leo whispers 'nc ?' + 'co ?' where the conf uses co; verdict = strategy membership vs conf)"
   if [ ! -r "$log" ]; then
     errmsg "no $log - is the Leo shell up? (botcmd leo status)"
     return 1
   fi
-  local -a targets=()
-  declare -A t_on=()
+  local -a targets=() co_names=()
+  declare -A t_on=() want_co=()
   if [ "$target" = "all" ]; then
     while IFS=$'\t' read -r n _ online _; do
       if [ "$online" = "1" ] || [ -n "$force" ]; then
@@ -635,148 +603,141 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
     warn "no online watched bots to verify right now"
     return 1
   fi
-  # Live group/leader context - WHY a bot may stay silent when Leo whispers:
-  # LevelFor (PlayerbotSecurity.cpp) gives Leo ALLOW_ALL only as the bot's
-  # master, INVITE if the bot is groupless or leads its group, else TALK;
-  # deny text is suppressed for bot senders (:190) and queued commands below
-  # their required level are erased silently (PlayerbotAI.cpp:642-647).
-  declare -A g_guid=() g_leader=() g_type=()
-  local gm_line n2 gg gl gt
-  while IFS=$'\t' read -r n2 gg gl gt; do
-    [ -n "$n2" ] && { g_guid[$n2]=$gg; g_leader[$n2]=$gl; g_type[$n2]=$gt; }
-  done < <(_states_group_map Leo "${targets[@]}")
-  local leo_grp="${g_guid[Leo]:-}" inleo=""
-  if [ "${#g_guid[@]}" -eq 0 ]; then
-    warn "group info unavailable (DB read failed?) - GRP column and hints degrade to '-'"
-  else
-    for n in "${targets[@]}"; do
-      [ -n "$leo_grp" ] && [ "${g_guid[$n]:-}" = "$leo_grp" ] && inleo+="$n "
-    done
-    if [ -n "$leo_grp" ]; then
-      okmsg "Leo is in $(_grp_kind "${g_type[Leo]:-}") led by ${g_leader[Leo]:-?} (guid $leo_grp)${inleo:+ - also in it: $inleo}"
-    else
-      warn "Leo is not in any group right now"
-    fi
-  fi
+  # targets whose conf uses co get a 'co ?' pass too (same rule as apply)
+  local eng w nn w_nc nn_nc w_co nn_co
+  for n in "${targets[@]}"; do
+    while IFS='|' read -r eng w nn; do
+      [ "$eng" = co ] && want_co[$n]=1
+    done < <(_conf_engine_wants "$(_states_conf_get "$n")")
+  done
+  for n in "${targets[@]}"; do [ -n "${want_co[$n]:-}" ] && co_names+=("$n"); done
+
   start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
-  declare -A reply=() replies=()
-  # one scan of everything appended to the log since the probe started
-  scan_new() {
-    tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: .*' || true
+  declare -A reply_nc=() reply_co=() replies=()
+  scan_range() {  # $1=byte start $2=byte end (exclusive) -> new "[Name] [whisper]: ..." lines in that window
+    [ "$2" -gt "$1" ] || return 0
+    tail -c +"$(( $1 + 1 ))" "$log" 2>/dev/null | head -c "$(( $2 - $1 ))" \
+      | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: .*' || true
   }
-  record() {  # $1 = raw matched line - keeps the last line AND all lines per bot
+  record() {  # $1 = raw line, $2 = engine tag (nc|co)
     local who txt
     who=${1%%]*}; who=${who#\[}
     txt=${1#*\[whisper\]: }
-    reply[$who]="$txt"
     replies[$who]+="$txt"$'\n'
+    case "$2" in
+      nc) case "$txt" in "Strategies: "*) reply_nc[$who]="$txt" ;; esac ;;
+      co) case "$txt" in "Strategies: "*) reply_co[$who]="$txt" ;; esac ;;
+    esac
   }
-  local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 line all sent=0
-  # send probes one by one and scan after EACH send, so early replies are
-  # never missed even when the post-send wait window is short
+  local max="${BOTCMD_VERIFY_WAIT:-20}" waited=0 line all sent=0 now
+  # pass 1: 'nc ?' to every target - scan after EACH send so early replies are never missed
   for n in "${targets[@]}"; do
     game_send "/w $n nc ?" && sent=$((sent + 1))
-    game_send "/w $n rpg status" && sent=$((sent + 1))
-    while IFS= read -r line; do
-      [ -n "$line" ] && record "$line"
-    done <<< "$(scan_new)"
+    now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+    while IFS= read -r line; do [ -n "$line" ] && record "$line" nc; done <<< "$(scan_range "$start" "$now")"
     sleep 1
   done
-  okmsg "sent 'nc ?' + 'rpg status' (${#targets[@]} bot(s), $sent whispers) - collecting replies (up to ${max}s more)..."
+  off=$(wc -c < "$log" 2>/dev/null); off=${off:-0}
+  # one more scan of the pass-1 window (stragglers), then the co window starts at $off
+  while IFS= read -r line; do [ -n "$line" ] && record "$line" nc; done <<< "$(scan_range "$start" "$off")"
+  # pass 2: 'co ?' only to co-conf targets; only bytes after $off belong to this pass
+  for n in "${co_names[@]}"; do
+    game_send "/w $n co ?" && sent=$((sent + 1))
+    now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+    while IFS= read -r line; do [ -n "$line" ] && record "$line" co; done <<< "$(scan_range "$off" "$now")"
+    sleep 1
+  done
+  okmsg "sent 'nc ?' to ${#targets[@]} bot(s)${co_names:+ and 'co ?' to ${#co_names[@]} co-conf bot(s)} ($sent whispers) - collecting replies (up to ${max}s more)..."
   while [ "$waited" -lt "$max" ]; do
-    while IFS= read -r line; do
-      [ -n "$line" ] && record "$line"
-    done <<< "$(scan_new)"
+    while IFS= read -r line; do [ -n "$line" ] && record "$line" nc; done <<< "$(scan_range "$start" "$off")"
+    now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+    [ "${#co_names[@]}" -gt 0 ] && while IFS= read -r line; do [ -n "$line" ] && record "$line" co; done <<< "$(scan_range "$off" "$now")"
     all=1
-    for n in "${targets[@]}"; do [ -n "${reply[$n]:-}" ] || all=0; done
+    for n in "${targets[@]}"; do [ -n "${reply_nc[$n]:-}" ] || all=0; done
+    for n in "${co_names[@]}"; do [ -n "${reply_co[$n]:-}" ] || all=0; done
     [ "$all" = "1" ] && break
     sleep 1; waited=$((waited + 1))
   done
   echo
-  printf '%-12s %-8s %-14s %-40s %s\n' "BOT" "CONF" "GRP" "LIVE(reply)" "VERDICT"
-  local conf txt st verdict grp strat status members norm missing extra wants nots w detail
+  printf '%-12s %-9s %-44s %-28s %s\n' "BOT" "CONF" "NC(live)" "CO(live)" "VERDICT"
+  local conf txt strat nc_live co_live verdict v members norm missing extra detail
   local -a warr=()
-  # preset -> expected nc strategy membership (want ON / want OFF).
-  # 'new rpg' is ONE strategy name containing a space - split on ',' only.
+  _membership() {  # $1="Strategies: ..." reply, $2=wants csv, $3=nots csv -> "OK" or "missing [..] still on [..]"
+    members=${1#Strategies: }; norm=",$members,"; norm=$(printf '%s' "$norm" | sed 's/, */,/g')
+    missing=""; extra=""
+    if [ -n "$2" ]; then
+      IFS=',' read -ra warr <<< "$2"
+      for w in "${warr[@]}"; do case "$norm" in *",$w,"*) : ;; *) missing+="$w " ;; esac; done
+    fi
+    if [ -n "$3" ]; then
+      IFS=',' read -ra warr <<< "$3"
+      for w in "${warr[@]}"; do case "$norm" in *",$w,"*) extra+="$w " ;; esac; done
+    fi
+    missing=$(printf '%s' "$missing" | xargs); extra=$(printf '%s' "$extra" | xargs)
+    if [ -z "$missing" ] && [ -z "$extra" ]; then printf 'OK'
+    else
+      detail=""
+      [ -n "$missing" ] && detail+="missing [$missing] "
+      [ -n "$extra" ] && detail+="still on [$extra] "
+      printf '%s' "$detail"
+    fi
+  }
   for n in "${targets[@]}"; do
     conf=$(_states_conf_get "$n"); [ -n "$conf" ] || conf="-"
     txt=${replies[$n]:-}
-    grp="-"
-    if [ -n "${g_guid[$n]:-}" ]; then
-      grp="$(_grp_kind "${g_type[$n]:-}"):${g_leader[$n]:-?}"
-    fi
-    strat=$(printf '%s' "$txt" | grep -a '^Strategies: ' | head -n 1)
-    status=$(printf '%s' "$txt" | grep -a '^Status: ' | head -n 1)
-    # LIVE column: transient rpg status if we got one (info), else the strategy list
-    if [ -n "$status" ]; then
-      st=$(printf '%s' "$status" | cut -c1-40); st=${st#Status: }
-    elif [ -n "$strat" ]; then
-      st=$(printf '%s' "$strat" | cut -c1-40)
+    strat=${reply_nc[$n]:-}
+    if [ -n "$strat" ]; then nc_live=$(printf '%s' "$strat" | sed 's/^Strategies: //' | cut -c1-44); else nc_live="-"; fi
+    if [ -n "${want_co[$n]:-}" ] && [ -n "${reply_co[$n]:-}" ]; then
+      co_live=$(printf '%s' "${reply_co[$n]}" | sed 's/^Strategies: //' | cut -c1-28)
     else
-      st="-"
+      co_live="-"
     fi
     if [ -z "$txt" ]; then
       if [ -n "$force" ] && [ "${t_on[$n]:-}" != "1" ]; then
         verdict="db:offline - no reply expected unless the toon is actually online as a bot"
-      elif [ -z "${g_guid[$n]:-}" ]; then
-        verdict="NO REPLY [no-ai] groupless, so Leo should have INVITE - bot AI off / not added as a bot? shell down? try: botcmd roster ritual"
-      elif [ -n "$leo_grp" ] && [ "${g_guid[$n]}" = "$leo_grp" ]; then
-        verdict="NO REPLY [master] same group as Leo but bot's master != Leo (deny text suppressed for bot senders); grant I_WAS_CMD gmlevel or botcmd roster fix"
       else
-        verdict="NO REPLY [group] in a group led by ${g_leader[$n]:-?} that Leo is not in (bot not leader -> TALK -> silent); grant I_WAS_CMD gmlevel or botcmd roster fix"
+        verdict="NO REPLY [no-ai] bot AI off / not added / shell down - try: botcmd roster ritual; if it answered whispers before it is a master/level issue: botcmd roster fix (or gmlevel 3 on I_WAS_CMD)"
       fi
     else
       case "$conf" in
         grind|quest|gather|leveling|follow|idle)
           IFS='|' read -r wants nots <<< "$(_preset_wants_nots "$conf")"
           if [ -n "$strat" ]; then
-            members=${strat#Strategies: }
-            norm=",$members,"
-            norm=$(printf '%s' "$norm" | sed 's/, */,/g')
-            missing=""; extra=""
-            if [ -n "$wants" ]; then
-              IFS=',' read -ra warr <<< "$wants"
-              for w in "${warr[@]}"; do
-                case "$norm" in *",$w,"*) : ;; *) missing+="$w " ;; esac
-              done
-            fi
-            if [ -n "$nots" ]; then
-              IFS=',' read -ra warr <<< "$nots"
-              for w in "${warr[@]}"; do
-                case "$norm" in *",$w,"*) extra+="$w " ;; esac
-              done
-            fi
-            missing=$(printf '%s' "$missing" | xargs); extra=$(printf '%s' "$extra" | xargs)
-            if [ -z "$missing" ] && [ -z "$extra" ]; then
-              verdict="OK (nc: $conf strategies on)"
-            else
-              detail=""
-              [ -n "$missing" ] && detail+="missing [$missing] "
-              [ -n "$extra" ] && detail+="still on [$extra] "
-              verdict="MISMATCH (nc: $detail)- push conf with: botcmd states apply; if STILL off after apply, the nc SET was silently erased (needs ALLOW_ALL - Leo not master/GM) [master]"
-            fi
-          elif [ -n "$status" ]; then
-            verdict="rpg answered (INVITE ok) but 'nc ?' no reply - 'nc' needs ALLOW_ALL (master/GM), else the SET is silently erased (PlayerbotAI.cpp:642-647); or RepeatDelay dedupe on repeated text - rerun verify [master]"
+            v=$(_membership "$strat" "$wants" "$nots")
+            if [ "$v" = "OK" ]; then verdict="OK (nc: $conf on)"; else verdict="MISMATCH (nc: $v)- push with: botcmd states apply"; fi
           else
             verdict="reply shown (not a strategy list): $(printf '%s' "$txt" | head -n 1 | cut -c1-60)"
+          fi
+          if [ -n "${want_co[$n]:-}" ]; then
+            w_nc=""; nn_nc=""; w_co=""; nn_co=""
+            while IFS='|' read -r eng w nn; do
+              [ "$eng" = nc ] && { w_nc="$w"; nn_nc="$nn"; }
+              [ "$eng" = co ] && { w_co="$w"; nn_co="$nn"; }
+            done <<< "$(_conf_engine_wants "$conf")"
+            if [ -n "${reply_co[$n]:-}" ]; then
+              v=$(_membership "${reply_co[$n]}" "$w_co" "$nn_co")
+              if [ "$v" = "OK" ]; then verdict="$verdict; co on"; else verdict="$verdict; co: $v"; fi
+            else
+              verdict="$verdict; co: NO REPLY"
+            fi
           fi
           ;;
         *) verdict="custom conf - replies shown" ;;
       esac
     fi
-    printf '%-12s %-8s %-14s %-40s %s\n' "$n" "$conf" "$grp" "$st" "$verdict"
+    printf '%-12s %-9s %-44s %-28s %s\n' "$n" "$conf" "$nc_live" "$co_live" "$verdict"
   done
   echo
-  warn "read-back: 'nc ?' lists ENABLED strategies only (Engine.cpp:524 ListStrategies; +/- at :676-694) and replies via TellMaster to the bot's"
-  warn "           MASTER (PlayerbotAI.cpp:3170) - a 'Strategies:' reply also proves Leo is that bot's master. 'rpg status' is transient"
-  warn "           (re-rolls on IDLE by RpgStatusProbWeight, NewRpgAction.cpp:250-256), shown as info only; DO_QUEST needs a quest POI in the log (:183-215)."
-  warn "tags: [no-ai] no bot AI attached (add/addaccount refuse online toons - PlayerbotMgr.cpp:733; bot remove works online - PlayerbotMgr.cpp:756);"
-  warn "      [group]/[master] Leo's level from that bot is below ALLOW_ALL (PlayerbotSecurity.cpp LevelFor; silent erase PlayerbotAI.cpp:642-647; deny suppressed for bot senders :190)"
-  warn "fix: grant gmlevel on I_WAS_CMD (CanBeGameMaster -> ALLOW_ALL, PlayerbotSecurity.cpp:31) and/or botcmd roster fix to re-master via ritual"
+  warn "read-back: 'nc ?'/'co ?' list the ENABLED strategies only (Engine.cpp:524 ListStrategies; +/- at :676-694) and reply via TellMaster to the"
+  warn "           bot's MASTER (PlayerbotAI.cpp:3170) - a 'Strategies:' reply also proves Leo is that bot's master."
+  warn "tags: [no-ai] no bot AI attached (add/addaccount refuse online toons - PlayerbotMgr.cpp:733; bot remove works online - PlayerbotMgr.cpp:756); a bot that"
+  warn "      answered whispers before but is silent now = master/level issue (PlayerbotSecurity.cpp LevelFor; silent erase PlayerbotAI.cpp:642-647; deny suppressed :190)"
+  warn "fix: botcmd roster fix to re-master via ritual, and/or gmlevel 3 on I_WAS_CMD (CanBeGameMaster -> ALLOW_ALL, PlayerbotSecurity.cpp:31)"
   if [ "${BOTCMD_VERIFY_DEBUG:-0}" = "1" ]; then
     echo
     warn "DEBUG - all new '[name] [whisper]:' lines since the probe started:"
-    scan_new | sed 's/^/  /'
+    now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+    scan_range "$start" "$now" | sed 's/^/  /'
   fi
   echo
   warn "full reply text: botcmd leo chat 60   (daemon.log also logs these replies as dropped bot-sender lines - expected)"
@@ -934,7 +895,7 @@ states_menu() {
  5. Apply ONE bot's state (same probe+diff)
  6. Edit states conf
  7. Show presets + level->zone table
- 8. Verify live states now ('nc ?' strategy read-back + rpg status; CLI 'verify all force' also probes DB-offline bots)
+ 8. Verify live states now ('nc ?'/'co ?' read-back -> state table; 'verify all force' also probes DB-offline bots)
  9. Probe any command (default 'nc ?' - lists strategies; replies go to master Leo)
 10. Return to main menu   (blank Enter = back)
 EOF
