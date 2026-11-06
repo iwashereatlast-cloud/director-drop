@@ -121,10 +121,23 @@ SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
 # destroy, castnc, d/do (raw action execution), guild management, cast (gated
 # separately below). Anything in FORBIDDEN below is refused by validate() even
 # if it were listed here.
+# "invite" / "give leader" are NOT whitelisted on purpose: the mod auto-joins
+# every bot into its master's group on login anyway
+# (PlayerbotMgr.cpp:591-619 HandlePlayerBotLoginCallback queues a
+# GroupInviteOperation per bot when the master is online; Execute() creates
+# the group if Leo has none, ConvertToRaid()s at >=5 members, AddMember, and
+# summons the bot when SummonWhenGroup=1 - PlayerbotOperations.h:37-90,
+# playerbots.conf.dist:193; NO conf key disables that auto-join), and being
+# grouped splits kill XP across all members in reward range
+# (KillRewarder.cpp:264-274; xp_in_group_rate 1.4 total for >=5 members in the
+# open world, Formulas.h:119-150 -> ~1.4/17 per bot in a 17-man raid). Group
+# control is CLI-side (botcmd raid clear / roster ritual auto-clear) plus
+# validate()'s membership-checked "group remove" - the LLM may only SHRINK a
+# group ("leave"), never grow one.
 WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "mail", "lfg", "roll", "stats",
              "rpg", "follow", "stay", "attack", "release",
-             "position", "go", "invite", "give leader", "buff",
+             "position", "go", "buff",
              "quests", "share", "leave",
              "trainer", "craft",
              "c", "ll", "loot all", "ue", "de", "spells", "help",
@@ -174,6 +187,7 @@ Rules:
 - DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
+- Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the CLI clears that auto-formed group after rituals). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
   * Questing: cmd "nc +new rpg,-follow" then cmd "rpg status do quest". The bot picks a quest from its log; if it has none, it will say so.
   * Grinding mobs: cmd "nc +new rpg,+grind,-follow" (optionally then cmd "rpg status go grind").

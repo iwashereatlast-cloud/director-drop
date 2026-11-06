@@ -43,7 +43,7 @@ botcmd - Chazbot control
   botcmd director deploy              git pull + compile check + restart
   botcmd director commands            Leo's command list (parsed live)
   botcmd roster census                live who's-online (read-only DB)
-  botcmd roster ritual                summon full roster (G1-safe)
+  botcmd roster ritual                summon full roster (G1-safe), then clear Leo's auto-formed group (BOTCMD_RITUAL_AUTOCLEAR=0 in ~/.botcmd.conf to skip)
   botcmd roster add <toon>            bring one bot online (hand-play refused)
   botcmd roster remove <toon>         stand one down (works on hand-play too)
   botcmd roster down <toon|all>       'bot remove' first (graceful for real bots); SOAP .kick only if still online - so the ritual can re-add them as bots

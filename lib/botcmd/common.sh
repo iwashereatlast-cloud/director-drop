@@ -23,6 +23,16 @@ BOTCMD_WATCH_GUILD="${BOTCMD_WATCH_GUILD:-Special FXc}"
 BOTCMD_SHELL_ACCOUNT="${BOTCMD_SHELL_ACCOUNT:-i_was_cmd}"
 # ^ Leo's headless-shell account - its toons (Leo) are excluded from bot pickers.
 BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
+# Post-ritual auto-group clear: on EVERY bot login the mod pulls the bot into
+# Leo's group (creating it if Leo has none) and converts to raid at >=5
+# members - PlayerbotMgr.cpp:591-619 HandlePlayerBotLoginCallback -> queued
+# GroupInviteOperation (PlayerbotOperations.h:37-90; SummonWhenGroup=1,
+# playerbots.conf.dist:193). No conf key disables that auto-join, so
+# roster_ritual waits for the login wave to settle, then /w each non-G1
+# member 'leave' (leaving keeps bot AI). 0 = leave the auto-formed group alone.
+BOTCMD_RITUAL_AUTOCLEAR="${BOTCMD_RITUAL_AUTOCLEAR:-1}"
+# seconds roster_ritual waits for the ritual logins to settle before clearing
+BOTCMD_RITUAL_SETTLE="${BOTCMD_RITUAL_SETTLE:-60}"
 
 # G1 hard rule (mirrors DIRECTOR_HANDPLAY in director.py): these five are
 # hand-play only - NEVER summoned, never commanded. bot remove stays

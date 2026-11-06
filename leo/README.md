@@ -39,6 +39,7 @@ ON_H=8                                          # server-local hour to come onli
 OFF_H=22                                        # server-local hour to go offline
 GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"  # space-separated toon names (both Aeri* spellings until verified in the DB: SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%')
 AUTORITUAL=1                                    # 1 = ritual after Leo logs in
+AUTORITUAL_CLEAR=1                              # 1 = on the next tick after the auto-ritual, /w 'leave' every non-G1 member of Leo's auto-formed group (the mod auto-joins bots on login - see "Auto raid" below)
 RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
 RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUAL_ACCOUNTS account (covered bots are skipped automatically)
 # NEVER add the account you hand-play on to RITUAL_ACCOUNTS - hand-play toons
@@ -162,6 +163,50 @@ Leo's own group (live DB membership check), never Leo himself, never the
 DIRECTOR_HANDPLAY toons, never bystanders. The headless chat client cannot
 send CMSG_GROUP_UNINVITE itself (chat-only client, no group opcodes), which
 is why removal goes through the bot 'leave' or the '.group remove' command.
+
+## Auto raid: why Leo's raid keeps re-forming, and the auto-clear
+
+The mod ITSELF pulls every bot into Leo's group on login - there is no conf
+key that disables it:
+
+- `PlayerbotMgr::HandlePlayerBotLoginCallback` (PlayerbotMgr.cpp:591-619): on
+  EVERY bot login, if its master (Leo) is online and in a group, a
+  `GroupInviteOperation(master, bot)` is queued; if Leo has NO group, one is
+  created and the bot added.
+- `GroupInviteOperation::Execute` (PlayerbotOperations.h:37-90): creates the
+  group if needed, `ConvertToRaid()` when members >= 5 (a party only holds 5),
+  `AddMember(target)`, and if `SummonWhenGroup=1` (default, playerbots.conf.dist:193)
+  summons the bot to Leo beyond SightDistance.
+- The conf group options do NOT gate this: GroupInvitationPermission=1 (:150),
+  KeepAltsInGroup=0 (:155), LogInGroupOnly=1 (:2564) are about other flows.
+  Bots DO auto-leave when the master leaves (KeepAltsInGroup=0 ->
+  LeaveOrDisbandGroup, PlayerbotMgr.cpp:~560), so the raid dissolves on Leo
+  logout - the problem is only while Leo is online.
+- Why it matters beyond questing comfort: open-world kill XP uses
+  `xp_in_group_rate` (Formulas.h:119-150) = 1.4 TOTAL for >=5 members and is
+  then SPLIT across all members in reward distance (KillRewarder.cpp:264-274)
+  - in a 17-man raid each bot gets ~1.4/17 (~8%) of a solo kill. (`isRaid`
+  rate 1.0 applies only inside raid-instance maps.) Quest turn-in XP is NOT
+  split (RewardPlayerAndGroupAtEvent, Player.cpp:13054).
+
+So director-drop undoes the auto-join on both bring-online paths:
+
+- CLI: `botcmd roster ritual` (and `roster fix`) now wait for the login wave
+  to settle (online set stable across a poll, max `BOTCMD_RITUAL_SETTLE`
+  seconds, default 60, in ~/.botcmd.conf), then `/w <m> leave` every non-G1,
+  non-Leo member of Leo's group (`_ritual_settle_clear` in lib/botcmd/roster.sh,
+  reusing `_group_members_of`/`_clear_group_whispers` from director.sh).
+  `BOTCMD_RITUAL_AUTOCLEAR=0` disables it.
+- Watchdog: the auto-ritual tick sets `ritual_pending=1` in
+  ~/.leo-watchdog.state; the next tick (Leo online) sends `/w <m> leave` to
+  every non-G1 member of Leo's group from the DB. `AUTORITUAL_CLEAR=0` in
+  ~/.leo-watchdog.conf disables it.
+- LLM: "invite" and "give leader" were removed from director.py's WHITELIST -
+  the director may only SHRINK Leo's group ("leave" / membership-checked
+  "group remove"), never grow one.
+
+'leave' keeps bot AI (PlayerbotAI.cpp:1008 unsecured command) - re-mastering
+stays with `botcmd roster fix`. Manual teardown stays `botcmd raid clear`.
 
 ## Master account rotation (botcmd master)
 

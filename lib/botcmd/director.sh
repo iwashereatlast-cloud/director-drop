@@ -32,6 +32,51 @@ director_raid() {  # $1 = toon name (default Leo)
   fi
 }
 
+# Members of <toon>'s group/raid from the live DB (group_member self-join;
+# the worldserver keeps it current on create/join/leave/convert), one name
+# per line, including <toon> itself. Empty output = groupless or DB down.
+# NOTE: `groups` is a RESERVED word in MySQL 8 - not used here, but backtick
+# it in hand-written queries against it.
+_group_members_of() {  # $1 = toon name -> member names on stdout
+  case "$1" in
+    ""|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  db_ro -N -B -e "SELECT c.name FROM acore_characters.characters lc JOIN acore_characters.group_member gm ON gm.memberGuid=lc.guid JOIN acore_characters.group_member gm2 ON gm2.guid=gm.guid JOIN acore_characters.characters c ON c.guid=gm2.memberGuid WHERE lc.name='$1' ORDER BY c.name" 2>/dev/null
+}
+
+# Members of <toon>'s group that may be asked to leave: everyone except
+# <toon> itself and the G1 hand-play five.
+_group_clear_targets() {  # $1 = toon name -> target names on stdout
+  local leo="$1" m
+  _group_members_of "$leo" | while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    [ "$m" = "$leo" ] && continue
+    is_handplay "$m" && continue
+    printf '%s\n' "$m"
+  done
+}
+
+# Ask every clearable member of <toon>'s group to leave:
+# '/w <m> leave' - 'leave' is an unsecured bot command (PlayerbotAI.cpp:1008)
+# and GM/master Leo passes the gate anyway. Leaving keeps bot AI (re-mastering
+# stays with roster fix). Prints per-member lines + a summary.
+_clear_group_whispers() {  # $1 = toon name
+  local leo="$1" m left=0 targets
+  targets=$(_group_clear_targets "$leo")
+  if [ -z "$targets" ]; then
+    warn "$leo has no clearable members (groupless, DB down, or G1-only) - nothing to clear"
+    return 1
+  fi
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    if game_send "/w $m leave"; then okmsg "queued: /w $m leave"; left=$((left + 1)); sleep 1; fi
+  done <<< "$targets"
+  echo
+  okmsg "asked $left member(s) of $leo's group to leave"
+  warn "bots keep their AI when leaving - verify with: botcmd director raid $leo  (DB lags a moment)"
+  return 0
+}
+
 # Clear Leo's raid/party: ask every member (except Leo and G1 hand-play) to
 # leave via '/w <member> leave' - 'leave' is an unsecured bot command
 # (PlayerbotAI.cpp:1008) and GM/master Leo passes the gate anyway. Group
@@ -45,7 +90,7 @@ director_raid_clear() {  # $1 = toon name (default Leo)
     ""|*[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$leo' rejected"; return 1 ;;
   esac
   hdr "Clear $leo's raid/party - /w <member> leave each non-G1 member"
-  members=$(db_ro -N -B -e "SELECT c.name FROM acore_characters.characters lc JOIN acore_characters.group_member gm ON gm.memberGuid=lc.guid JOIN acore_characters.group_member gm2 ON gm2.guid=gm.guid JOIN acore_characters.characters c ON c.guid=gm2.memberGuid WHERE lc.name='$leo' ORDER BY c.name" 2>/dev/null)
+  members=$(_group_members_of "$leo")
   if [ -z "$members" ]; then
     warn "$leo is not in any group (or DB read failed) - nothing to clear"
     return 1

@@ -26,6 +26,44 @@ _roster_online_watched() {
     | awk -v hp="$BOTCMD_HANDPLAY" 'BEGIN{n=split(hp,a," "); for(i=1;i<=n;i++) e[tolower(a[i])]=1} !e[tolower($1)] {print}'
 }
 
+# The mod AUTO-JOINS every freshly logged-in bot into Leo's group:
+# HandlePlayerBotLoginCallback (PlayerbotMgr.cpp:591-619) queues a
+# GroupInviteOperation per bot when its master is online; Execute()
+# (PlayerbotOperations.h:37-90) creates the group if Leo has none,
+# ConvertToRaid()s at >=5 members, AddMember, and summons the bot when
+# SummonWhenGroup=1 (default, playerbots.conf.dist:193). NO conf key
+# disables that auto-join - so after queueing the ritual logins we wait for
+# the login wave to settle, then /w each non-G1 member of Leo's group
+# 'leave' (unsecured bot command, PlayerbotAI.cpp:1008; leaving keeps bot
+# AI). Raid membership is not cosmetic: open-world kill XP is multiplied by
+# xp_in_group_rate=1.4 (>=5 members, Formulas.h:119-150) and then split
+# across all members in reward range (KillRewarder.cpp:264-274) - in a
+# 17-man raid each bot gets ~1.4/17 of a solo kill. Quest turn-in XP is NOT
+# split (RewardPlayerAndGroupAtEvent, Player.cpp:13054).
+_ritual_settle_clear() {  # $1 = toon name (default Leo)
+  local leo="${1:-${BOTCMD_LEO:-Leo}}" settle poll=5 waited=0 prev cur members oneline
+  settle="${BOTCMD_RITUAL_SETTLE:-60}"
+  case "$settle" in *[!0-9]*|"") settle=60 ;; esac
+  hdr "Settle + clear: the mod auto-joined the fresh logins into $leo's group - undoing it"
+  prev=$(_roster_online_watched); cur="$prev"
+  while [ "$waited" -lt "$settle" ]; do
+    sleep "$poll"; waited=$((waited + poll))
+    cur=$(_roster_online_watched)
+    [ "$cur" = "$prev" ] && break   # online set stable across a poll = login wave settled
+    prev="$cur"
+  done
+  sleep 2   # grace for the QUEUED GroupInviteOperations to land in the world thread
+  oneline=$(printf '%s ' $cur | sed 's/ *$//')
+  okmsg "settled after ${waited}s - online watched now: ${oneline:-<none>}"
+  members=$(_group_members_of "$leo")
+  if [ -z "$members" ]; then
+    okmsg "$leo is not in any group - nothing to clear (auto-join did not fire)"
+    return 0
+  fi
+  warn "$leo is grouped with: $(printf '%s ' $members | sed 's/ *$//')"
+  _clear_group_whispers "$leo"
+}
+
 roster_ritual() {
   hdr "Summon full roster (ritual)"
   warn "G1 baked in: accounts $BOTCMD_RITUAL_ACCOUNTS"
@@ -64,6 +102,11 @@ roster_ritual() {
     if game_send ".playerbots bot add $b"; then okmsg "queued: bot add $b"; sleep 1; fi
   done
   warn "bots come up IDLE - strategies stay a manual spree (purity rule)"
+  if [ "${BOTCMD_RITUAL_AUTOCLEAR:-1}" = "1" ]; then
+    _ritual_settle_clear "${BOTCMD_LEO:-Leo}"
+  else
+    warn "BOTCMD_RITUAL_AUTOCLEAR=0 - skipping the post-ritual group clear (bots will sit in ${BOTCMD_LEO:-Leo}'s raid)"
+  fi
 }
 
 roster_add() {  # $1 = toon name

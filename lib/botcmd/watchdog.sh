@@ -27,7 +27,7 @@ watchdog_conf_edit() {
   hdr "Edit watchdog conf"
   if [ ! -r "$BOTCMD_WATCHDOG_CONF" ]; then
     warn "no conf yet - this starts a new one at $BOTCMD_WATCHDOG_CONF"
-    warn "supported keys: ON_H, OFF_H, GROUP (space-separated), AUTORITUAL, RITUAL_ACCOUNTS, RITUAL_BOTS"
+    warn "supported keys: ON_H, OFF_H, GROUP (space-separated), AUTORITUAL, AUTORITUAL_CLEAR, RITUAL_ACCOUNTS, RITUAL_BOTS"
   fi
   "${EDITOR:-nano}" "$BOTCMD_WATCHDOG_CONF"
   okmsg "saved (the watchdog re-reads the conf on every run - no restart needed)"
