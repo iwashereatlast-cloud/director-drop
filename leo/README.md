@@ -290,7 +290,9 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   10 per page - keys `1-9` or `10+` pick a slot on the page, `0`/`n` next page, `p` prev, blank = back, or type a toon name (G1 names get a specific refusal).
   The state menu shows `[x]` on the bot's current conf state; picking a preset
   writes `Name: preset` into ~/.botcmd-states.conf (apply with `botcmd states apply`).
-- `botcmd states apply` does NOT gate on `characters.online`: every conf bot gets
+- `botcmd states apply` does NOT gate on `characters.online` and is read-modify-write
+  since PR #34 (probe `nc ?`/`co ?` first, whisper only the diff, full push on no
+  reply): every conf bot gets
   its `/w` lines, because a whisper to a toon not in the world is a harmless no-op
   and the DB flag is not ground truth anyway (worldserver boot resets ALL flags to
   0 - Main.cpp:520 - and real logins rewrite them async - CharacterHandler.cpp:921).
@@ -309,9 +311,11 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   (NewRpgAction.cpp:250-256) - that is the REST/GO_GRIND/WANDER flip-flopping.
 - Presets toggle the nc-engine strategies (`nc +new rpg,+quest,-grind,...` etc.;
   `quest`/`grind`/`gather` are real nc strategies, `new rpg` drives the rpg state
-  machine and includes questing - see the `nc ?` list). `rpg status do quest`
-  only SETS (by id, or the first log quest with a POI) and refuses with
-  `No quest available` when the log has none (NewRpgAction.cpp:183-215) -
+  machine and includes questing - see the `nc ?` list). Presets are nc-only since
+  PR #34 - `rpg status do quest` is NOT sent anymore (it only SETS when a quest
+  with a POI is already in the log - by id, or the first log quest - and refuses
+  with `No quest available` otherwise, NewRpgAction.cpp:183-215 - a dead
+  round-trip that stalled reply collection) -
   which is why the old status-based verify showed MISMATCH on bots with empty
   quest logs (verify now checks `nc ?` membership instead). See the
   actual quest log per bot, read-only from the DB: `botcmd states quests [bot|all]`
@@ -414,20 +418,29 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   `[quest link]` (objectives status), `talk` (selected NPC), `u [game object]`,
   plus `los` (visible objects/creatures), `stats`, `who`, `spells` - all ALLOW_ALL.
 
-## Tune: read-modify-write apply (`botcmd states tune [bot|all]`, States menu 10)
+## Apply = read-modify-write (`botcmd states apply [bot|all]`, States menu 4/5)
 
-`states apply` blind-pushes the whole conf preset to every bot. `states tune` does
-what you'd do by hand: Leo whispers `/w <bot> nc ?` (and `co ?` when the bot's conf
-uses `co`) first, the tool reads back the ENABLED strategy list
-(`Strategies: ...` via TellMaster -> master Leo; the `nc` engine needs ALLOW_ALL =
-master/GM, Engine.cpp:524/676-695, PlayerbotAI.cpp:1092-1096), diffs it against
-the conf's wants/nots (same `_preset_wants_nots` table `verify` uses), and whispers
-ONLY the needed toggles, e.g. `/w Gau nc +quest,-grind`. Bots already in sync get
-NO nc whisper; bots that don't answer (offline / no bot AI / not master) get the
-full push as a fallback (a whisper to an offline toon is a no-op anyway).
-Non-strategy conf lines (`rpg status do quest`, `go travel ...`) are always sent
-as-is. Runs `states verify` afterwards. `BOTCMD_TUNE_WAIT` (default 5s) =
-per-pass reply wait.
+Since PR #34 the set-state path IS read-modify-write - the old separate
+`states tune` is just an alias of `states apply` and the States menu has no
+separate tune entry anymore. `states apply` does what you'd do by hand: Leo
+whispers `/w <bot> nc ?` (and `co ?` when the bot's conf uses `co`) first, the
+tool reads back the ENABLED strategy list (`Strategies: ...` via TellMaster ->
+master Leo; the `nc` engine needs ALLOW_ALL = master/GM, Engine.cpp:524/676-695,
+PlayerbotAI.cpp:1092-1096), diffs it against the conf's wants/nots (same
+`_preset_wants_nots` table `verify` uses), and whispers ONLY the needed toggles,
+e.g. `/w Gau nc +quest,-grind`. Bots already in sync get NO nc whisper; bots that
+don't answer (offline / no bot AI / not master) get the full push as a fallback
+(a whisper to an offline toon is a no-op anyway - still no characters.online
+gate). Non-strategy conf lines you write explicitly (`go travel ...`, raw
+commands) are always sent as-is. Runs `states verify` afterwards.
+Knobs: `BOTCMD_APPLY_WAIT` (default 5s; old name `BOTCMD_TUNE_WAIT` still honored)
+= per-pass reply wait; `BOTCMD_APPLY_FULL=1` = skip probing, blind full push
+(also the automatic fallback when /tmp/leo.log is unreadable).
+
+Presets are nc-only since PR #34: the `quest` preset no longer sends
+`rpg status do quest` (see above). Questing = the nc strategies (`new rpg` +
+`quest`); to force a specific quest by id use `rpg do quest <id>` (probe or raw
+conf line, NewRpgAction.cpp:227-244).
 
 ## Mail / vendor / bank whisper commands (source-verified @ e88cc40)
 

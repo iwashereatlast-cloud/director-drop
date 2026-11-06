@@ -55,8 +55,8 @@ botcmd - Chazbot control
   botcmd roster link unlink <ACCT>    remove the link (both directions)
   botcmd go <toon> <zone...>          walk one bot to a zone now (go travel; G1 refused)
   botcmd states show                  state layout: conf + online + live
-  botcmd states apply [bot|all]       push conf states: /w nc/co to EVERY conf bot (no online gate - offline toons are a no-op; verify shows who answered)
-  botcmd states tune [bot|all]        read-modify-write apply: probe 'nc ?' (+ 'co ?' if conf uses co) per bot, whisper ONLY the needed nc/co toggles; full push when a bot does not answer; then verify
+  botcmd states apply [bot|all]       SET states (read-modify-write): probe 'nc ?'/'co ?' per conf bot, whisper ONLY the diff; full push on no reply; BOTCMD_APPLY_FULL=1 = blind push; no online gate; verify after
+  botcmd states tune [bot|all]        alias of states apply (probe+diff is the set-state path since PR #34)
   botcmd states edit                  edit ~/.botcmd-states.conf
   botcmd states presets               built-in strategy presets (+ zone recipes)
   botcmd states bots                  pick a bot (paginated) -> set its default state

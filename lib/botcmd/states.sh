@@ -8,22 +8,23 @@ states_presets() {
   cat <<'EOF'
 Built-in presets (conf value = the preset word):
   grind    nc +new rpg,+grind,-quest,-gather,-follow
-  quest    nc +new rpg,+quest,-grind,-gather,-follow ; rpg status do quest (best-effort: needs a quest in the log, else "No quest available")
+  quest    nc +new rpg,+quest,-grind,-gather,-follow     (nc-only since PR #34: 'rpg status do quest' removed - only works with a quest+POI already in the log, else it just asks for an id)
   gather   nc +new rpg,+gather,-grind,-quest,-follow ; rpg status do gather (needs Herbalism/Mining)
   follow   nc +follow                 (follow-duty: cling to master; NOTE "+new +follow" is a silent no-op - strategies split on ',' only)
   idle     nc -new rpg,-grind,-quest,-gather,-follow ; rpg status idle   (stand down)
 See what quests a bot actually has (read-only DB): botcmd states quests [bot|all]
 Raw commands also work - separate multiple with ';;', e.g.:
   Crono: nc +new rpg,+grind,-follow ;; rpg status go grind
-RPG semantics (mod-playerbots @ e88cc40): 'rpg status do quest' needs a quest with
-a POI in the bot's log - else the bot whispers "No quest available" and keeps its
-status (NewRpgAction.cpp:183-215); when the status hits IDLE the new-rpg engine
-re-rolls it randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256). So a
-durable 'quest' state = nc +new rpg + quests in the log; read it back with:
+RPG semantics (mod-playerbots @ e88cc40): presets are nc-only - 'rpg status do
+quest' is NOT sent anymore (it needs a quest with a POI in the bot's log - else
+"No quest available" - NewRpgAction.cpp:183-215 - so it was a dead round-trip);
+when the status hits IDLE the new-rpg engine re-rolls it randomly by
+RpgStatusProbWeight (NewRpgAction.cpp:250-256). A durable 'quest' state = the nc
+strategies (new rpg + quest) + quests in the log; read it back with:
   botcmd states verify                        # verdict = 'nc ?' strategy membership; rpg status = info
-  botcmd states tune [bot|all]                # read-modify-write apply: probe 'nc ?'/'co ?', whisper ONLY the diff (full push on no reply), then verify
+  botcmd states apply [bot|all]               # set-state = read-modify-write: probe 'nc ?'/'co ?', whisper ONLY the diff (full push on no reply), then verify
   botcmd states probe all "nc ?"              # raw list (goes to master Leo)
-  botcmd states probe all "rpg status do quest"   # shows per-bot error whispers
+  botcmd states probe all "rpg status do quest"   # MANUAL only - shows per-bot error whispers (not sent by presets anymore)
   botcmd states probe Locke "quests all"      # live quest log via whisper (TellMaster = master only, ListQuestsActions.cpp:11-40)
   botcmd states probe Locke "rpg do quest 153"    # set DO_QUEST by id/link WITHOUT needing it in the log (StartRpgDoQuestAction, NewRpgAction.cpp:227-244) - still ALLOW_ALL
 Mail/vendor/bank (probe passes item links; all ALLOW_ALL except sendmail which is
@@ -43,18 +44,22 @@ EOF
 }
 
 # expand a conf value into one whisper command per line
-# Presets toggle the nc-engine strategies (the nc ? list: 'new rpg' drives the
-# rpg state machine and includes questing, 'grind'/'quest'/'gather' are the
-# behavior strategies - StrategyContext.h, QuestStrategies.h, GrindingStrategy.h).
-# 'rpg status do X' is kept as a best-effort nudge: it only lands when the bot has
-# a quest with a POI in its log (else the bot whispers "No quest available" and
-# keeps its status - NewRpgAction.cpp:183-215); on IDLE the new-rpg engine
-# re-rolls the status randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256).
-# 'rpg status do gather' needs Herbalism or Mining (same file).
+# Presets are nc-ONLY (since PR #34): they toggle the nc-engine strategies (the
+# nc ? list: 'new rpg' drives the rpg state machine and includes questing,
+# 'grind'/'quest'/'gather' are the behavior strategies - StrategyContext.h,
+# QuestStrategies.h, GrindingStrategy.h). 'rpg status do quest' was REMOVED from
+# the quest preset: it only lands when the bot already has a quest with a POI in
+# its log, otherwise the bot just whispers back "No quest available; use 'do quest
+# <id>'" - a dead round-trip per bot that stalls apply/verify reply collection
+# (NewRpgAction.cpp:183-215). It still works as a raw conf line or a manual probe;
+# 'rpg do quest <id>' sets a quest by id without needing it in the log
+# (NewRpgAction.cpp:227-244). 'rpg status do gather' needs Herbalism or Mining.
+# On IDLE the new-rpg engine re-rolls the status randomly by RpgStatusProbWeight
+# (NewRpgAction.cpp:250-256).
 state_expand() {  # $1 = conf value
   case "$1" in
     grind)  printf '%s\n' 'nc +new rpg,+grind,-quest,-gather,-follow' ;;
-    quest)  printf '%s\n' 'nc +new rpg,+quest,-grind,-gather,-follow' 'rpg status do quest' ;;
+    quest)  printf '%s\n' 'nc +new rpg,+quest,-grind,-gather,-follow' ;;
     gather) printf '%s\n' 'nc +new rpg,+gather,-grind,-quest,-follow' 'rpg status do gather' ;;
     follow) printf '%s\n' 'nc +follow' ;;
     idle)   printf '%s\n' 'nc -new rpg,-grind,-quest,-gather,-follow' 'rpg status idle' ;;
@@ -182,15 +187,15 @@ states_show() {
   warn "read back live strategies ('nc ?') + rpg status with: botcmd states verify"
 }
 
-states_apply() {  # $1 = bot name or "all" (default). NO online gate: every conf bot gets
-                    # its /w lines - a whisper to a toon that is not in the world is a
-                    # harmless no-op ("No player named ..."), and characters.online is
-                    # NOT ground truth (worldserver boot resets all flags to 0 -
-                    # Main.cpp:520 - and login rewrites them async - CharacterHandler.cpp:921).
-                    # The DB flag is printed inline as info only; states_verify read-back
-                    # is the source of truth for who actually received the orders.
+# Blind full push - fallback when the shell log is unreadable or BOTCMD_APPLY_FULL=1.
+# NO online gate: every conf bot gets its /w lines - a whisper to a toon that is not
+# in the world is a harmless no-op ("No player named ..."), and characters.online is
+# NOT ground truth (worldserver boot resets all flags to 0 - Main.cpp:520 - and
+# logins rewrite them async - CharacterHandler.cpp:921). The DB flag is printed
+# inline as info only; states_verify read-back is the source of truth.
+_states_apply_blind() {  # $1 = bot|all
   local target="${1:-all}"
-  hdr "Apply states -> $target (whispers every conf bot; db online flag shown as info only)"
+  hdr "Apply states -> $target (BLIND full push - no probe)"
   if ! _states_conf_entries > /tmp/.botcmd-apply.$$ 2>/dev/null; then
     warn "no conf: $BOTCMD_STATES_CONF (botcmd states edit)"
     return 1
@@ -214,37 +219,40 @@ states_apply() {  # $1 = bot name or "all" (default). NO online gate: every conf
   done < /tmp/.botcmd-apply.$$
   rm -f /tmp/.botcmd-apply.$$
   echo
-  okmsg "states pushed to $applied bot(s)${refused:+, $refused refused (G1)} - whispers to offline toons are no-ops; read back with: botcmd states verify"
-  if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
-    echo
-    states_verify all
-  fi
+  okmsg "states pushed to $applied bot(s)${refused:+, $refused refused (G1)} - read back with: botcmd states verify"
+  return 0
 }
 
-# Read-modify-write apply: probe each conf bot with 'nc ?' (plus 'co ?' when its
-# conf uses co), diff the ENABLED strategy list against the conf's wants/nots,
-# and whisper ONLY the needed toggles ("nc +a,-b"). Bots that do not answer
-# (offline / no bot AI / not master) get the FULL push as a fallback - a whisper
-# to a toon that is not in the world is a harmless no-op anyway. Non-strategy
-# conf lines (rpg status do quest, go travel, ...) are always sent as-is.
-# Engine semantics: ChangeStrategy splits on ',' only, '?' -> TellMaster(
-# ListStrategies()) = ENABLED strategies (Engine.cpp:524,676-695); 'nc' needs
-# ALLOW_ALL (master/GM) at execution (PlayerbotAI.cpp:1092-1096) - with gmlevel
-# on I_WAS_CMD that holds. Replies are tagged "[Name] [whisper]: Strategies: .."
-# so the nc and co passes are unambiguous.
-states_tune() {  # $1 = bot|all (default all conf bots)
+states_apply() {  # $1 = bot|all (default all) - THE set-state path: read-modify-write.
+  # Probe 'nc ?' (+'co ?' when the conf uses co) per conf bot, diff the ENABLED
+  # strategy list against the conf wants/nots, whisper ONLY the delta ("nc +a,-b").
+  # Bots that do not answer (offline / no bot AI / not master) get the FULL push as
+  # fallback - still no online gate. Non-strategy conf lines (go travel, raw cmds,
+  # explicitly written 'rpg status ...') are always sent as-is. Blind push instead
+  # when the shell log is unreadable or BOTCMD_APPLY_FULL=1. Verifies after when
+  # target=all. (Blind full push until PR #34; the separate 'states tune' is now an
+  # alias of this - the probe+diff IS how states are set.)
   local target="${1:-all}" log="$BOTCMD_SHELL_LOG"
-  hdr "Tune states -> $target (probe 'nc ?'/'co ?' first, whisper only the diff)"
-  if [ ! -r "$log" ]; then errmsg "no $log - is the Leo shell up? (botcmd leo status)"; return 1; fi
-  if ! _states_conf_entries > /tmp/.botcmd-tune.$$ 2>/dev/null; then
+  if [ ! -r "$log" ] || [ "${BOTCMD_APPLY_FULL:-0}" = "1" ]; then
+    [ -r "$log" ] || warn "no $log - cannot probe replies; blind full push (leo shell up? botcmd leo status)"
+    [ "${BOTCMD_APPLY_FULL:-0}" = "1" ] && warn "BOTCMD_APPLY_FULL=1 - blind full push requested"
+    _states_apply_blind "$target" || return 1
+    if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
+      echo
+      states_verify all
+    fi
+    return 0
+  fi
+  hdr "Apply states -> $target (probe 'nc ?'/'co ?' first, whisper only the diff)"
+  if ! _states_conf_entries > /tmp/.botcmd-apply.$$ 2>/dev/null; then
     warn "no conf: $BOTCMD_STATES_CONF (botcmd states edit)"; return 1
   fi
   local -a targets=()
   local n v
   if [ "$target" = "all" ]; then
-    while IFS=$'\t' read -r n v; do targets+=("$n"); done < /tmp/.botcmd-tune.$$
+    while IFS=$'\t' read -r n v; do targets+=("$n"); done < /tmp/.botcmd-apply.$$
   else
-    case "$target" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; rm -f /tmp/.botcmd-tune.$$; return 1 ;; esac
+    case "$target" in *[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; rm -f /tmp/.botcmd-apply.$$; return 1 ;; esac
     targets+=("$target")
   fi
   local refused=0
@@ -253,7 +261,7 @@ states_tune() {  # $1 = bot|all (default all conf bots)
     if is_handplay "$n"; then errmsg "REFUSED: $n is hand-play (G1) - never commanded"; refused=$((refused+1)); continue; fi
     live+=("$n")
   done
-  rm -f /tmp/.botcmd-tune.$$
+  rm -f /tmp/.botcmd-apply.$$
   [ "${#live[@]}" -eq 0 ] && { warn "no tunable bots in conf"; return 1; }
 
   declare -A want_co=() strat_nc=() strat_co=()
@@ -266,9 +274,9 @@ states_tune() {  # $1 = bot|all (default all conf bots)
 
   # pass 1: 'nc ?' to every live bot; pass 2: 'co ?' only to bots with a co line
   local start; start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
-  local max="${BOTCMD_TUNE_WAIT:-5}" waited line who txt
-  tune_scan() { tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: Strategies: .*' || true; }
-  tune_probe() {  # $1 = "nc ?"|"co ?", rest = bot names
+  local max="${BOTCMD_APPLY_WAIT:-${BOTCMD_TUNE_WAIT:-5}}" waited line who txt
+  apply_scan() { tail -c +"$((start + 1))" "$log" 2>/dev/null | grep -a -o '\[\([A-Za-z][A-Za-z]*\)\] \[whisper\]: Strategies: .*' || true; }
+  apply_probe() {  # $1 = "nc ?"|"co ?", rest = bot names
     local cmd="$1"; shift
     local -a ns=("$@") all_done
     for n in "${ns[@]}"; do game_send "/w $n $cmd" || true; sleep 1; done
@@ -282,7 +290,7 @@ states_tune() {  # $1 = bot|all (default all conf bots)
           "nc ?") strat_nc[$who]="$txt" ;;
           "co ?") strat_co[$who]="$txt" ;;
         esac
-      done <<< "$(tune_scan)"
+      done <<< "$(apply_scan)"
       all_done=1
       for n in "${ns[@]}"; do
         if [ "$cmd" = "nc ?" ]; then [ -n "${strat_nc[$n]:-}" ] || all_done=0
@@ -293,10 +301,10 @@ states_tune() {  # $1 = bot|all (default all conf bots)
     done
     start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}   # next pass scans only new lines
   }
-  tune_probe "nc ?" "${live[@]}"
+  apply_probe "nc ?" "${live[@]}"
   local -a co_names=()
   for n in "${live[@]}"; do [ -n "${want_co[$n]:-}" ] && co_names+=("$n"); done
-  [ "${#co_names[@]}" -gt 0 ] && tune_probe "co ?" "${co_names[@]}"
+  [ "${#co_names[@]}" -gt 0 ] && apply_probe "co ?" "${co_names[@]}"
 
   local applied=0 synced=0 pushed=0 online cmd delta parse_out parse_rc w_nc nn_nc w_co nn_co
   local -a lines=() nc_lines=() co_lines=() other=()
@@ -340,19 +348,23 @@ states_tune() {  # $1 = bot|all (default all conf bots)
         sleep 1
       fi
     fi
-    # non-strategy lines always go through (rpg status do quest, go travel, ...)
+    # non-strategy lines always go through (go travel, raw cmds, explicit 'rpg status ...')
     for cmd in "${other[@]}"; do
       game_send "/w $n $cmd" && okmsg "queued: /w $n $cmd   ($online)"; sleep 1
     done
   done
   echo
-  okmsg "tune done: $applied bot(s) got a diff whisper, $synced already in sync (no nc whisper), $pushed full-pushed (no reply)${refused:+, $refused refused (G1)}"
+  okmsg "apply done: $applied bot(s) got a diff whisper, $synced already in sync (no nc whisper), $pushed full-pushed (no reply)${refused:+, $refused refused (G1)}"
   warn "read back with: botcmd states verify"
   if [ "$target" = "all" ] && [ "${BOTCMD_NO_VERIFY:-0}" != "1" ]; then
     echo
     states_verify all
   fi
 }
+
+
+# alias - probe+diff IS the set-state path now (PR #34); kept so 'botcmd states tune' works
+states_tune() { states_apply "$@"; }
 
 states_edit() {
   hdr "Edit states conf ($BOTCMD_STATES_CONF)"
@@ -914,14 +926,13 @@ states_menu() {
  1. States table (conf + online)
  2. Pick a bot -> set its default state   (paginated, [x] = current)
  3. Set ALL bots to ONE state   ([x] picker; conf + apply + verify)
- 4. Apply ALL states from conf (whispers every conf bot, then verify)
- 5. Apply ONE bot's state
+ 4. Apply ALL states from conf (probe 'nc ?'/'co ?' first, whisper only the diff, then verify)
+ 5. Apply ONE bot's state (same probe+diff)
  6. Edit states conf
  7. Show presets + level->zone table
  8. Verify live states now ('nc ?' strategy read-back + rpg status; CLI 'verify all force' also probes DB-offline bots)
  9. Probe any command (default 'nc ?' - lists strategies; replies go to master Leo)
-10. Tune: probe 'nc ?'/'co ?' first, whisper only the diff (then verify)
-11. Return to main menu   (blank Enter = back)
+10. Return to main menu   (blank Enter = back)
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
@@ -935,8 +946,7 @@ EOF
       7) states_presets; echo; states_zones; pause ;;
       8) states_verify all; pause ;;
       9) states_probe all; pause ;;
-      10) states_tune all; pause ;;
-      11) return 0 ;;
+      10) return 0 ;;
       *) warn "invalid choice" ;;
     esac
   done
