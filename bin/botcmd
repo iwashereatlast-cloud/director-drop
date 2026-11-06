@@ -55,7 +55,7 @@ botcmd - Chazbot control
   botcmd states bots                  pick a bot (paginated) -> set its default state
   botcmd states zones [level]         vanilla level->zone table (for go travel)
   botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|follow|idle)
-  botcmd states verify [bot|all]      Leo whispers 'rpg status' to online bots; tabulates conf vs live reply
+  botcmd states verify [bot|all]      Leo whispers 'rpg status' to online bots; tabulates conf vs live reply + live group/leader (shows why a bot may be silent: Leo not master / not in its group)
   botcmd watchdog status|journal|conf presence-policy watchdog
   botcmd watchdog procs               duplicate-process audit (daemons, leo shell, menu lock)
   botcmd system worldserver           ac-worldserver check

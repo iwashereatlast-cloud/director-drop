@@ -234,6 +234,22 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   Any `[name] [whisper]:` reply line is captured (not just `Status:` lines);
   `BOTCMD_VERIFY_DEBUG=1` additionally dumps the raw new log lines, and
   `BOTCMD_VERIFY_WAIT=<seconds>` changes the default 20s collect window.
+  The table also shows each bot's live GROUP/LEADER (read-only DB
+  `groups`/`group_member`, backticked - RESERVED word in MySQL 8) plus Leo's
+  own group, because silence is usually a security-level issue, not missing
+  AI: `LevelFor` (PlayerbotSecurity.cpp) gives Leo ALLOW_ALL only as the
+  bot's master, INVITE if the bot is groupless or leads its group, else
+  TALK; bot senders get no deny whisper (PlayerbotSecurity.cpp:190) and
+  under-level queued commands are erased silently (PlayerbotAI.cpp:642-647).
+  Verdict tags: `[no-ai]` = no bot AI attached (groupless bot should answer -
+  run `botcmd roster ritual`); `[group]` = bot sits in a group Leo is not in
+  / is not leader of; `[master]` = same group as Leo but master != Leo, or
+  the `rpg status` probe answered but the ALLOW_ALL set was dropped.
+  Fix for [group]/[master]: grant gmlevel on `I_WAS_CMD` (CanBeGameMaster ->
+  ALLOW_ALL from every bot, PlayerbotSecurity.cpp:31, needs RBAC_PERM_COMMAND_GM)
+  and/or `botcmd roster fix` after Leo re-masters them. Master churn:
+  Leo's logout nulls his bots' master (RandomPlayerbotMgr.cpp:2677) and a
+  human logging into their group takes master (RandomPlayerbotMgr.cpp:2748).
 - Leo can broadcast too: /w Leo "send everyone to Barrens to grind" -> the
   order {"bot":"ALL","cmd":"go travel Barrens"} is expanded by the daemon to
   one validated order per unit (never hand-play, never Leo). The daemon now

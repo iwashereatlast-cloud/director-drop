@@ -306,6 +306,36 @@ states_pick_preset() {
   done
 }
 
+# Live group/leader map from the characters DB (read-only). `groups` is a
+# RESERVED word in MySQL 8 - always backtick-quote it. Same schema as
+# director.py GROUP_SQL (Group.cpp persists create/member-add/leader/type).
+# prints: name<TAB>groupGuid<TAB>leaderName<TAB>groupType   (empty guid = groupless)
+# args are toon names, charset-validated ([A-Za-z0-9]) before they reach SQL.
+_states_group_map() {
+  local -a names=() q="" n
+  for n in "$@"; do
+    case "$n" in
+      ""|*[!A-Za-z0-9]*) errmsg "bad toon name '$n' - skipped in group lookup"; continue ;;
+    esac
+    names+=("$n")
+  done
+  [ "${#names[@]}" -eq 0 ] && return 0
+  for n in "${names[@]}"; do q+="'$n',"; done
+  q=${q%,}
+  db_ro -N -B -e "SELECT c.name, COALESCE(g.guid,''), COALESCE(lc.name,''), COALESCE(g.groupType,'') FROM acore_characters.characters c LEFT JOIN acore_characters.group_member gm ON gm.memberGuid=c.guid LEFT JOIN acore_characters.\`groups\` g ON g.guid=gm.guid LEFT JOIN acore_characters.characters lc ON lc.guid=g.leaderGuid WHERE c.name IN ($q)" 2>/dev/null
+}
+
+# groupType -> party/raid/bg ('-' when groupless). bit 0x01 = battleground,
+# bit 0x02 = raid (Group.h enum GroupType) - same decode as director.py.
+_grp_kind() {
+  case "${1:-}" in
+    "") echo "-" ;;
+    *)  if [ $(( ${1:-0} & 0x02 )) -ne 0 ]; then echo "raid"
+        elif [ $(( ${1:-0} & 0x01 )) -ne 0 ]; then echo "bg"
+        else echo "party"; fi ;;
+  esac
+}
+
 # Read-back verification: Leo whispers 'rpg status' to each online target bot
 # (via the FIFO, exactly like an order), then we collect the "[Name] [whisper]:
 # Status: X" replies from the shell log and tabulate conf vs live status.
@@ -336,6 +366,29 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
   if [ "${#targets[@]}" -eq 0 ]; then
     warn "no online watched bots to verify right now"
     return 1
+  fi
+  # Live group/leader context - WHY a bot may stay silent when Leo whispers:
+  # LevelFor (PlayerbotSecurity.cpp) gives Leo ALLOW_ALL only as the bot's
+  # master, INVITE if the bot is groupless or leads its group, else TALK;
+  # deny text is suppressed for bot senders (:190) and queued commands below
+  # their required level are erased silently (PlayerbotAI.cpp:642-647).
+  declare -A g_guid=() g_leader=() g_type=()
+  local gm_line n2 gg gl gt
+  while IFS=$'\t' read -r n2 gg gl gt; do
+    [ -n "$n2" ] && { g_guid[$n2]=$gg; g_leader[$n2]=$gl; g_type[$n2]=$gt; }
+  done < <(_states_group_map Leo "${targets[@]}")
+  local leo_grp="${g_guid[Leo]:-}" inleo=""
+  if [ "${#g_guid[@]}" -eq 0 ]; then
+    warn "group info unavailable (DB read failed?) - GRP column and hints degrade to '-'"
+  else
+    for n in "${targets[@]}"; do
+      [ -n "$leo_grp" ] && [ "${g_guid[$n]:-}" = "$leo_grp" ] && inleo+="$n "
+    done
+    if [ -n "$leo_grp" ]; then
+      okmsg "Leo is in $(_grp_kind "${g_type[Leo]:-}") led by ${g_leader[Leo]:-?} (guid $leo_grp)${inleo:+ - also in it: $inleo}"
+    else
+      warn "Leo is not in any group right now"
+    fi
   fi
   start=$(wc -c < "$log" 2>/dev/null); start=${start:-0}
   declare -A reply=()
@@ -370,13 +423,24 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
     sleep 1; waited=$((waited + 1))
   done
   echo
-  printf '%-12s %-8s %-40s %s\n' "BOT" "CONF" "LIVE(reply)" "VERDICT"
-  local conf txt st verdict exp
+  printf '%-12s %-8s %-14s %-40s %s\n' "BOT" "CONF" "GRP" "LIVE(reply)" "VERDICT"
+  local conf txt st verdict exp grp
   for n in "${targets[@]}"; do
     conf=$(_states_conf_get "$n"); [ -n "$conf" ] || conf="-"
     txt=${reply[$n]:-}
+    grp="-"
+    if [ -n "${g_guid[$n]:-}" ]; then
+      grp="$(_grp_kind "${g_type[$n]:-}"):${g_leader[$n]:-?}"
+    fi
     if [ -z "$txt" ]; then
-      st="-"; verdict="NO REPLY (bot AI off / not added as a bot? shell down? - try: botcmd roster ritual)"
+      st="-"
+      if [ -z "${g_guid[$n]:-}" ]; then
+        verdict="NO REPLY [no-ai] groupless, so Leo should have INVITE - bot AI off / not added as a bot? shell down? try: botcmd roster ritual"
+      elif [ -n "$leo_grp" ] && [ "${g_guid[$n]}" = "$leo_grp" ]; then
+        verdict="NO REPLY [master] same group as Leo but bot's master != Leo (deny text suppressed for bot senders); grant I_WAS_CMD gmlevel or botcmd roster fix"
+      else
+        verdict="NO REPLY [group] in a group led by ${g_leader[$n]:-?} that Leo is not in (bot not leader -> TALK -> silent); grant I_WAS_CMD gmlevel or botcmd roster fix"
+      fi
     else
       st=$(printf '%s' "$txt" | head -n 1 | cut -c1-40)
       case "$st" in Status:*) st=${st#Status: } ;; esac
@@ -392,11 +456,15 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
       elif printf '%s' "$txt" | head -n 1 | grep -q "Status: $exp"; then
         verdict="OK ($exp)"
       else
-        verdict="MISMATCH (want $exp)"
+        verdict="MISMATCH (want $exp) [master] probe answered (INVITE ok) but the SET needs ALLOW_ALL and was silently erased - Leo not master/GM; grant I_WAS_CMD gmlevel or botcmd roster fix"
       fi
     fi
-    printf '%-12s %-8s %-40s %s\n' "$n" "$conf" "$st" "$verdict"
+    printf '%-12s %-8s %-14s %-40s %s\n' "$n" "$conf" "$grp" "$st" "$verdict"
   done
+  echo
+  warn "tags: [no-ai] no bot AI attached (add/addaccount refuse online toons - PlayerbotMgr.cpp:733; bot remove works online - PlayerbotMgr.cpp:756);"
+  warn "      [group]/[master] Leo's level from that bot is below ALLOW_ALL (PlayerbotSecurity.cpp LevelFor; silent erase PlayerbotAI.cpp:642-647; deny suppressed for bot senders :190)"
+  warn "fix: grant gmlevel on I_WAS_CMD (CanBeGameMaster -> ALLOW_ALL, PlayerbotSecurity.cpp:31) and/or botcmd roster fix to re-master via ritual"
   if [ "${BOTCMD_VERIFY_DEBUG:-0}" = "1" ]; then
     echo
     warn "DEBUG - all new '[name] [whisper]:' lines since the probe started:"
