@@ -456,7 +456,7 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots)
       elif printf '%s' "$txt" | head -n 1 | grep -q "Status: $exp"; then
         verdict="OK ($exp)"
       else
-        verdict="MISMATCH (want $exp) [master] probe answered (INVITE ok) but the SET needs ALLOW_ALL and was silently erased - Leo not master/GM; grant I_WAS_CMD gmlevel or botcmd roster fix"
+        verdict="MISMATCH (want $exp) - push conf with: botcmd states apply; if it STILL mismatches after apply, the SET was silently erased (needs ALLOW_ALL - Leo not master/GM) [master]"
       fi
     fi
     printf '%-12s %-8s %-14s %-40s %s\n' "$n" "$conf" "$grp" "$st" "$verdict"
