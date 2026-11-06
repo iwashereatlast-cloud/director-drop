@@ -7,11 +7,12 @@
 states_presets() {
   cat <<'EOF'
 Built-in presets (conf value = the preset word):
-  grind    nc +new rpg,+grind,-follow
-  quest    nc +new rpg,-follow ; rpg status do quest
-  gather   nc +new rpg,+gather,-follow ; rpg status do gather
+  grind    nc +new rpg,+grind,-quest,-gather,-follow
+  quest    nc +new rpg,+quest,-grind,-gather,-follow ; rpg status do quest (best-effort: needs a quest in the log, else "No quest available")
+  gather   nc +new rpg,+gather,-grind,-quest,-follow ; rpg status do gather (needs Herbalism/Mining)
   follow   nc +follow                 (follow-duty: cling to master; NOTE "+new +follow" is a silent no-op - strategies split on ',' only)
-  idle     nc -new rpg,-grind,-gather ; rpg status idle   (stand down)
+  idle     nc -new rpg,-grind,-quest,-gather,-follow ; rpg status idle   (stand down)
+See what quests a bot actually has (read-only DB): botcmd states quests [bot|all]
 Raw commands also work - separate multiple with ';;', e.g.:
   Crono: nc +new rpg,+grind,-follow ;; rpg status go grind
 RPG semantics (mod-playerbots @ e88cc40): 'rpg status do quest' needs a quest with
@@ -32,13 +33,21 @@ EOF
 }
 
 # expand a conf value into one whisper command per line
+# Presets toggle the nc-engine strategies (the nc ? list: 'new rpg' drives the
+# rpg state machine and includes questing, 'grind'/'quest'/'gather' are the
+# behavior strategies - StrategyContext.h, QuestStrategies.h, GrindingStrategy.h).
+# 'rpg status do X' is kept as a best-effort nudge: it only lands when the bot has
+# a quest with a POI in its log (else the bot whispers "No quest available" and
+# keeps its status - NewRpgAction.cpp:183-215); on IDLE the new-rpg engine
+# re-rolls the status randomly by RpgStatusProbWeight (NewRpgAction.cpp:250-256).
+# 'rpg status do gather' needs Herbalism or Mining (same file).
 state_expand() {  # $1 = conf value
   case "$1" in
-    grind)  printf '%s\n' 'nc +new rpg,+grind,-follow' ;;
-    quest)  printf '%s\n' 'nc +new rpg,-follow' 'rpg status do quest' ;;
-    gather) printf '%s\n' 'nc +new rpg,+gather,-follow' 'rpg status do gather' ;;
+    grind)  printf '%s\n' 'nc +new rpg,+grind,-quest,-gather,-follow' ;;
+    quest)  printf '%s\n' 'nc +new rpg,+quest,-grind,-gather,-follow' 'rpg status do quest' ;;
+    gather) printf '%s\n' 'nc +new rpg,+gather,-grind,-quest,-follow' 'rpg status do gather' ;;
     follow) printf '%s\n' 'nc +follow' ;;
-    idle)   printf '%s\n' 'nc -new rpg,-grind,-gather' 'rpg status idle' ;;
+    idle)   printf '%s\n' 'nc -new rpg,-grind,-quest,-gather,-follow' 'rpg status idle' ;;
     *)      printf '%s\n' "$1" | sed 's/ *;; */\n/g' ;;
   esac
 }
@@ -490,6 +499,47 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
   fi
   echo
   warn "full reply text: botcmd leo chat 60   (daemon.log also logs these replies as dropped bot-sender lines - expected)"
+}
+
+# Read-only quest-log view from the characters DB (character_queststatus:
+# guid, quest, status - QuestDef.h: 1=COMPLETE 3=INCOMPLETE 5=FAILED 6=REWARDED).
+# This is how you SEE which quests a bot has - 'rpg status do quest' only SETS
+# (by id, or the first log quest with a POI) and never lists them.
+states_quests() {  # $1 = bot name or "all" (default all watched bots)
+  local target="${1:-all}" n q s q_list=""
+  hdr "Quest logs (read-only DB: character_queststatus)"
+  local -a names=()
+  if [ "$target" = "all" ]; then
+    while IFS=$'\t' read -r n _ _ _; do names+=("$n"); done < <(_states_all_bots)
+  else
+    case "$target" in
+      ""|*[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$target' rejected"; return 1 ;;
+    esac
+    if is_handplay "$target"; then errmsg "REFUSED: $target is hand-play (G1)"; return 1; fi
+    names+=("$target")
+  fi
+  if [ "${#names[@]}" -eq 0 ]; then warn "no watched bots in census right now"; return 1; fi
+  for n in "${names[@]}"; do q_list+="'$n',"; done
+  q_list=${q_list%,}
+  local rows
+  rows=$(db_ro -N -B -e "SELECT c.name, q.quest, q.status FROM acore_characters.character_queststatus q JOIN acore_characters.characters c ON c.guid=q.guid WHERE c.name IN ($q_list) ORDER BY c.name, q.quest" 2>/dev/null)
+  if [ -z "$rows" ]; then
+    warn "no quest rows for these bots - their quest logs are empty (that is why 'rpg status do quest' answers 'No quest available')"
+    return 0
+  fi
+  printf '%-12s %-8s %-11s\n' "BOT" "QUEST" "STATUS"
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r n q s; do
+    case "$s" in
+      1) s="COMPLETE" ;;
+      3) s="INCOMPLETE" ;;
+      5) s="FAILED" ;;
+      6) s="REWARDED" ;;
+      *) s="?$s" ;;
+    esac
+    printf '%-12s %-8s %-11s\n' "$n" "$q" "$s"
+  done
+  echo
+  warn "'rpg status do quest' picks the first INCOMPLETE/COMPLETE quest with a POI (NewRpgAction.cpp:183-215); bots with no rows above have empty logs"
 }
 
 # Generic whisper probe: Leo sends '/w <bot> <command>' and we print EVERY

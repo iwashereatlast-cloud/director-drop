@@ -221,6 +221,14 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   quest with a POI in the bot's log or it refuses (NewRpgAction.cpp:183-215);
   on IDLE the new-rpg engine re-rolls the status by RpgStatusProbWeight
   (NewRpgAction.cpp:250-256) - that is the REST/GO_GRIND/WANDER flip-flopping.
+- Presets toggle the nc-engine strategies (`nc +new rpg,+quest,-grind,...` etc.;
+  `quest`/`grind`/`gather` are real nc strategies, `new rpg` drives the rpg state
+  machine and includes questing - see the `nc ?` list). `rpg status do quest`
+  only SETS (by id, or the first log quest with a POI) and refuses with
+  `No quest available` when the log has none (NewRpgAction.cpp:183-215) -
+  which is why verify showed MISMATCH on bots with empty quest logs. See the
+  actual quest log per bot, read-only from the DB: `botcmd states quests [bot|all]`
+  (character_queststatus; 1=COMPLETE 3=INCOMPLETE 5=FAILED 6=REWARDED).
 - Zone travel (verified vs mod-playerbots @ e88cc40): `go travel <zone>` matches
   destination titles by name (case-insensitive) and the engine level-filters
   destinations (TravelMgr level ranges vs bot level); rpg grind/quest/gather
