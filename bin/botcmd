@@ -39,6 +39,7 @@ botcmd - Chazbot control
   botcmd director log [N]             last N lines of daemon.log
   botcmd director watch               live tail -f of daemon.log (Ctrl-C to stop)
   botcmd director raid [toon]         group/raid of a toon from the DB (default Leo: leader, members)
+  botcmd raid show [toon] | raid clear [toon]   show Leo's group from DB, or /w 'leave' every non-G1 member (default Leo)
   botcmd director deploy              git pull + compile check + restart
   botcmd director commands            Leo's command list (parsed live)
   botcmd roster census                live who's-online (read-only DB)
@@ -172,6 +173,12 @@ case "${1:-}" in
       raid) director_raid "${3:-}" ;;
       deploy) director_deploy ;;
       commands) director_commands ;;
+      *) usage; exit 1 ;;
+    esac ;;
+  raid)
+    case "${2:-show}" in
+      show) director_raid "${3:-Leo}" ;;
+      clear) director_raid_clear "${3:-Leo}" ;;
       *) usage; exit 1 ;;
     esac ;;
   go)

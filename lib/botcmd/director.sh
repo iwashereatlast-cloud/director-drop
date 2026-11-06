@@ -32,6 +32,39 @@ director_raid() {  # $1 = toon name (default Leo)
   fi
 }
 
+# Clear Leo's raid/party: ask every member (except Leo and G1 hand-play) to
+# leave via '/w <member> leave' - 'leave' is an unsecured bot command
+# (PlayerbotAI.cpp:1008) and GM/master Leo passes the gate anyway. Group
+# membership is read live from the DB (groups/group_member, backticked).
+# NOTE: leaving the group does NOT remove bot AI and does not by itself
+# re-master bots - re-mastering is roster fix (bot remove + addaccount via Leo).
+# As raid leader Leo can also kick a member from his own client: .group remove <name>
+director_raid_clear() {  # $1 = toon name (default Leo)
+  local leo="${1:-Leo}" members m left=0 skipped=0
+  case "$leo" in
+    ""|*[!A-Za-z0-9]*) errmsg "toon names are letters/digits only - '$leo' rejected"; return 1 ;;
+  esac
+  hdr "Clear $leo's raid/party - /w <member> leave each non-G1 member"
+  members=$(db_ro -N -B -e "SELECT c.name FROM acore_characters.characters lc JOIN acore_characters.group_member gm ON gm.memberGuid=lc.guid JOIN acore_characters.group_member gm2 ON gm2.guid=gm.guid JOIN acore_characters.characters c ON c.guid=gm2.memberGuid WHERE lc.name='$leo' ORDER BY c.name" 2>/dev/null)
+  if [ -z "$members" ]; then
+    warn "$leo is not in any group (or DB read failed) - nothing to clear"
+    return 1
+  fi
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    if [ "$m" = "$leo" ]; then skipped=$((skipped + 1)); continue; fi
+    if is_handplay "$m"; then
+      warn "skip $m: hand-play (G1) - never touched"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if game_send "/w $m leave"; then okmsg "queued: /w $m leave"; left=$((left + 1)); sleep 1; fi
+  done <<< "$members"
+  echo
+  okmsg "asked $left member(s) to leave, $skipped skipped (Leo/G1)"
+  warn "bots keep their AI when leaving - verify with: botcmd director raid $leo  (DB lags a moment)"
+}
+
 director_deploy() {
   hdr "Deploy update (git pull + compile check + restart)"
   local before after

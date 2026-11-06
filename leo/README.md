@@ -120,6 +120,11 @@ persisted). NOTE: `groups` is a RESERVED word in MySQL 8 - backtick-quote it
 in any hand-written query (use single quotes around the whole -e argument).
 
 - CLI:      botcmd director raid [toon]        (default Leo)
+  botcmd raid show [toon] / botcmd raid clear [toon] - clear = /w 'leave' every
+  non-G1 member of the group (leave is an unsecured bot command,
+  PlayerbotAI.cpp:1008); Leo and G1 are never touched; leaving keeps bot AI -
+  re-mastering is `botcmd roster fix`. As leader Leo can also `.group remove <name>`
+  from his own client.
             python3 director.py group Leo
 - In-game:  the daemon appends "Leo's group: ..." to the roster message on
   every turn, and the LLM can attach the read-only query
