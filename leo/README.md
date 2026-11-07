@@ -329,6 +329,7 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
     botcmd states zones               # vanilla level->zone table
     conf recipe:  Gau: go travel Westfall ;; nc +new rpg,+grind,-follow
     via Leo:      /w Leo "send Gau to Westfall to grind"  (ORDER_RULES carries the table)
+- The LLM prompt is built in code (`SYSTEM`/`GENERAL`/`ORDER_RULES` in director.py): output contract is ONE fenced ```json object as the last thing (`{"reply": ..., "orders": [{"bot","cmd"}], "queries": [...]}`), plus the command whitelist, task recipes, zone table and purity rails. Each turn = persona + 5 few-shot examples (`FEWSHOT`, #40) + last 10 conversation turns + a FRESH live roster as its own system message + your line. `DIRECTOR_DEBUG=1` dumps the raw model replies to daemon.log; `DIRECTOR_MODEL` picks the Ollama model (default gemma4:12b - use a bigger local model if you have one).
 - Leo's instant ack whisper is now one of 24 random lines per message
   (customize: DIRECTOR_ACK="a;b;c" in ~/.director.env; empty disables).
 - Leo says "I can't do that - <reason>" when a request is outside the

@@ -219,6 +219,29 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "If you cannot do what is asked, say 'I can't do that' plus a one-line reason - never bluff. "
            "Bots grind solo with rpg+grind strategies already set.")
 
+# Few-shot examples: concrete input -> exact expected output shape. Injected into
+# every daemon request (see _with_fewshot) but NEVER stored in convs, so they do
+# not consume the 10-turn history window. Every assistant message is ONLY a
+# fenced JSON object - that is the contract ORDER_RULES describes.
+FEWSHOT = [
+    {"role": "user", "content": "send Golbez to the Barrens to grind"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"go travel Barrens\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "user", "content": "where is Marle right now?"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
+    {"role": "user", "content": "make everyone quest in Westfall"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to Westfall, questing.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"go travel Westfall\"}, {\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+quest,-follow\"}]}\n```"},
+    {"role": "user", "content": "kick Terra out of the raid"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Removing Terra from the group.\", \"orders\": [{\"bot\": \"Terra\", \"cmd\": \"group remove\"}]}\n```"},
+    {"role": "user", "content": "autogear all the bots"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"I can't do that - autogear is forbidden on this server.\", \"orders\": []}\n```"},
+]
+
+
+def _with_fewshot(conv):
+    # persona system first, then the examples, then the real history + roster +
+    # user text. conv never contains FEWSHOT, so history slicing is unaffected.
+    return [conv[0]] + FEWSHOT + conv[1:]
+
 
 def census(online_only=True):
     # Watch list: every toon on the bot accounts PLUS every member of the
@@ -837,7 +860,7 @@ def repl():
     bots = census()
     print("online bots: " + (", ".join("%s(lvl%s)" % (n, b["level"]) for n, b in bots.items()) or "NONE"))
     print("commands: <message to LLM> | census | go | skip | quit")
-    messages = [{"role": "system", "content": SYSTEM}]
+    messages = [{"role": "system", "content": SYSTEM}] + FEWSHOT
     pending = None
     while True:
         try:
@@ -1025,7 +1048,7 @@ def daemon():
                     except Exception as e:
                         roster_msg += "\nLeo's group: lookup failed (%s)" % e
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
-                    reply = llm_retry(conv)
+                    reply = llm_retry(_with_fewshot(conv))
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
                     if DEBUG:
                         print("daemon: raw llm reply: %r" % reply[:800])
@@ -1046,7 +1069,7 @@ def daemon():
                                  "\nGive your final reply now, with orders if any. "
                                  "(Further queries this turn are ignored.)"})
                     try:
-                        reply = llm_retry(conv)
+                        reply = llm_retry(_with_fewshot(conv))
                         if DEBUG:
                             print("daemon: raw llm reply (post-queries): %r" % reply[:800])
                     except Exception as e:
