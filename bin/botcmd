@@ -62,7 +62,7 @@ botcmd - Chazbot control
   botcmd states bots                  pick a bot (paginated) -> set its default state
   botcmd states zones [level]         vanilla level->zone table (for go travel)
   botcmd states setall [preset]       set EVERY alt bot (no arg = [x] picker) + apply online + verify (grind|quest|gather|leveling|follow|idle)
-  botcmd states verify [bot|all] [force] [remaster]  Leo whispers 'nc ?' (+ 'co ?' when the conf uses co) and the state table is built PURELY from those replies; verdict = strategy membership vs conf; force = also probe DB-offline bots; remaster = '.playerbots bot remove'+'bot add' each silent online bot (master := Leo), wait, then recall 'nc ?' and re-tabulate ([remastered] tag)
+  botcmd states verify [bot|all] [force] [remaster]  Leo whispers 'nc ?' (+ 'co ?' when the conf uses co) and the state table is built PURELY from those replies; verdict = strategy membership vs conf; force = also probe DB-offline bots; remaster = per silent online bot: 'bot remove', poll DB until offline (async logout), 'bot add' (master := Leo), poll until online (BOTCMD_REMASTER_WAIT=30s / BOTCMD_REMASTER_OFFLINE_WAIT=15s), then recall 'nc ?' and re-tabulate ([remastered] tag)
   botcmd states probe [bot|all] [force] [cmd...]   raw whisper probe (default 'nc ?' - lists strategies, replies to master Leo); prints ALL reply lines per bot
   botcmd states quests [bot|all]      read-only quest-log view from character_queststatus (what 'rpg status do quest' can pick from)
   botcmd watchdog status|journal|conf presence-policy watchdog

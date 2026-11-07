@@ -591,7 +591,7 @@ states_verify() {  # args: [bot|all] [force] [remaster]
     return 1
   fi
   local -a targets=() co_names=() remade=()
-  declare -A t_on=() want_co=()
+  declare -A t_on=() want_co=() rem_on=()
   if [ "$target" = "all" ]; then
     while IFS=$'\t' read -r n _ online _; do
       if [ "$online" = "1" ] || [ -n "$force" ]; then
@@ -680,14 +680,28 @@ states_verify() {  # args: [bot|all] [force] [remaster]
       remade+=("$n")
     done
     if [ "${#remade[@]}" -gt 0 ]; then
-      okmsg "remaster: ${#remade[@]} silent online bot(s) -> '.playerbots bot remove' + 'bot add' (master := Leo)..."
+      local ow="${BOTCMD_REMASTER_OFFLINE_WAIT:-15}" i on
+      okmsg "remaster: ${#remade[@]} silent online bot(s) -> '.playerbots bot remove', poll DB until offline (async logout: BotLogoutGroupCleanupOperation, PlayerbotMgr.cpp:397-399), then 'bot add' (master := Leo)..."
       for n in "${remade[@]}"; do
-        game_send ".playerbots bot remove $n" && sleep "${BOTCMD_REMASTER_GAP:-2}"
-        game_send ".playerbots bot add $n"
+        game_send ".playerbots bot remove $n"
+        i=0
+        while [ "$i" -lt "$ow" ]; do
+          on=$(_states_online "$n"); [ "$on" = "0" ] && break
+          sleep 1; i=$((i+1))
+        done
+        game_send ".playerbots bot add $n" && okmsg "  $n: remove + add queued (offline after ${i}s)"
         sleep 1
       done
-      okmsg "waiting ${BOTCMD_REMASTER_WAIT:-15}s for bot sessions to come up, then recalling ('nc ?'/'co ?' again)..."
-      sleep "${BOTCMD_REMASTER_WAIT:-15}"
+      okmsg "waiting up to ${BOTCMD_REMASTER_WAIT:-30}s for the bot logins (async via DB query holder, PlayerbotMgr.cpp:162+), then recalling..."
+      i=0; all=0
+      while [ "$i" -lt "${BOTCMD_REMASTER_WAIT:-30}" ]; do
+        all=1
+        for n in "${remade[@]}"; do on=$(_states_online "$n"); rem_on[$n]=$on; [ "$on" = "1" ] || all=0; done
+        [ "$all" = "1" ] && break
+        sleep 1; i=$((i+1))
+      done
+      for n in "${remade[@]}"; do printf '  remastered %-12s online=%s\n' "$n" "${rem_on[$n]:-?}"; done
+      warn "note: re-added bots come up with ResetStrategies (OnBotLoginInternal, PlayerbotMgr.cpp:1705) - run: botcmd states apply"
       off=$(wc -c < "$log" 2>/dev/null); off=${off:-0}
       local off2
       for n in "${remade[@]}"; do
@@ -786,7 +800,11 @@ states_verify() {  # args: [bot|all] [force] [remaster]
         *) verdict="custom conf - replies shown" ;;
       esac
     fi
-    case " ${remade[*]:-} " in *" $n "*) verdict="$verdict [remastered]" ;; esac
+    case " ${remade[*]:-} " in
+      *" $n "*)
+        if [ "${rem_on[$n]:-}" = "1" ]; then verdict="$verdict [remastered]"
+        else verdict="$verdict [remastered:still-offline]"; fi ;;
+    esac
     printf '%-12s %-9s %-44s %-28s %s\n' "$n" "$conf" "$nc_live" "$co_live" "$verdict"
   done
   echo

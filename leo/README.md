@@ -363,8 +363,12 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   first: Leo's shell runs `.playerbots bot remove <bot>` + `.playerbots bot add <bot>`
   (remove works on any online registered bot - PlayerbotMgr.cpp:756-764; the add then
   attaches AI with master := the adder = Leo - OnBotLoginInternal SetMaster,
-  PlayerbotMgr.cpp:1704), waits `BOTCMD_REMASTER_WAIT` (default 15s; gap between remove
-  and add = `BOTCMD_REMASTER_GAP`, default 2s), then a RECALL pass re-sends `nc ?/'co ?`
+  PlayerbotMgr.cpp:1704). The remove is ASYNC (BotLogoutGroupCleanupOperation queued on the
+  world thread, PlayerbotMgr.cpp:397-399), so the tool polls the DB until the toon is actually
+  offline (`BOTCMD_REMASTER_OFFLINE_WAIT`, default 15s) BEFORE the add - otherwise AddPlayerBot
+  silently no-ops (PlayerbotMgr.cpp:96-98) or refuses 'player already logged in' (:734-735) -
+  then polls until the bot login lands (`BOTCMD_REMASTER_WAIT`, default 30s; the login is async
+  via a DB query-holder callback, :162+), then a RECALL pass re-sends `nc ?/'co ?`
   in a fresh byte window; remastered rows are tagged `[remastered]` in the VERDICT.
   Why this exists: a bot with a NULL master is totally silent on `nc ?` (TellMaster:
   `if (!master) return false`, PlayerbotAI.cpp:3173-3177) - Leo logging out nulls his
