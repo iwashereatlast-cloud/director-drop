@@ -184,7 +184,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags). Use them instead of guessing numbers.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE nc/co strategy read-back: the daemon runs 'botcmd states verify <bot>' - it whispers 'nc ?'/'co ?' to the bot and returns the BOT/CONF/NC(live)/CO(live)/VERDICT row). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
 - Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the CLI clears that auto-formed group after rituals). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
@@ -195,6 +195,7 @@ Rules:
   * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
+- Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or the verdict shows MISMATCH / NO REPLY, CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; strategy MISMATCH -> re-push the recipe cmd; NO REPLY (silent bot, master-less) -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
 - Zone travel: cmd "go travel <zone name>" walks a unit to a named zone (matched by name, case-insensitive; the engine level-filters destinations, and rpg grind/quest/gather scans units near the unit's position - send it to the zone FIRST, then the rpg order). Vanilla level brackets: 1-10 Elwynn/Dun Morogh/Teldrassil/Mulgore; 10-20 Westfall/Loch Modan/Darkshore/Barrens; 20-30 Redridge/Wetlands/Duskwood/Ashenvale/Silverpine/Hillsbrad; 30-40 Desolace/Arathi/Alterac/STV/Badlands/Dustwallow/Thousand Needles; 40-50 Tanaris/Feralas/Hinterlands/Swamp of Sorrows/Azshara; 50-60 WPL/EPL/Burning Steppes/Silithus/Winterspring/Un'Goro/Felwood.
 - Broadcast: use "bot": "ALL" to apply one cmd to EVERY watched unit at once (never hand-play toons, never Leo) - e.g. {"bot":"ALL","cmd":"nc +new rpg,+grind,-follow"} or {"bot":"ALL","cmd":"go travel Barrens"}. The system expands it to one order per unit and validates each individually.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
@@ -562,6 +563,15 @@ def run_queries(qs, all_bots):
             continue
         name = str(q.get("query", "")).strip().lower()
         bot = str(q.get("bot", "")).strip()
+        if name == "strategies":
+            match = next((n for n in all_bots if n.lower() == bot.lower()), None)
+            if not match or not re.fullmatch(r"[A-Za-z]+", match):
+                lines.append("query strategies: %r not in census" % bot)
+                continue
+            ok, txt = _probe_strategies(match)
+            lines.append(("%s strategies verdict: %s" % (match, txt)) if ok
+                         else ("%s strategies probe failed: %s" % (match, txt)))
+            continue
         info = DB_QUERIES.get(name)
         if not info:
             lines.append("query %r unknown (have: %s)" % (name, ", ".join(sorted(DB_QUERIES))))
@@ -913,6 +923,45 @@ SKIP_WORDS = ("skip", "no", "cancel", "abort", "discard", "negative", "belay tha
 # - these are bot->master reports, never human orders; dropped on sight.
 BOT_REPORT_RE = re.compile(r"^(selling|buying|using)\s+\|c|^===", re.I)
 
+# Bot whisper lines that are ERRORS/refusals (not chatter/reports) - these get
+# surfaced to the LLM as context (see daemon loop / BOTFB) so Leo can see that an
+# order failed ("Unknown spell", "Only your master...", ...). Chatter and
+# master-reports (BOT_REPORT_RE) are still dropped - answering those made the two
+# layers talk and starved Ollama (seen live 2026-11-05).
+BOT_ERROR_RE = re.compile(
+    r"^(unknown spell|cannot cast|cast failed|only your master|no quest available|"
+    r"not your bot|player (already logged in|is offline)|you are not allowed|"
+    r"no player named|can't |unable to|not in (your|my) group|too far|out of range|"
+    r"not enough mana|no target|invalid|target is)", re.I)
+
+BOTFB = []  # ring of recent bot error whispers, shown in the roster system message
+
+
+def _note_bot_error(sender, text):
+    BOTFB.append("%s: %s" % (sender, text[:200]))
+    del BOTFB[:-10]
+
+
+def _probe_strategies(bot):
+    """Read back a bot's LIVE strategies: runs 'bin/botcmd states verify <bot>'
+    (Leo whispers 'nc ?'/'co ?' and the tool tabulates BOT/CONF/NC(live)/CO(live)/
+    VERDICT from the replies alone). Returns (ok, text-row-or-error)."""
+    if not re.fullmatch(r"[A-Za-z]+", bot):
+        return False, "bad name %r" % bot
+    try:
+        r = subprocess.run(["bash", os.path.join(HERE, "bin", "botcmd"), "states", "verify", bot],
+                           capture_output=True, text=True, timeout=90)
+        row = ""
+        for ln in (r.stdout + r.stderr).splitlines():
+            if ln.lower().startswith(bot.lower() + " "):
+                row = ln
+                break
+        if row:
+            return True, row
+        return False, "no row for %s in verify output (rc=%d)" % (bot, r.returncode)
+    except Exception as e:
+        return False, str(e)
+
 _sender_acct_cache = {}  # name -> (checked_at, account name or None)
 
 
@@ -1003,8 +1052,15 @@ def daemon():
                     # bots whisper their master (Leo) their "Selling/Using X"
                     # reports and RP chatter; answering them makes the two LLM
                     # layers talk to each other and starves Ollama (seen live
-                    # 2026-11-05). Dropped structurally via the account check.
-                    print("daemon: [%s] (%s): dropped - sender account is a bot/shell account" % (sender, channel))
+                    # 2026-11-05). Dropped structurally via the account check -
+                    # EXCEPT error/refusal lines (BOT_ERROR_RE), which are surfaced
+                    # to the LLM as context in the roster message (BOTFB) so Leo
+                    # can see an order failed and correct course.
+                    if BOT_ERROR_RE.match(text):
+                        _note_bot_error(sender, text)
+                        print("daemon: [%s] bot error surfaced to LLM context: %s" % (sender, text[:120]))
+                    else:
+                        print("daemon: [%s] (%s): dropped - sender account is a bot/shell account" % (sender, channel))
                     continue
                 if BOT_REPORT_RE.match(text):
                     print("daemon: [%s] (%s): dropped - bot master-report line" % (sender, channel))
@@ -1047,6 +1103,8 @@ def daemon():
                         roster_msg += "\nLeo's group: " + group_text(LEO)
                     except Exception as e:
                         roster_msg += "\nLeo's group: lookup failed (%s)" % e
+                    if BOTFB:
+                        roster_msg += "\nRecent bot error whispers: " + "; ".join(BOTFB[-5:])
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
                     reply = llm_retry(_with_fewshot(conv))
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
