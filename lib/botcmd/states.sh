@@ -591,7 +591,7 @@ states_verify() {  # args: [bot|all] [force] [remaster]
     return 1
   fi
   local -a targets=() co_names=() remade=()
-  declare -A t_on=() want_co=() rem_on=()
+  declare -A t_on=() want_co=() rem_on=() need_remove=()
   if [ "$target" = "all" ]; then
     while IFS=$'\t' read -r n _ online _; do
       if [ "$online" = "1" ] || [ -n "$force" ]; then
@@ -675,21 +675,28 @@ states_verify() {  # args: [bot|all] [force] [remaster]
   if [ -n "$remaster" ]; then
     for n in "${targets[@]}"; do
       [ -n "${replies[$n]:-}" ] && continue          # answered something -> not silent
-      [ "${t_on[$n]:-}" != "1" ] && continue          # DB-offline -> nothing to remaster
       is_handplay "$n" && continue                    # G1: never commanded, never remastered
-      remade+=("$n")
+      if [ "${t_on[$n]:-}" = "1" ]; then
+        remade+=("$n"); need_remove[$n]=1            # online silent: remove + add (master := Leo)
+      elif [ -n "$force" ]; then
+        remade+=("$n")                               # DB-offline (force only): plain 'bot add' - already offline
+      fi
     done
     if [ "${#remade[@]}" -gt 0 ]; then
       local ow="${BOTCMD_REMASTER_OFFLINE_WAIT:-15}" i on
-      okmsg "remaster: ${#remade[@]} silent online bot(s) -> '.playerbots bot remove', poll DB until offline (async logout: BotLogoutGroupCleanupOperation, PlayerbotMgr.cpp:397-399), then 'bot add' (master := Leo)..."
+      okmsg "remaster: ${#remade[@]} silent bot(s) -> online ones: 'bot remove' + poll DB until offline (async logout: BotLogoutGroupCleanupOperation, PlayerbotMgr.cpp:397-399) + 'bot add'; DB-offline ones (force): plain 'bot add'. master := Leo either way..."
       for n in "${remade[@]}"; do
-        game_send ".playerbots bot remove $n"
-        i=0
-        while [ "$i" -lt "$ow" ]; do
-          on=$(_states_online "$n"); [ "$on" = "0" ] && break
-          sleep 1; i=$((i+1))
-        done
-        game_send ".playerbots bot add $n" && okmsg "  $n: remove + add queued (offline after ${i}s)"
+        if [ "${need_remove[$n]:-}" = "1" ]; then
+          game_send ".playerbots bot remove $n"
+          i=0
+          while [ "$i" -lt "$ow" ]; do
+            on=$(_states_online "$n"); [ "$on" = "0" ] && break
+            sleep 1; i=$((i+1))
+          done
+          game_send ".playerbots bot add $n" && okmsg "  $n: remove + add queued (offline after ${i}s)"
+        else
+          game_send ".playerbots bot add $n" && okmsg "  $n: add queued (was DB-offline - plain add, master := Leo)"
+        fi
         sleep 1
       done
       okmsg "waiting up to ${BOTCMD_REMASTER_WAIT:-30}s for the bot logins (async via DB query holder, PlayerbotMgr.cpp:162+), then recalling..."

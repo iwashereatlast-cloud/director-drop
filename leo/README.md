@@ -359,8 +359,11 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   with: botcmd states apply` / `NO REPLY [no-ai] ...` / custom confs show
   `custom conf - replies shown`; `verify all force` also probes DB-offline
   bots (row marked `db:offline - no reply expected...`).
-  `botcmd states verify all remaster` additionally re-masters every SILENT ONLINE bot
-  first: Leo's shell runs `.playerbots bot remove <bot>` + `.playerbots bot add <bot>`
+  `botcmd states verify all remaster` additionally re-masters every SILENT bot
+  first: ONLINE silent bots get `.playerbots bot remove <bot>` + `.playerbots bot add <bot>`;
+  with `force`, DB-offline silent bots get a plain `.playerbots bot add <bot>` (already
+  offline, so no remove needed - this repairs bots whose add never landed, e.g. after a
+  pre-#38 remaster race). Leo's shell runs them,
   (remove works on any online registered bot - PlayerbotMgr.cpp:756-764; the add then
   attaches AI with master := the adder = Leo - OnBotLoginInternal SetMaster,
   PlayerbotMgr.cpp:1704). The remove is ASYNC (BotLogoutGroupCleanupOperation queued on the
