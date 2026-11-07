@@ -568,16 +568,29 @@ states_pick_preset() {
 # MASTER only (Engine.cpp:695, PlayerbotAI.cpp:3170), so a 'Strategies:' reply
 # also proves Leo is that bot's master. Verdict = strategy MEMBERSHIP vs conf
 # (a preset like 'quest' is a strategy SET, not an rpg status).
-states_verify() {  # $1 = bot name or "all" (default all online watched bots);
-                    # $2 = "force" (or BOTCMD_VERIFY_FORCE=1) also probes bots the DB flags offline
-  local target="${1:-all}" force="${2:-}" log="$BOTCMD_SHELL_LOG" start off n online
+states_verify() {  # args: [bot|all] [force] [remaster]
+                    # force (or BOTCMD_VERIFY_FORCE=1) also probes bots the DB flags offline;
+                    # remaster: every SILENT ONLINE bot gets '.playerbots bot remove' + 'bot add'
+                    # from Leo's shell (remove works on online registered bots - PlayerbotMgr.cpp:756;
+                    # add then attaches AI with master := the adder = Leo - OnBotLoginInternal
+                    # SetMaster, PlayerbotMgr.cpp:1704; a null master is why 'nc ?' is silent -
+                    # TellMaster 'if (!master) return false', PlayerbotAI.cpp:3173), then a recall
+                    # pass re-sends 'nc ?'/'co ?' in a fresh byte window and the table is rebuilt
+  local target="all" force="" remaster="" a log="$BOTCMD_SHELL_LOG" start off n online
+  for a in "$@"; do
+    case "$a" in
+      force) force=force ;;
+      remaster) remaster=1 ;;
+      *) target="$a" ;;
+    esac
+  done
   [ "${BOTCMD_VERIFY_FORCE:-0}" = "1" ] && force=force
-  hdr "Verify live states (Leo whispers 'nc ?' + 'co ?' where the conf uses co; verdict = strategy membership vs conf)"
+  hdr "Verify live states (Leo whispers 'nc ?' + 'co ?' where the conf uses co; verdict = strategy membership vs conf${remaster:+; remaster + recall})"
   if [ ! -r "$log" ]; then
     errmsg "no $log - is the Leo shell up? (botcmd leo status)"
     return 1
   fi
-  local -a targets=() co_names=()
+  local -a targets=() co_names=() remade=()
   declare -A t_on=() want_co=()
   if [ "$target" = "all" ]; then
     while IFS=$'\t' read -r n _ online _; do
@@ -658,6 +671,54 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
     [ "$all" = "1" ] && break
     sleep 1; waited=$((waited + 1))
   done
+  # ---- remaster + recall (optional keyword): silent online bots get remove+add, then re-probe ----
+  if [ -n "$remaster" ]; then
+    for n in "${targets[@]}"; do
+      [ -n "${replies[$n]:-}" ] && continue          # answered something -> not silent
+      [ "${t_on[$n]:-}" != "1" ] && continue          # DB-offline -> nothing to remaster
+      is_handplay "$n" && continue                    # G1: never commanded, never remastered
+      remade+=("$n")
+    done
+    if [ "${#remade[@]}" -gt 0 ]; then
+      okmsg "remaster: ${#remade[@]} silent online bot(s) -> '.playerbots bot remove' + 'bot add' (master := Leo)..."
+      for n in "${remade[@]}"; do
+        game_send ".playerbots bot remove $n" && sleep "${BOTCMD_REMASTER_GAP:-2}"
+        game_send ".playerbots bot add $n"
+        sleep 1
+      done
+      okmsg "waiting ${BOTCMD_REMASTER_WAIT:-15}s for bot sessions to come up, then recalling ('nc ?'/'co ?' again)..."
+      sleep "${BOTCMD_REMASTER_WAIT:-15}"
+      off=$(wc -c < "$log" 2>/dev/null); off=${off:-0}
+      local off2
+      for n in "${remade[@]}"; do
+        game_send "/w $n nc ?" && sent=$((sent + 1))
+        now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+        while IFS= read -r line; do [ -n "$line" ] && record "$line" nc; done <<< "$(scan_range "$off" "$now")"
+        sleep 1
+      done
+      off2=$(wc -c < "$log" 2>/dev/null); off2=${off2:-0}
+      for n in "${remade[@]}"; do
+        [ -n "${want_co[$n]:-}" ] || continue
+        game_send "/w $n co ?" && sent=$((sent + 1))
+        now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+        while IFS= read -r line; do [ -n "$line" ] && record "$line" co; done <<< "$(scan_range "$off2" "$now")"
+        sleep 1
+      done
+      waited=0; all=0
+      while [ "$waited" -lt "$max" ]; do
+        while IFS= read -r line; do [ -n "$line" ] && record "$line" nc; done <<< "$(scan_range "$off" "$off2")"
+        now=$(wc -c < "$log" 2>/dev/null); now=${now:-0}
+        [ "${#remade[@]}" -gt 0 ] && while IFS= read -r line; do [ -n "$line" ] && record "$line" co; done <<< "$(scan_range "$off2" "$now")"
+        all=1
+        for n in "${remade[@]}"; do [ -n "${reply_nc[$n]:-}" ] || all=0; done
+        [ "$all" = "1" ] && break
+        sleep 1; waited=$((waited + 1))
+      done
+      okmsg "recall done for: $(printf '%s ' "${remade[@]}")"
+    else
+      warn "remaster: no silent online bots - nothing to remaster"
+    fi
+  fi
   echo
   printf '%-12s %-9s %-44s %-28s %s\n' "BOT" "CONF" "NC(live)" "CO(live)" "VERDICT"
   local conf txt strat nc_live co_live verdict v members norm missing extra detail
@@ -725,6 +786,7 @@ states_verify() {  # $1 = bot name or "all" (default all online watched bots);
         *) verdict="custom conf - replies shown" ;;
       esac
     fi
+    case " ${remade[*]:-} " in *" $n "*) verdict="$verdict [remastered]" ;; esac
     printf '%-12s %-9s %-44s %-28s %s\n' "$n" "$conf" "$nc_live" "$co_live" "$verdict"
   done
   echo
@@ -895,7 +957,7 @@ states_menu() {
  5. Apply ONE bot's state (same probe+diff)
  6. Edit states conf
  7. Show presets + level->zone table
- 8. Verify live states now ('nc ?'/'co ?' read-back -> state table; 'verify all force' also probes DB-offline bots)
+ 8. Verify live states now ('nc ?'/'co ?' read-back -> state table; CLI: 'verify all force' probes DB-offline bots, 'verify all remaster' re-masters silent bots first)
  9. Probe any command (default 'nc ?' - lists strategies; replies go to master Leo)
 10. Return to main menu   (blank Enter = back)
 EOF

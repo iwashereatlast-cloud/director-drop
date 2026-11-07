@@ -359,6 +359,19 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   with: botcmd states apply` / `NO REPLY [no-ai] ...` / custom confs show
   `custom conf - replies shown`; `verify all force` also probes DB-offline
   bots (row marked `db:offline - no reply expected...`).
+  `botcmd states verify all remaster` additionally re-masters every SILENT ONLINE bot
+  first: Leo's shell runs `.playerbots bot remove <bot>` + `.playerbots bot add <bot>`
+  (remove works on any online registered bot - PlayerbotMgr.cpp:756-764; the add then
+  attaches AI with master := the adder = Leo - OnBotLoginInternal SetMaster,
+  PlayerbotMgr.cpp:1704), waits `BOTCMD_REMASTER_WAIT` (default 15s; gap between remove
+  and add = `BOTCMD_REMASTER_GAP`, default 2s), then a RECALL pass re-sends `nc ?/'co ?`
+  in a fresh byte window; remastered rows are tagged `[remastered]` in the VERDICT.
+  Why this exists: a bot with a NULL master is totally silent on `nc ?` (TellMaster:
+  `if (!master) return false`, PlayerbotAI.cpp:3173-3177) - Leo logging out nulls his
+  bots' master (RandomPlayerbotMgr.cpp:2677) and it is only re-set by re-adding the bot
+  (:1704) or by a real player in the same GROUP logging in (RandomPlayerbotMgr.cpp:2748);
+  since #33 the ritual clears the group, so after a `systemctl --user restart leo` the
+  bots sit master-less until remastered. G1 is never remastered.
   `BOTCMD_VERIFY_DEBUG=1` additionally dumps the raw new `[name] [whisper]:`
   log lines, and `BOTCMD_VERIFY_WAIT=<seconds>` changes the default 20s
   collect window. A silent bot that answered whispers before is a

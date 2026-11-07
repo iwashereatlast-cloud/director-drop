@@ -58,7 +58,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 | `botcmd states setall [preset]` | conf for every bot + apply + verify; presets: grind, quest, gather, **leveling** (= quest+grind+gather, #35), follow, idle | HARNESS |
 | `botcmd states apply [bot\|all]` | **THE set-state path**: since #34 read-modify-write — probe `nc ?`/`co ?`, whisper only the diff, full push on no reply, then verify | LIVE for the push (`queued: /w ...` in serverpc logs); probe+diff shape is #34 |
 | `botcmd states tune [bot\|all]` | was a separate menu-10 option | **REMOVED as a separate path (#34)** — now an alias of `apply` |
-| `botcmd states verify [bot\|all] [force]` | read-back built PURELY from `/w <bot> nc ?` (+ `co ?` when the conf uses co) replies: BOT/CONF/NC(live)/CO(live)/VERDICT table; verdict = strategy membership vs conf; no DB group map, no `rpg status` (#36) | **LIVE** (VERDICT tables in serverpc logs) |
+| `botcmd states verify [bot\|all] [force]` | read-back built PURELY from `/w <bot> nc ?` (+ `co ?` when the conf uses co) replies: BOT/CONF/NC(live)/CO(live)/VERDICT table; verdict = strategy membership vs conf; no DB group map, no `rpg status` (#36); `remaster` keyword: silent online bots get `.playerbots bot remove`+`bot add` (master := Leo, PlayerbotMgr.cpp:1704) then a recall re-probe, rows tagged `[remastered]` (#37) | **LIVE** (VERDICT tables in serverpc logs) |
 | `botcmd states probe [bot\|all] [force] [cmd]` | raw whisper passthrough, prints ALL reply lines | **LIVE** (probe output in serverpc logs) |
 | `botcmd states quests [bot\|all]` | read-only quest log from `character_queststatus` | HARNESS (#30) |
 | `rpg status do quest` inside the set-state presets | used to be appended to the `quest` preset | **REMOVED (#34)** — it only lands when a quest with a POI is already in the log, otherwise the bot just whispers back `No quest available; use 'do quest <id>'` (NewRpgAction.cpp:183-215): a dead round-trip per bot that stalls apply/verify reply collection. Still available as a raw conf line / manual probe; `rpg do quest <id>` forces by id |
@@ -87,6 +87,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 ## Removed / replaced over time (so nobody re-adds them)
 
 - rpg-status-based verify verdict → replaced by `nc ?` strategy membership (#29): `rpg status do quest` needs a quest with a POI in the log, so status-based verify mismatched bots with empty logs
+- whisper-only master repair → not possible: TellMaster needs a master (PlayerbotAI.cpp:3173) and only add/login re-sets it; so #36-verify silence is fixed by `verify ... remaster` (bot remove+add from Leo's shell), not by whispering the bots
 - verify's DB group map + GRP column + `Leo is in ...` banner + `rpg status` whisper → removed (#36): the state table is built from the `nc ?`/`co ?` replies alone; silence diagnosis lives in the `[no-ai]` verdict text + footnotes (PlayerbotMgr.cpp:733/756, PlayerbotSecurity.cpp:31/:190, PlayerbotAI.cpp:642-647)
 - `characters.online` gate on apply → removed (#25): worldserver boot resets all flags (Main.cpp:520); whispers to offline toons are harmless no-ops; verify read-back is the source of truth
 - scrolling menus → fixed by `cls()` redraw (#31); `BOTCMD_NO_REFRESH=1` forces scroll
