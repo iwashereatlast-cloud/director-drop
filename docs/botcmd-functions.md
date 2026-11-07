@@ -95,3 +95,9 @@ What every `botcmd` area does, and how we know it works. Status legend:
 - mod auto-join into Leo's raid on every bot login → no conf key disables it (PlayerbotMgr.cpp:591-619, PlayerbotOperations.h:37-90); undone by post-ritual clears (#33)
 - separate "tune" menu option → folded into `states apply` (#34)
 - `rpg status do quest` in the `quest` preset → removed (#34), see above
+
+## Doctor (`botcmd doctor`) - PR #42
+
+| function | what it does | status |
+|---|---|---|
+| `botcmd doctor [--quick] [--bundle FILE]` | read-only evidence bundle: S1 units/FIFO/leo-shell process/logs (incl. #41 bot-error lines), S2 playerbots.conf keys vs expected, S3 DB accounts/gmlevel + census + online watched + account links + Leo group, S4 states conf layout, S5 `states verify all force` live read-back (NO remaster), S6 PASS/FAIL/INFO summary, exit 1 on FAIL. Never sends a mutating game command | HARNESS (test_shell24); run on serverpc, paste bundle - feeds docs/assumptions.md |

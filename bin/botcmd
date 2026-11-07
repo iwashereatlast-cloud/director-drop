@@ -24,6 +24,7 @@ BC_LIB=$(dirname "$(dirname "$BC_SELF")")/lib/botcmd
 . "$BC_LIB/system.sh"
 . "$BC_LIB/launch.sh"
 . "$BC_LIB/master.sh"
+. "$BC_LIB/doctor.sh"
 
 usage() {
   cat <<'EOF'
@@ -75,6 +76,7 @@ botcmd - Chazbot control
   botcmd master show                  master account table (which account is HUMAN)
   botcmd master set <account|#>       rotate master account (rewrites ~/.director.env + restarts daemon)
 
+  botcmd doctor [--quick] [--bundle FILE]  READ-ONLY evidence bundle: units/FIFO/logs, playerbots.conf keys, DB census+links+group, states conf, live nc?/co? verify (no remaster); exit 1 on any FAIL; never sends a mutating command
 Config overrides: ~/.botcmd.conf (see lib/botcmd/common.sh header).
 EOF
 }
@@ -237,6 +239,7 @@ case "${1:-}" in
       grants) system_grants ;;
       *) usage; exit 1 ;;
     esac ;;
+  doctor) doctor_run "${@:2}" ;;
   master)
     case "${2:-}" in
       show|"") master_show ;;

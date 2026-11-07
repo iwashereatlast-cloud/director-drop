@@ -1,0 +1,44 @@
+# Assumption register — "I assume the bots work this way, here is how we confirm"
+
+**Rule (since the 2026-11-07 reset request):** no code change that alters bot
+behavior ships on an assumption. Every behavioral assumption lives here with
+(a) its source citation, (b) the exact command that confirms or refutes it on
+serverpc, (c) a result column you fill in from live runs. A FAIL row + pasted
+evidence is the *only* ticket for changing behavior. The automated subset of
+these probes is `botcmd doctor` (read-only bundle: `botcmd doctor --bundle
+~/doctor-$(date +%Y%m%d-%H%M%S).log` — paste the bundle back).
+
+Source pins: mod-playerbots @ `405f8119` (the Nov 5 build), AzerothCore @
+`e7e2e288e` (origin/Playerbot). Verify a pin with:
+`cd ~/downloads/mod-playerbots && git rev-parse --short HEAD` (and the AC repo).
+
+Fill the last column as: `PASS 2026-11-07 — <one-line evidence>` or
+`FAIL 2026-11-07 — <evidence> (ticket #NN opened)`.
+
+| # | assumption | source | confirm with (on serverpc) | live result |
+|---|---|---|---|---|
+| A1 | `nc ?` lists the bot's ENABLED strategies and replies ONLY to its master (so a reply also proves mastership) | Engine.cpp:524-538,695; PlayerbotAI.cpp:3170 TellMaster | `botcmd states probe Ayla "nc ?"` while Leo is online — expect a `Strategies:` line in the output | — |
+| A2 | null master ⇒ total silence (no reply at all) | PlayerbotAI.cpp:3173-3177 `if (!master) return false`; RandomBotSayWithoutMaster=0 | `botcmd leo off`; `botcmd states probe all "nc ?"` → all NO REPLY within BOTCMD_VERIFY_WAIT; doctor S2 shows RandomBotSayWithoutMaster=0 | — |
+| A3 | `bot remove` / `bot add` are ASYNC (logout/login queued, not instant) | PlayerbotMgr.cpp:397-399 BotLogoutGroupCleanupOperation; :96-98; :162+; :734-735 | from Leo in-game: `.playerbots bot remove Gau`; immediately `SELECT name,online FROM acore_characters.characters WHERE name='Gau'` (still 1), again after 15s (0); then `.playerbots bot add Gau` → online 0→1 within ~30s. This is what #38 polls (BOTCMD_REMASTER_*_WAIT) | — |
+| A4 | re-add attaches bot AI with master := the adder (Leo) | PlayerbotMgr.cpp:1704 OnBotLoginInternal SetMaster | after A3's `bot add`: `botcmd states probe Gau "nc ?"` → reply (vs NO REPLY before) | — |
+| A5 | `characters.online` is reset to 0 at worldserver boot and set async on login (not ground truth at boot) | AC Main.cpp:520; CharacterHandler.cpp:921 | restart worldserver, immediately `SELECT COUNT(*) FROM acore_characters.characters WHERE online=1` → 0; watch it climb as logins land; compare with leo.log login lines | — |
+| A6 | every fresh bot login AUTO-JOINS Leo's group (raid at ≥5 members), then we clear it with `leave` (keeps AI) | PlayerbotMgr.cpp:591-619 HandlePlayerBotLoginCallback; PlayerbotOperations.h:37-90; SummonWhenGroup=1 | `botcmd roster ritual` → `botcmd raid show` lists members → `botcmd raid clear` → `botcmd raid show` empty, and `botcmd states probe <bot> "nc ?"` still answers (AI kept) | — |
+| A7 | in a group of ≥5, kill XP is ×1.4 then split across members in range (why raids hurt leveling) | Formulas.h:119-150 xp_in_group_rate; KillRewarder.cpp:264-274 | source-only so far; confirm by noting kill XP solo vs in-raid on the same mob | — |
+| A8 | `rpg status do quest` only lands when the bot's log already has a quest with a POI, else it whispers "No quest available; use 'do quest <id>'" | NewRpgAction.cpp:183-215 | `botcmd states probe <questless bot> "rpg status do quest"` → the error whisper is printed (probe prints ALL reply lines) and since #41 also lands in the LLM's "Recent bot error whispers" | — |
+| A9 | `rpg do quest <id>` sets DO_QUEST by id WITHOUT needing it in the log | NewRpgAction.cpp:227-244 StartRpgDoQuestAction | `botcmd states probe Locke "rpg do quest 153"` then `botcmd states probe Locke "rpg status"` → shows DO_QUEST | — |
+| A10 | these bot commands need no master/GM (unsecured): who, wts, sendmail, invite, leave, lfg, pvp stats, rpg status | PlayerbotAI.cpp:1008-1011 unsecuredCommands | `botcmd states probe all "rpg status"` → every online bot replies; `leave` exercised by `botcmd raid clear` (A6) | — |
+| A11 | presets are nc strategy MEMBERSHIP; verify verdict OK iff live `nc ?` set matches the preset's wants/nots | states.sh `_preset_wants_nots`; Engine.cpp:676-694 +/- toggles | `botcmd states verify` → table; a MISMATCH row lists `missing [..] still on [..]` | — |
+| A12 | cross-account `addaccount` is refused unless the account is linked to the shell account (AllowTrustedAccountBots=1) | PlayerbotMgr.cpp:110-116,747,1957-1963; playerbots.conf.dist:167 | `botcmd roster link check I_WAS_HERE5TH` + doctor S3 links table (`acore_playerbots.playerbots_account_links`) | — |
+| A13 | shell account I_WAS_CMD has gmlevel 3; RealmID -1 means ALL realms (not a misconfig) | acore_auth.account | `SELECT username,gmlevel,RealmID FROM acore_auth.account WHERE username LIKE 'i_was%'` | **PASS 2026-11-07** — `i_was_cmd gmlevel=3 RealmID=-1` (user DB print); -1 = all realms, correct |
+| A14 | Leo's headless client logs lines as `[Name] [whisper]: text` — the daemon's LINE_RE parses them | headless shell.py + director.py LINE_RE | `botcmd leo chat 30` — every line matches `\[.+\] \[(whisper\|guild)\]: ` | — |
+| A15 | mail/vendor/bank/repair are whisper commands whose replies go to master Leo | states.sh header; sendmail unsecured (A10) | bot near a mailbox: `botcmd states probe Locke "mail ?"` → mailbox list; `botcmd states probe all "s vendor"` near a vendor | — |
+| A16 | on the Nov 5 build, login runs ApplyInstanceStrategies — stale instance/raid strategies are stripped on login; open world ⇒ none; nc presets untouched | PlayerbotMgr.cpp (ApplyInstanceStrategies, +5 lines in 405f8119 vs e88cc40) | after any `bot add`: doctor S5 / `botcmd states verify` NC(live) column shows no instance/raid strategies in open world | — |
+| A17 | daemon acks instantly; the first LLM call after a restart is slow (cold model load); DIRECTOR_KEEP_ALIVE=-1 keeps it warm | director.py ACKS + llm_retry; ~/.director.env | `botcmd director log 50` timestamps vs the ack whisper in leo.log; set `DIRECTOR_KEEP_ALIVE=-1` + `systemctl --user daemon-reload && restart leo-director` | — |
+| A18 | bot error whispers reach the LLM as context (not dropped) | director.py #41: BOT_ERROR_RE, BOTFB ring, "Recent bot error whispers" in roster msg | trigger a refusal: `botcmd states probe <questless bot> "rpg status do quest"`; then `grep 'bot error surfaced' ~/downloads/director-drop/daemon.log` shows the line; with DIRECTOR_DEBUG=1 the next roster system msg contains it | — |
+
+## How a run feeds this register
+
+1. On serverpc: `cd ~/downloads/director-drop && git fetch origin && git reset --hard origin/main`
+2. `botcmd doctor --bundle ~/doctor-$(date +%Y%m%d-%H%M%S).log` (add `--quick` to skip the live whisper pass)
+3. Paste the bundle (or the FAIL lines + relevant sections) back.
+4. Fill the result column for the rows that run touched; FAIL rows get an issue/PR.
