@@ -90,6 +90,30 @@ Receipts:
 The watchdog only manages leo.service (the shell). leo-director always runs;
 it is harmless when Leo is offline (its tail -F just waits for the log).
 
+## Live bot telemetry (mod-playerbots command server, port 8888)
+
+mod-playerbots ships a READ-ONLY TCP telemetry server
+(`Playerbots.CommandServerPort`, default 8888): send `<verb>,<playerGuid>`,
+get one line back. Verbs: state, position, tpos, movement, target, hp,
+strategy, action, values, travel, budget. It only answers for ONLINE
+playerbots - hand-play toons are not in the bot manager ('invalid guid').
+
+The director uses it with NO module changes (survives every git pull):
+
+- query {"query":"location","bot":"<bot>"} now prefers the command server's
+  LIVE position, then falls back to SOAP .pinfo, then the DB logout position.
+- new query {"query":"status","bot":"<bot>"}: live state/position/hp for an
+  ONLINE playerbot ("combat", "non-combat", "dead" + coordinates + hp%).
+- daemon startup prints whether the command server is reachable.
+
+Config (leo/director.env.example): DIRECTOR_CMDSERVER_HOST (default
+127.0.0.1), DIRECTOR_CMDSERVER_PORT (default 8888; 0 = disable).
+
+SECURITY: the module's server has NO authentication and binds 0.0.0.0.
+Keep it unreachable from outside the box:
+
+    sudo ufw deny 8888            # or allow from 127.0.0.1 only
+
 ## Raid / group awareness (who is in the raid Leo leads)
 
 Leo reads group membership straight from the characters DB (read-only):

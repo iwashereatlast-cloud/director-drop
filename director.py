@@ -80,6 +80,18 @@ SOAPCNF = os.path.expanduser(os.environ.get("DIRECTOR_SOAPCNF", "~/.soap-directo
 # ACSOap.cpp; there is no SOAP user/password key in worldserver.conf). Missing
 # or short file = SOAP off: the location query falls back to the DB logout
 # position (stale, but the LLM is told so).
+CMDSERVER_HOST = os.environ.get("DIRECTOR_CMDSERVER_HOST", "127.0.0.1")
+CMDSERVER_PORT = int(os.environ.get("DIRECTOR_CMDSERVER_PORT", "8888"))
+# ^ mod-playerbots' built-in TCP command server (Playerbots.CommandServerPort,
+# default 8888; 0 in the module config disables it). READ-ONLY telemetry: verbs
+# are state/position/tpos/movement/target/hp/strategy/action/values/travel/
+# budget, addressed as '<verb>,<playerGuid>\n' (RandomPlayerbotMgr::
+# HandleRemoteCommand). It only talks to ONLINE playerbots - hand-play toons
+# are not in the bot manager and answer 'invalid guid'. The director uses it
+# for LIVE bot positions (replaces the SOAP .pinfo hack for bots). WARNING:
+# the module's server has NO authentication and binds 0.0.0.0 - keep this host
+# loopback and firewall port 8888 from the outside. DIRECTOR_CMDSERVER_PORT=0
+# disables the director's use of it (location falls back to SOAP, then DB).
 CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
 # ^ daemon default: validated orders are HELD until the master whispers
 # 'go'/'skip'. DIRECTOR_CONFIRM=0 auto-executes immediately (not recommended:
@@ -171,7 +183,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags). Use them instead of guessing numbers.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (LIVE map/coordinates when the toon is an online playerbot - the module's command server; else SOAP .pinfo when configured; else the toon's last logged-out position, marked as such), status (live bot state/position/health - only ONLINE playerbots answer it), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
@@ -478,6 +490,81 @@ def _fmt_pinfo(raw):
     return "; ".join(keep) if keep else raw[:200]
 
 
+# ---------------------------------------------------------------------------
+# mod-playerbots command server (optional): LIVE read-only telemetry for
+# ONLINE playerbots via the module's built-in TCP port (default 8888).
+# Protocol (PlayerbotCommandServer.cpp): send '<verb>,<playerGuid>\n', read
+# one line back. No auth on the module side - keep it loopback/firewalled.
+# ---------------------------------------------------------------------------
+
+import socket
+
+_guid_cache = {}  # toon name -> (checked_at, guid or None)
+
+
+def _char_guid(name):
+    """characters.guid (the player GUID counter) via the RO DB; cached 5 min."""
+    now = time.time()
+    key = name.lower()
+    hit = _guid_cache.get(key)
+    if hit and now - hit[0] < 300:
+        return hit[1]
+    try:
+        raw = _mysql("SELECT guid FROM acore_characters.characters WHERE name='%s'" % name).strip()
+        guid = int(raw) if raw.isdigit() else None
+    except Exception:
+        guid = None
+    _guid_cache[key] = (now, guid)
+    return guid
+
+
+def cmdserver_command(verb, name, timeout=5):
+    """One '<verb>,<guid>' round-trip on the command server. Returns (ok, text).
+    Never raises; ok=False carries a short reason for the fallback chain."""
+    if not CMDSERVER_PORT:
+        return False, "command server disabled (DIRECTOR_CMDSERVER_PORT=0)"
+    guid = _char_guid(name)
+    if not guid:
+        return False, "no character guid in DB for %s" % name
+    try:
+        with socket.create_connection((CMDSERVER_HOST, CMDSERVER_PORT), timeout=timeout) as s:
+            s.sendall(("%s,%d\n" % (verb, guid)).encode())
+            data = b""
+            while b"\n" not in data:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+    except Exception as e:
+        return False, "%s:%d: %s" % (CMDSERVER_HOST, CMDSERVER_PORT, type(e).__name__)
+    text = data.decode("utf-8", "replace").strip()
+    if not text or "invalid" in text.lower():
+        # 'invalid guid' = toon not an ONLINE playerbot (hand-play, or offline)
+        return False, text or "empty response"
+    return True, text
+
+
+def _fmt_position(raw):
+    """'x y z map orient |Zone Name|' -> 'map 0 at x,y,z in Zone (live)'."""
+    parts = raw.replace("|", " ").split()
+    if len(parts) < 4:
+        return raw
+    x, y, z, mapid = parts[0], parts[1], parts[2], parts[3]
+    zone = raw.split("|")[1].strip() if "|" in raw else "zone %s" % mapid
+    return "map %s at %s,%s,%s in %s" % (mapid, x, y, z, zone)
+
+
+def cmdserver_available():
+    """Cheap reachability probe for daemon startup notes (never raises)."""
+    if not CMDSERVER_PORT:
+        return False
+    try:
+        with socket.create_connection((CMDSERVER_HOST, CMDSERVER_PORT), timeout=2):
+            return True
+    except Exception:
+        return False
+
+
 # name -> (what it returns, sql with {n} = validated toon name and
 #          {g} = guid-by-name subquery, result formatter)
 DB_QUERIES = {
@@ -525,21 +612,43 @@ def run_queries(qs, all_bots):
             continue
         name = str(q.get("query", "")).strip().lower()
         bot = str(q.get("bot", "")).strip()
-        info = DB_QUERIES.get(name)
-        if not info:
-            lines.append("query %r unknown (have: %s)" % (name, ", ".join(sorted(DB_QUERIES))))
-            continue
         match = next((n for n in all_bots if n.lower() == bot.lower()), None)
         if not match or not re.fullmatch(r"[A-Za-z]+", match):
             lines.append("query %s: %r not in census" % (name, bot))
             continue
+        if name == "status":
+            # live telemetry off the mod-playerbots command server (bots only)
+            bits = []
+            for verb in ("state", "position", "hp"):
+                ok, txt = cmdserver_command(verb, match)
+                if ok:
+                    bits.append(txt if verb != "position" else _fmt_position(txt))
+                if bits and not ok:
+                    bits.append("%s: unavailable" % verb)
+            if bits:
+                lines.append("%s status (live): %s" % (match, "; ".join(bits)))
+            else:
+                lines.append("%s status: command server unavailable (only ONLINE playerbots "
+                             "answer it; hand-play toons never do)" % match)
+            continue
+        info = DB_QUERIES.get(name)
+        if not info:
+            lines.append("query %r unknown (have: %s)" % (name, ", ".join(sorted(list(DB_QUERIES) + ["status"]))))
+            continue
         note = ""
         if name == "location":
+            # live chain: bot command server (online playerbots only) -> SOAP
+            # .pinfo (any online toon) -> DB last-logout position (stale)
+            ok, cs_txt = cmdserver_command("position", match)
+            if ok:
+                lines.append("%s location (live, command server): %s" % (match, _fmt_position(cs_txt)))
+                continue
             ok, txt = soap_command(".pinfo " + match)
             if ok:
                 lines.append("%s location (live .pinfo): %s" % (match, _fmt_pinfo(txt)))
                 continue
-            note = "SOAP unavailable (%s); DB last-logout position: " % (txt or "empty .pinfo response")
+            note = "live lookups unavailable (command server: %s; SOAP: %s); " \
+                   "DB last-logout position: " % (cs_txt or "no answer", txt or "unavailable")
         sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
         try:
             lines.append("%s %s: %s%s" % (match, name, note, info[2](_mysql(sql))))
@@ -938,6 +1047,14 @@ def daemon():
     if not _soap_cfg():
         print("daemon: note - SOAP not configured (%s): live .pinfo location queries fall "
               "back to last-logout position. Bot-sender gating is DB-based and unaffected." % SOAPCNF)
+    if CMDSERVER_PORT and cmdserver_available():
+        print("daemon: mod-playerbots command server reachable at %s:%d - live "
+              "position/status queries for ONLINE playerbots enabled."
+              % (CMDSERVER_HOST, CMDSERVER_PORT))
+    elif CMDSERVER_PORT:
+        print("daemon: note - command server not reachable at %s:%d "
+              "(Playerbots.CommandServerPort; is it firewalled?): location queries "
+              "fall back to SOAP, then DB." % (CMDSERVER_HOST, CMDSERVER_PORT))
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)
