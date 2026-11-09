@@ -44,7 +44,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 | `botcmd roster census` | live who's-online | HARNESS |
 | `botcmd roster ritual` | queue addaccount/bot add; since #33 also waits for logins and clears Leo's auto-formed group | **LIVE** (serverpc logs) |
 | `botcmd roster add/remove` | one bot up/down | LIVE via ritual/down flow |
-| `botcmd roster down <toon\|all>` | `bot remove`, SOAP `.kick` if still online | **LIVE** (serverpc logs show the kick flow) |
+| `botcmd roster down <toon\|all>` | `bot remove` first; a still-online non-bot plain session is an accepted gap (force-kick retired with the console end-of-life pass) | **REMOVED** (kick branch) — historical LIVE evidence in serverpc logs; gap accepted per docs/services-roadmap.md |
 | `botcmd roster fix` | down all + ritual + verify | **LIVE** (run on serverpc) |
 | `botcmd roster link ...` | trusted-account linking (I_WAS_HERE5TH) | HARNESS (#30); needed live for Golbez's account |
 | `botcmd go <toon> <zone>` | `/w <toon> go travel <zone>` | HARNESS |
@@ -75,7 +75,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 | function | what it does | status |
 |---|---|---|
 | `botcmd system worldserver` | ac-worldserver check | HARNESS |
-| `botcmd system arm/soap/cmd` | arm SOAP gate, live test, run console cmd | LIVE for arm (SOAP `.kick` used by `roster down`) |
+| `botcmd system arm/soap/cmd` | was: arm the console gate, live test, run console cmd | **REMOVED** (console end-of-life pass, docs/services-roadmap.md) — live reads route through rtt-engine (8888 command server); no console credentials in the stack |
 | `botcmd system grants` | RO identity SHOW GRANTS | HARNESS |
 
 ## Master (`master`)

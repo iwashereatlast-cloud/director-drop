@@ -76,8 +76,9 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
   work live on a running bot via whisper - offline is only needed to CONVERT
   a plain online toon into a bot. `botcmd roster down <toon|all>` automates
   that: `bot remove` first, and only if the toon is STILL online afterwards
-  (plain session, remove answers "not your bot") it falls back to SOAP `.kick`
-  (Console::Yes, needs gmlevel 3 on I_WAS_CMD, same grant as `.group remove`).
+  (plain session, remove answers "not your bot") it stays up - force-kicking
+  a non-bot plain session is an ACCEPTED GAP (the kick path was retired in
+  the console end-of-life pass, docs/services-roadmap.md); log it out by hand.
   `botcmd roster fix` = down all -> ritual -> verify, one command.
 - director.py daemon (Leo's brain) runs as leo-director.service (see below).
 - Bot-sender gate (2026-11-05 fix): senders on bot accounts (i_was_here% except
@@ -85,9 +86,9 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
   read-only DB account check, and bot master-report lines ("Selling |c...",
   "=== ... ===") are dropped on sight. Only DIRECTOR_HANDPLAY toons on the
   master account plus guild members on non-bot accounts are authed. This does
-  not need SOAP: '.playerbots inspect' does not exist in mod-playerbots
-  @ e88cc40 and '.playerbots bot' needs an active session, so neither is
-  usable from the SOAP console.
+  no console credentials: '.playerbots inspect' does not exist in
+  mod-playerbots @ e88cc40 and '.playerbots bot' needs an active session,
+  so neither has ever usable remotely.
 
 ## The director daemon (leo-director.service)
 
@@ -137,8 +138,9 @@ in any hand-written query (use single quotes around the whole -e argument).
   every turn, and the LLM can attach the read-only query
   {"query":"raid","bot":"Leo"} (or any watched toon) to answer
   "who is in the raid / who leads it".
-- Live server-side view over SOAP:  botcmd system cmd '.group list Leo'
-  ('.group list' is Console::Yes, so SOAP can run it).
+- Live server-side view: the daemon's `raid` query answers from the
+  read-only DB; live bot position comes from the mod's command server
+  (8888) via rtt-engine (services/rtt-engine/).
 
 Removing someone from the raid Leo leads:
 
@@ -147,8 +149,8 @@ Removing someone from the raid Leo leads:
   LeaveGroupAction::Leave -> LeaveOrDisbandGroup). No GM level needed.
 - HUMAN member: the same order is sent as the server command
   `.group remove <name>` from Leo's own session (FIFO line). '.group remove'
-  is Console::No in AzerothCore, so SOAP CANNOT run it (SOAP queues console
-  commands). Leo's account (I_WAS_CMD) needs the RBAC perm
+  is Console::No in AzerothCore, so no remote path can run it. Leo's
+  account (I_WAS_CMD) needs the RBAC perm
   rbac_perm_command_group_remove - gmlevel 3 (Administrator) has all perms:
       mysql> SELECT id FROM acore_auth.account WHERE username='I_WAS_CMD';
       mysql> UPDATE acore_auth.account_access SET gmlevel=3 WHERE id=<id> AND RealmID=-1;
@@ -236,8 +238,8 @@ BOTCMD_BOT_TOONS in ~/.botcmd.conf) into ~/.director.env, mirrors them into
 bot-add the group I'm hand-playing" rule follows the rotation automatically.
 
 RULE: only select a HUMAN-ONLY account. Every other i_was_here% account is a
-bot account - the daemon drops its toons as senders (DB account check, no
-SOAP needed) and never auths them.
+bot account - the daemon drops its toons as senders (DB account check,
+no console credentials) and never auths them.
 
 ## Moving a toon to another account (e.g. Golbez -> I_WAS_HERE5TH)
 

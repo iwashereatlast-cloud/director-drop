@@ -1,12 +1,8 @@
-# System checks: worldserver, SOAP gate, RO DB grants, remote console.
-# The SOAP envelope mirrors director.py soap_command exactly.
-
-# run one console command via SOAP; prints "code" line then stripped text.
-# Thin wrapper over _soap_post (common.sh) - the envelope/netrc/curl code lives
-# there once. Fails (rc 1, prints nothing) when the gate is not armed.
-_soap_run() {  # $1 = console command
-  _soap_post "$1"
-}
+# System checks: worldserver, RO DB grants.
+# The old console-credential gate (status/arm/console cmd) was removed in
+# the end-of-life pass (docs/services-roadmap.md): no console credentials
+# in the stack. Live reads route through rtt-engine (service 3), which talks
+# to the mod's command server (8888) - no auth material to arm.
 
 system_worldserver() {
   hdr "worldserver (system unit)"
@@ -15,79 +11,6 @@ system_worldserver() {
   else
     errmsg "ac-worldserver NOT active (or systemctl cannot see it)"
   fi
-}
-
-system_soap_status() {
-  hdr "SOAP gate (bot-sender filter + live .pinfo + remote console)"
-  local out code text
-  if out=$(_soap_run ".server info"); then
-    code=$(printf '%s\n' "$out" | head -n 1)
-    text=$(printf '%s\n' "$out" | tail -n +2 | head -c 300)
-    case "$code" in
-      200)
-        if [ -n "$(printf '%s' "$text" | tr -d ' ')" ]; then
-          okmsg "SOAP works (HTTP 200) - worldserver answered:"
-          echo "$text"
-        else
-          errmsg "HTTP 200 but empty response - odd; paste this to the chat"
-        fi ;;
-      401)
-        errmsg "HTTP 401 Unauthorized: endpoint is UP but the credentials were REJECTED"
-        warn "  AC SOAP auth = real game account: username not found or password mismatch"
-        warn "  re-enter carefully: botcmd system arm" ;;
-      403)
-        errmsg "HTTP 403: account authenticated but gmlevel below Administrator"
-        warn "  needs gmlevel 3 on the account (acore_auth.account_access)" ;;
-      000|"")
-        errmsg "no response (connection failed/timeout) - is worldserver up and listening?" ;;
-      *)
-        errmsg "HTTP $code - unexpected response:"
-        echo "$text" ;;
-    esac
-  else
-    warn "NOT armed: $BOTCMD_SOAP_CONF missing or short"
-    errmsg "the director's bot-sender gate is INERT (fail-open) without it"
-    echo "arm it from the menu (System -> arm SOAP) or: botcmd system arm"
-  fi
-}
-
-# arbitrary worldserver console command via the SOAP gate
-system_cmd() {  # $1 = console command
-  local out code
-  hdr "SOAP console: $1"
-  if out=$(_soap_run "$1"); then
-    code=$(printf '%s\n' "$out" | head -n 1)
-    case "$code" in
-      200) okmsg "HTTP 200:"; printf '%s\n' "$out" | tail -n +2 ;;
-      401) errmsg "401 - credentials rejected (re-arm: botcmd system arm)" ;;
-      403) errmsg "403 - gmlevel below Administrator" ;;
-      *)   errmsg "HTTP $code:"; printf '%s\n' "$out" | tail -n +2 ;;
-    esac
-  else
-    errmsg "SOAP not armed (botcmd system arm)"
-  fi
-}
-
-system_soap_arm() {
-  hdr "Arm SOAP gate (writes $BOTCMD_SOAP_CONF, perms 600)"
-  local url user pass old_umask
-  if [ -s "$BOTCMD_SOAP_CONF" ]; then
-    warn "a config already exists - this OVERWRITES it"
-  fi
-  printf '%s' "SOAP URL [http://127.0.0.1:7878/]: "; IFS= read -r url
-  url="${url:-http://127.0.0.1:7878/}"
-  printf '%s' "game account (gmlevel >= Administrator, e.g. i_was_cmd): "; IFS= read -r user
-  if [ -z "$user" ]; then errmsg "no account given - aborted"; return 1; fi
-  printf '%s' "password (input hidden): "; IFS= read -rs pass; echo
-  if [ -z "$pass" ]; then errmsg "no password given - aborted"; return 1; fi
-  old_umask=$(umask); umask 177
-  printf '%s\n' "$url" "$user" "$pass" > "$BOTCMD_SOAP_CONF" || {
-    umask "$old_umask"; errmsg "write failed"; return 1; }
-  umask "$old_umask"
-  chmod 600 "$BOTCMD_SOAP_CONF"
-  okmsg "written: $BOTCMD_SOAP_CONF"
-  echo
-  system_soap_status
 }
 
 system_grants() {
@@ -99,27 +22,20 @@ system_grants() {
 }
 
 system_menu() {
-  local c cmd
+  local c
   while :; do
     cls
-    hdr "System (worldserver / SOAP / DB / console)"
+    hdr "System (worldserver / DB)"
     cat <<'EOF'
  1. worldserver status
- 2. SOAP gate: status + live test
- 3. Arm SOAP gate
- 4. RO DB grants
- 5. Run a console command via SOAP
- 6. Return to main menu
+ 2. RO DB grants
+ 3. Return to main menu
 EOF
     printf '%s' "choice: "; IFS= read -r c
     case "$c" in
       1) system_worldserver; pause ;;
-      2) system_soap_status; pause ;;
-      3) system_soap_arm; pause ;;
-      4) system_grants; pause ;;
-      5) printf '%s' "console command: "; IFS= read -r cmd
-         [ -n "$cmd" ] && system_cmd "$cmd"; pause ;;
-      6) return 0 ;;
+      2) system_grants; pause ;;
+      3) return 0 ;;
       ""|b|back) return 0 ;;
       *) warn "invalid choice" ;;
     esac

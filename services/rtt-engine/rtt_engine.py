@@ -1,206 +1,191 @@
 #!/usr/bin/env python3
-"""rtt-engine ("8.8.8.8") - real-time / non-polled query-and-command service.
+"""rtt-engine ("8.8.8.8") - real-time / non-polled query service.
 
-Service 3 of 4 (docs/services-roadmap.md). Owns the worldserver's
-tick-time-sensitive surface: live console reads/writes the DB cannot answer.
-Everything DB-answerable is REFUSED here with a route_hint to db-search
-(the routing rule is structural: it lives in the op catalog, not in callers).
+Service 3 of 4 (docs/services-roadmap.md, console end-of-life decision
+2026-11-09). Owns the tick-time-sensitive surface: LIVE reads of ONLINE
+bots via the stock mod-playerbots command server
+(`Playerbots.CommandServerPort`, default 8888, read-only line protocol
+`<verb>,<guid>\\n` per PlayerbotCommandServer.cpp - zero module changes).
+It answers live position/state/HP for ONLINE bots ONLY; offline truth is
+db-search (logout flushes the final position to `characters`).
 
-Interface (STABLE, backend-independent - "rtt-engine/1"):
+Interface (STABLE - "rtt-engine/1"):
   transport : unix socket (default /tmp/rtt-engine.sock), one JSON request
               per line, one JSON response per line, connection per request.
   request   : {"op": "<name>", ...params}
   response  : {"interface": "rtt-engine/1", "ok": bool, "op": str,
-               "backend": "soap"|"cmdbus"|"mock", "queried_at": iso8601,
+               "backend": "pbcmd", "queried_at": iso8601,
                "latency_ms": int, "result": {...}|null,
                "error": {"code": str, "message": str,
                          "route_hint": str|omitted}|null}
 
-Backend seam: every op goes through a Backend with exactly two methods -
-  execute(command, timeout) -> (ok, text)
-  health()                  -> (ok, detail)
-SoapBackend wraps the EXISTING SOAP path (same envelope / ~/.soap-director
-3-line conf as director.py soap_command and lib/botcmd/common.sh _soap_post).
-CmdBusBackend is the future in-core command bus stub - same signature, so the
-backend swaps WITHOUT touching the interface or any caller. MockBackend serves
-scripted fixture replies so the proof harness runs without a worldserver.
+Ops: catalog, ping, pinfo. Refused: DB-answerable names -> db-search;
+`kick` -> chat-tunnel (`.playerbots bot remove` covers registered bots;
+force-kicking a non-bot plain session is an accepted gap).
+
+SECURITY: the module's command server has NO auth and binds 0.0.0.0 - this
+service must talk to 127.0.0.1:8888 ONLY (RTT_PBHOST), and the operator
+must firewall port 8888 from the outside (see README.md).
 
 Stdlib only. Modes:
-  rtt_engine.py serve [--socket P] [--backend soap|cmdbus|mock]
+  rtt_engine.py serve [--socket P]
   rtt_engine.py query '<json>' [--socket P]     one-shot client
 """
 import argparse
-import base64
 import datetime
-import html
 import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
-from xml.sax.saxutils import escape as _xml_escape
 
 INTERFACE = "rtt-engine/1"
 SOCK = os.environ.get("RTT_SOCK", "/tmp/rtt-engine.sock")
-BACKEND = os.environ.get("RTT_BACKEND", "soap")
-SOAPCNF = os.environ.get("RTT_SOAPCNF",
-                         os.path.expanduser(os.environ.get("DIRECTOR_SOAPCNF",
-                                                           "~/.soap-director")))
-TIMEOUT = float(os.environ.get("RTT_TIMEOUT", "10"))
-# console passthrough gate: prefix-allowlisted commands only (RTT_CONSOLE_ALLOW
-# is a space-separated list; a bare token matches itself + anything after it).
-CONSOLE_ALLOW = [c for c in os.environ.get(
-    "RTT_CONSOLE_ALLOW", ".pinfo .server info .group list .group revive"
-).split() if c]
-MOCK_FIXTURE = os.environ.get(
-    "RTT_MOCK_FIXTURE",
+PBHOST = os.environ.get("RTT_PBHOST", "127.0.0.1")
+PBPORT = int(os.environ.get("RTT_PBPORT", "8888"))
+TIMEOUT = float(os.environ.get("RTT_TIMEOUT", "5"))
+MYCNF = os.environ.get("RTT_MYCNF",
+                       os.path.expanduser(os.environ.get("DIRECTOR_MYCNF",
+                                                          "~/.my.cnf-director")))
+# name -> GUID resolution: "mysql" (read-only identity, default) or "fixture"
+# (JSON file, for the offline proof harness).
+GUID_SOURCE = os.environ.get("RTT_GUID_SOURCE", "mysql")
+GUID_FIXTURE = os.environ.get(
+    "RTT_GUID_FIXTURE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                 "fixtures", "mock-responses.json"))
+                 "fixtures", "guid-fixture.json"))
+GUID_TTL = float(os.environ.get("RTT_GUID_TTL", "300"))  # cache seconds
 
-# The routing rule, made structural: these asks are DB-answerable, so this
-# service REFUSES them and points the caller at db-search. Names mirror the
-# director.py DB_QUERIES catalog (the future db-search tools).
+# The routing rule, made structural. DB-answerable asks are refused with a
+# route_hint to db-search (names mirror director.py's DB_QUERIES catalog);
+# `kick` is refused with a route_hint to chat-tunnel - `.playerbots bot
+# remove` covers registered bots, and force-kicking a non-bot plain session
+# is an accepted gap (end-of-life decision, docs/services-roadmap.md).
 DB_ANSWERABLE = ("location-static", "quest", "money", "skills", "bags",
                  "played", "raid", "census")
+CHAT_TUNNEL = ("kick",)
 
 ERR_UNKNOWN_OP = "unknown_op"
 ERR_WRONG_SERVICE = "wrong_service"
 ERR_BAD_PARAMS = "bad_params"
 ERR_BACKEND_DOWN = "backend_unavailable"
 ERR_BACKEND_ERROR = "backend_error"
-ERR_REFUSED = "refused_console"
 
 
 # ---------------------------------------------------------------------------
-# backend seam
+# backend: the stock mod-playerbots command server (8888 line protocol)
 # ---------------------------------------------------------------------------
 
-class SoapBackend:
-    """The existing SOAP path, wrapped verbatim (envelope + conf file +
-    Basic auth mirror director.py soap_command / common.sh _soap_post)."""
-    name = "soap"
-
-    def _cfg(self):
-        try:
-            with open(SOAPCNF) as f:
-                vals = [l.strip() for l in f.read().splitlines()][:3]
-        except OSError:
-            return None
-        if len(vals) < 3 or not all(vals):
-            return None
-        return vals[0], vals[1], vals[2]
-
-    def execute(self, command, timeout=TIMEOUT):
-        cfg = self._cfg()
-        if not cfg:
-            return False, "SOAP not configured (%s missing/incomplete)" % SOAPCNF
-        url, user, pw = cfg
-        env = ('<?xml version="1.0" encoding="utf-8"?>'
-               '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" '
-               'xmlns:ns1="urn:AC"><SOAP-ENV:Body>'
-               '<ns1:executeCommand><command>' + _xml_escape(command) +
-               '</command></ns1:executeCommand>'
-               '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
-        auth = base64.b64encode((user + ":" + pw).encode()).decode()
-        req = urllib.request.Request(url, data=env.encode("utf-8"), headers={
-            "Content-Type": "text/xml; charset=utf-8", "SOAPAction": "urn:AC",
-            "Authorization": "Basic " + auth})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = r.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            return False, "HTTP %d (bad account/password or gmlevel below Administrator)" % e.code
-        except Exception as e:
-            return False, type(e).__name__ + ": " + str(e)
-        if "<SOAP-ENV:Fault" in body:
-            m = re.search(r"<faultstring[^>]*>(.*?)</faultstring>", body, re.S)
-            return False, "server fault: " + html.unescape(m.group(1) if m else "?")
-        m = re.search(r"<[^>]*executeCommandResponse[^>]*>(.*)</[^>]*executeCommandResponse>",
-                      body, re.S)
-        if not m:
-            return False, "unexpected SOAP response: " + body[:120]
-        text = html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
-        return bool(text), text
-
-    def health(self):
-        ok, text = self.execute(".server info")
-        return ok, text
-
-
-class CmdBusBackend:
-    """Future in-core command bus stub. Same seam signature as SoapBackend:
-    once the core exposes the bus, only this class changes - the interface,
-    the op catalog and every caller stay untouched."""
-    name = "cmdbus"
-
-    def execute(self, command, timeout=TIMEOUT):
-        return False, ("in-core command bus not wired yet - seam ready, "
-                       "swap RTT_BACKEND=cmdbus once the core endpoint exists")
-
-    def health(self):
-        return False, "in-core command bus not wired yet"
-
-
-class MockBackend:
-    """Scripted backend for the proof harness: serves fixture replies from
-    MOCK_FIXTURE ({"<command>": {"ok": bool, "text": str}, ...}); unknown
-    commands answer like an offline worldserver would (backend_down)."""
-    name = "mock"
+class PbCmdBackend:
+    """Talks to Playerbots.CommandServerPort (default 8888): send
+    '<verb>,<guid>\\n', read the reply lines (PlayerbotCommandServer.cpp).
+    Read-only, no auth, ONLINE bots only. name -> GUID goes through the
+    read-only DB identity (or a fixture, offline) and is cached GUID_TTL."""
+    name = "pbcmd"
 
     def __init__(self):
-        with open(MOCK_FIXTURE) as f:
-            self.script = json.load(f)
+        self._guid_cache = {}  # name.lower() -> (guid, fetched_at)
 
-    def execute(self, command, timeout=TIMEOUT):
-        r = self.script.get(command)
-        if r is None:
-            return False, "mock: no scripted reply for %r" % command
-        return bool(r.get("ok")), r.get("text", "")
+    # ---- name -> GUID (read-only, cached) ----
+
+    def _guid_from_db(self, name):
+        try:
+            out = subprocess.run(
+                ["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e",
+                 "SELECT guid FROM acore_characters.characters "
+                 "WHERE name='%s'" % name.replace("'", "")],
+                capture_output=True, text=True, timeout=TIMEOUT)
+            row = (out.stdout or "").strip().splitlines()
+            return int(row[0]) if row and row[0].isdigit() else None
+        except Exception:
+            return None
+
+    def _guid_from_fixture(self, name):
+        try:
+            with open(GUID_FIXTURE) as f:
+                table = json.load(f)
+        except Exception:
+            return None
+        for k, v in table.items():
+            if k.lower() == name.lower():
+                return int(v)
+        return None
+
+    def guid(self, name):
+        """name -> GUID or None, cached GUID_TTL seconds."""
+        key = name.lower()
+        hit = self._guid_cache.get(key)
+        now = time.monotonic()
+        if hit and now - hit[1] < GUID_TTL:
+            return hit[0]
+        if GUID_SOURCE == "fixture":
+            g = self._guid_from_fixture(name)
+        else:
+            g = self._guid_from_db(name)
+        self._guid_cache[key] = (g, now)
+        return g
+
+    # ---- line protocol ----
+
+    def ask(self, verb, guid, timeout=TIMEOUT):
+        """Send '<verb>,<guid>\\n', return (ok, text). ok False = transport
+        problem (server down / timeout). An EMPTY reply is ok=True, text="":
+        the connection worked but the bot is not live (offline / not a bot),
+        exactly like the real server closing on a dead guid."""
+        try:
+            s = socket.create_connection((PBHOST, PBPORT), timeout=timeout)
+        except Exception as e:
+            return False, "command server %s:%d unreachable (%s)" % (PBHOST,
+                                                                     PBPORT,
+                                                                     type(e).__name__)
+        try:
+            s.settimeout(timeout)
+            s.sendall(("%s,%d\n" % (verb, guid)).encode("utf-8"))
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            text = buf.decode("utf-8", "replace").strip()
+            return True, text
+        except Exception as e:
+            return False, type(e).__name__ + ": " + str(e)
+        finally:
+            s.close()
 
     def health(self):
-        return self.execute(".server info")
+        try:
+            s = socket.create_connection((PBHOST, PBPORT), timeout=TIMEOUT)
+        except Exception as e:
+            return False, "command server %s:%d unreachable (%s)" % (PBHOST,
+                                                                     PBPORT,
+                                                                     type(e).__name__)
+        s.close()
+        return True, "command server %s:%d reachable" % (PBHOST, PBPORT)
 
 
-BACKENDS = {"soap": SoapBackend, "cmdbus": CmdBusBackend, "mock": MockBackend}
+BACKENDS = {"pbcmd": PbCmdBackend}
 
 
 # ---------------------------------------------------------------------------
-# op catalog (tick-time-sensitive / non-polled ONLY - see DB_ANSWERABLE)
+# op catalog (tick-time-sensitive / non-polled ONLY - see the refused sets)
 # ---------------------------------------------------------------------------
-
-def _pinfo(raw):
-    """Keep the useful lines of '.pinfo' console output, drop the rest
-    (same filter idea as director.py _fmt_pinfo)."""
-    keep = []
-    for line in raw.splitlines():
-        line = re.sub(r"\|c[0-9A-Fa-f]{8}|\|r", "", line).strip().strip("|").strip()
-        if not line:
-            continue
-        low = line.lower()
-        if any(k in low for k in ("map:", "zone:", "area:", "online",
-                                   "position", "login",
-                                   "guild:", "level:", "alive", "money:")):
-            keep.append(line)
-    return keep if keep else raw[:200]
-
 
 def op_catalog(backend):
+    refused = {"ops": sorted(list(DB_ANSWERABLE) + list(CHAT_TUNNEL)),
+               "route_hints": {**{o: "db-search" for o in DB_ANSWERABLE},
+                               **{o: "chat-tunnel" for o in CHAT_TUNNEL}}}
     return {"ok": True, "result": {"ops": [
         {"op": "catalog", "answers": "this list (what routes here and why)"},
-        {"op": "ping", "answers": "backend liveness + round-trip latency"},
-        {"op": "server_info", "answers": "live server state (online count, "
-         "uptime) - ticks change it every second"},
-        {"op": "pinfo", "answers": "live toon state (online now, map/zone/"
-         "position) - the DB only knows the LAST LOGOUT position (A5)"},
-        {"op": "console", "answers": "allowlisted console passthrough "
-         "(RTT_CONSOLE_ALLOW); the escape hatch for tick-sensitive console "
-         "verbs"},
-    ], "refused": {"ops": list(DB_ANSWERABLE),
-                   "route_hint": "db-search (DB-answerable - never this service)"}},
-           "error": None}
+        {"op": "ping", "answers": "command-server liveness + latency"},
+        {"op": "pinfo", "answers": "LIVE position of an ONLINE bot via the "
+         "mod's command server (8888). Offline truth is db-search: logout "
+         "flushes the final position to characters (A5: online resets at "
+         "worldserver boot)"},
+    ], "refused": refused}, "error": None}
 
 
 def op_ping(backend):
@@ -210,25 +195,9 @@ def op_ping(backend):
                                       "message": detail}}
 
 
-def op_server_info(backend):
-    ok, text = backend.execute(".server info")
-    if not ok:
-        return {"ok": False, "result": None,
-                "error": {"code": ERR_BACKEND_DOWN, "message": text}}
-    players = uptime = revision = None
-    for line in text.splitlines():
-        m = re.search(r"connected players?\s*:\s*(\d+)", line, re.I)
-        if m:
-            players = int(m.group(1))
-        m = re.search(r"uptime\s*:\s*(.+)", line, re.I)
-        if m:
-            uptime = m.group(1).strip()
-        m = re.search(r"revision\s*:\s*(\S+)", line, re.I)
-        if m:
-            revision = m.group(1)
-    return {"ok": True, "result": {"online_players": players,
-                                   "uptime": uptime, "revision": revision,
-                                   "raw": text}, "error": None}
+POS_RE = re.compile(
+    r"map\s+(\d+)\s+at\s+(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)"
+    r"(?:\s+in\s+(.+?))?\s*$", re.I)
 
 
 def op_pinfo(backend, name):
@@ -237,53 +206,34 @@ def op_pinfo(backend, name):
         return {"ok": False, "result": None,
                 "error": {"code": ERR_BAD_PARAMS,
                           "message": "param 'name' must be a toon name"}}
-    ok, text = backend.execute(".pinfo " + name)
+    guid = backend.guid(name)
+    if guid is None:
+        return {"ok": True, "result": {
+            "name": name, "online": False,
+            "caveat": "no GUID for %r in the characters DB - offline truth "
+                      "is db-search" % name}, "error": None}
+    ok, text = backend.ask("position", guid)
     if not ok:
         return {"ok": False, "result": None,
                 "error": {"code": ERR_BACKEND_DOWN, "message": text}}
-    lines = _pinfo(text)
-    online = any("online" in l.lower() and "offline" not in l.lower()
-                 for l in lines)
-    pos = zone = map_ = None
-    for l in lines:
-        m = re.search(r"Position\s*:\s*\[?(-?[\d.]+),?\s*(-?[\d.]+),?\s*(-?[\d.]+)",
-                      l, re.I)
-        if m:
-            pos = [float(m.group(i)) for i in (1, 2, 3)]
-        m = re.search(r"Zone\s*:\s*([^,;|]+?)(?:\s*,|$)", l, re.I)
-        if m:
-            zone = m.group(1).strip()
-        m = re.search(r"Map\s*:\s*(\d+)", l, re.I)
-        if m:
-            map_ = int(m.group(1))
-    return {"ok": True, "result": {"name": name, "online": online,
-                                   "map": map_, "zone": zone,
-                                   "position": pos, "detail": "; ".join(lines)},
+    m = POS_RE.search(text)
+    if not m:
+        # command server answered but the bot is not live (offline / not a
+        # bot / empty reply) - offline truth is db-search
+        return {"ok": True, "result": {
+            "name": name, "online": False, "reply": text,
+            "caveat": "not answering on the command server (offline or not "
+                      "an online bot) - offline truth is db-search"},
             "error": None}
+    zone = m.group(5).strip() if m.group(5) else None
+    return {"ok": True, "result": {
+        "name": name, "online": True, "guid": guid,
+        "map": int(m.group(1)),
+        "position": [float(m.group(i)) for i in (2, 3, 4)],
+        "zone": zone, "reply": text}, "error": None}
 
 
-def op_console(backend, command):
-    if not command or not isinstance(command, str):
-        return {"ok": False, "result": None,
-                "error": {"code": ERR_BAD_PARAMS,
-                          "message": "param 'command' must be a console command string"}}
-    if not any(command == a or command.startswith(a + " ")
-               for a in CONSOLE_ALLOW):
-        return {"ok": False, "result": None,
-                "error": {"code": ERR_REFUSED,
-                          "message": "command %r is not in the console allowlist "
-                                     "(RTT_CONSOLE_ALLOW: %s)" % (command,
-                                                                 " ".join(CONSOLE_ALLOW))}}
-    ok, text = backend.execute(command)
-    if not ok:
-        return {"ok": False, "result": None,
-                "error": {"code": ERR_BACKEND_DOWN, "message": text}}
-    return {"ok": True, "result": {"command": command, "reply": text},
-            "error": None}
-
-
-OPS = {"catalog": op_catalog, "ping": op_ping, "server_info": op_server_info,
-       "pinfo": op_pinfo, "console": op_console}
+OPS = {"catalog": op_catalog, "ping": op_ping, "pinfo": op_pinfo}
 
 
 def dispatch(req, backend):
@@ -295,8 +245,8 @@ def dispatch(req, backend):
                 "queried_at": datetime.datetime.now(datetime.timezone.utc)
                               .strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "latency_ms": 0, "result": result, "error": error}
-    op = req.get("op")
-    if not isinstance(req, dict) or not op:
+    op = req.get("op") if isinstance(req, dict) else None
+    if not op:
         return envelope(False, None, {"code": ERR_BAD_PARAMS,
                                       "message": "request must be {\"op\": ...}"})
     if op in DB_ANSWERABLE:
@@ -305,6 +255,14 @@ def dispatch(req, backend):
             "message": "'%s' is DB-answerable - the routing rule sends it to "
                        "db-search, never here" % op,
             "route_hint": "db-search"})
+    if op in CHAT_TUNNEL:
+        return envelope(False, None, {
+            "code": ERR_WRONG_SERVICE,
+            "message": "'%s' is refused - '.playerbots bot remove' covers "
+                       "registered bots (chat-tunnel owns command sends); "
+                       "force-kicking a non-bot plain session is an "
+                       "accepted gap" % op,
+            "route_hint": "chat-tunnel"})
     if op not in OPS:
         return envelope(False, None, {
             "code": ERR_UNKNOWN_OP,
@@ -312,8 +270,6 @@ def dispatch(req, backend):
             "route_hint": "db-search (if a DB query can answer it)"})
     if op == "pinfo":
         r = OPS[op](backend, req.get("name"))
-    elif op == "console":
-        r = OPS[op](backend, req.get("command"))
     else:
         r = OPS[op](backend)
     return envelope(r["ok"], r["result"], r["error"])
@@ -323,18 +279,19 @@ def dispatch(req, backend):
 # transport: unix socket, one JSON line in, one JSON line out
 # ---------------------------------------------------------------------------
 
-def serve(sock_path, backend_name):
+def serve(sock_path):
     if sock_path == "-" or not sock_path:
         sock_path = SOCK
-    backend = BACKENDS[backend_name]()
+    backend = PbCmdBackend()
     if os.path.exists(sock_path):
         os.unlink(sock_path)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
     os.chmod(sock_path, 0o600)
     srv.listen(8)
-    sys.stderr.write("rtt-engine: serving %s (interface %s, backend %s)\n"
-                    % (sock_path, INTERFACE, backend.name))
+    sys.stderr.write("rtt-engine: serving %s (interface %s, backend %s -> "
+                     "command server %s:%d)\n"
+                     % (sock_path, INTERFACE, backend.name, PBHOST, PBPORT))
     sys.stderr.flush()
     try:
         while True:
@@ -392,13 +349,12 @@ def main():
     sub = p.add_subparsers(dest="mode", required=True)
     ps = sub.add_parser("serve", help="run the service on a unix socket")
     ps.add_argument("--socket", default="-")
-    ps.add_argument("--backend", choices=sorted(BACKENDS), default="-")
     pq = sub.add_parser("query", help="one-shot client: prints the JSON envelope")
     pq.add_argument("request", help="request JSON, e.g. '{\"op\":\"ping\"}'")
     pq.add_argument("--socket", default="-")
     a = p.parse_args()
     if a.mode == "serve":
-        serve(a.socket, a.backend if a.backend != "-" else BACKEND)
+        serve(a.socket)
     else:
         try:
             req = json.loads(a.request)
