@@ -1,0 +1,11 @@
+# Garbled / out-of-band lines that MUST NOT consume a pending command's match.
+# The headless client occasionally emits truncated or interleaved junk; the
+# tailer's parser ignores every line below, and a well-formed reply line that
+# follows still binds to the exact command that is still pending.
+[Gau] [whisper
+] [whisper]: Strategies: - (truncated head)
+[Gau] [guild]: === Inventory ===
+[Gau] [whisper]:
+[garbled
+[System] [whisper]: server console noise
+Gau] [whisper]: unbalanced bracket

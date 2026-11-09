@@ -1,0 +1,12 @@
+[Unit]
+Description=chat-tunnel: single owner of /tmp/leo.log (tail -> SQLite, correlated sends)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/downloads/director-drop
+ExecStart=/bin/bash -c 'cd %h/downloads/director-drop && exec python3 -u services/chat-tunnel/chat_tunnel.py >> services/chat-tunnel/tunnel.log 2>&1'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

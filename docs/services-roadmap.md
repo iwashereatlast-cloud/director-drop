@@ -23,9 +23,9 @@ Shared rules for all four conversations:
 
 | svc | dir | purpose | status | proof | notes |
 |---|---|---|---|---|---|
-| 1. chat-tunnel | `services/chat-tunnel/` | single owner of `/tmp/leo.log`: tailer → SQLite (WAL) with retention purge; sends commands with correlation IDs; matches replies to the command that triggered them (sender + window) — kills the stale-line false positive | NOT STARTED | — | build FIRST: ground-truth layer everything else verifies against |
+| 1. chat-tunnel | `services/chat-tunnel/` | single owner of `/tmp/leo.log`: tailer → SQLite (WAL) with retention purge; sends commands with correlation IDs; matches replies to the command that triggered them (sender + window) — kills the stale-line false positive | SHIPPED (PR) | `services/chat-tunnel/proof.py`: 6/6 replay scenarios green without a live worldserver (basic bind, interleaved out-of-order replies, garbled-line corpus `fixtures/replay-corrupt.log.txt`, late past-window reply, ordered same-bot replies, retention purge) | build FIRST: ground-truth layer everything else verifies against |
 | 2. db-search | `services/db-search/` | premade read-only query catalog (typed tools with "what it can/can't answer" contracts); every result carries `queried_at` + staleness caveat; hard allowlist, read-only DB user, per-query timeout | NOT STARTED | — | free from a world-tick perspective; LLM never writes free-form SQL |
-| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries + commands; stable JSON interface, SOAP backend initially, swap for an in-core command bus later | NOT STARTED | — | only for tick-time-sensitive data; anything the DB answers never routes here |
+| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries + commands; stable JSON interface, SOAP backend initially, swap for an in-core command bus later | **SHIPPED (mock-proofed)** — `rtt-engine/1` over unix socket; SOAP wrapped verbatim, seam ready for the in-core bus; live SOAP run pending on serverpc | `bash services/rtt-engine/prove.sh` (16 checks, no worldserver needed) | only for tick-time-sensitive data; anything the DB answers never routes here — refused with a `route_hint` to db-search (structural, in the op catalog) |
 | 4. web-gui | `services/web-gui/` | read-only dashboard over 1–3: bot status table, live tunnel event feed, query catalog browser | NOT STARTED | — | LAST; trivial once the services expose JSON |
 
 ## Cross-service contracts
@@ -42,6 +42,14 @@ Contracts live here so a change is visible to every conversation:
 - **Routing rule (all):** DB-answerable → db-search; tick-sensitive or
   non-polled → rtt-engine; never whisper-probe to learn something the DB
   already knows.
+- **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
+  (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
+  per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
+  error:{code, message, route_hint?}}`. Ops: `catalog`, `ping`,
+  `server_info`, `pinfo`, `console` (allowlist-gated). DB-answerable op names
+  are refused with `route_hint: "db-search"`. The envelope is identical for
+  every backend (`soap` now, `cmdbus` later) — callers must not depend on
+  `backend` beyond display.
 
 ## Order & gates
 

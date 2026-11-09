@@ -6,3 +6,6 @@ daemon.lock
 *.log
 __pycache__/
 *.pyc
+
+# chat-tunnel runtime artifacts (service DB + lock)
+services/chat-tunnel/tunnel.db*
