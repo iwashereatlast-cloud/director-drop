@@ -18,7 +18,20 @@ the page.
 
 Env knobs (all optional):
   WEBGUI_PORT           8766
-  WEBGUI_ADDR           127.0.0.1 (loopback only, enforced)
+  WEB_GUI_BIND          127.0.0.1 (default, no login needed) - a SPECIFIC
+                        address (e.g. 192.168.88.2), or `lan` to auto-resolve
+                        the host's current LAN address at startup (survives
+                        moving the server). The wildcard 0.0.0.0 is ALWAYS
+                        refused. Any non-loopback bind requires a login
+                        (WEB_GUI_USER / WEB_GUI_PASS) and prints a prominent
+                        startup warning: no TLS - credentials cross the LAN
+                        in cleartext, and the query browser executes real DB
+                        reads. Firewall it; the SSH tunnel is the recommended
+                        default (see README).
+  WEB_GUI_USER          director   (login user, non-loopback binds only)
+  WEB_GUI_PASS          (required for a non-loopback bind; empty = refuse)
+  WEB_GUI_AUTH          auto (on for non-loopback binds) | on | off (off is
+                        refused on non-loopback binds)
   WEBGUI_TUNNEL         http://127.0.0.1:8765     (chat-tunnel base URL)
   WEBGUI_DBSEARCH_SOCK  /tmp/db-search.sock       (db-search unix socket)
   WEBGUI_RTT_SOCK       /tmp/rtt-engine.sock     (rtt-engine unix socket)
@@ -27,22 +40,77 @@ Env knobs (all optional):
 
 Run: python3 web_gui.py serve
 """
+import hmac
 import json
 import os
+import secrets
 import socket
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("WEBGUI_PORT", "8766"))
-ADDR = os.environ.get("WEBGUI_ADDR", "127.0.0.1")
+BIND = (os.environ.get("WEB_GUI_BIND") or os.environ.get("WEBGUI_ADDR")
+        or "127.0.0.1")
 TUNNEL = os.environ.get("WEBGUI_TUNNEL", "http://127.0.0.1:8765").rstrip("/")
 DB_SOCK = os.environ.get("WEBGUI_DBSEARCH_SOCK", "/tmp/db-search.sock")
 RTT_SOCK = os.environ.get("WEBGUI_RTT_SOCK", "/tmp/rtt-engine.sock")
 CENSUS = os.environ.get("WEBGUI_CENSUS", "i_was_here")
 TIMEOUT = float(os.environ.get("WEBGUI_TIMEOUT", "15"))
+
+AUTH_USER = os.environ.get("WEB_GUI_USER", "director")
+AUTH_PASS = os.environ.get("WEB_GUI_PASS", "")
+SESSION_TTL = float(os.environ.get("WEB_GUI_SESSION_TTL", str(12 * 3600)))
+AUTH_MODE = os.environ.get("WEB_GUI_AUTH", "auto").strip().lower()
+
+
+def is_loopback(addr):
+    return (addr in ("localhost", "::1")
+            or (addr.startswith("127.") and addr != "127.255.255.255"))
+
+
+if AUTH_MODE == "on":
+    AUTH_ENABLED = True
+elif AUTH_MODE == "off":
+    AUTH_ENABLED = False
+else:
+    AUTH_ENABLED = not is_loopback(BIND)
+
+SESSIONS = {}
+SESSIONS_LOCK = threading.Lock()
+COOKIE_NAME = "webgui_session"
+
+
+def new_session():
+    tok = secrets.token_urlsafe(32)
+    with SESSIONS_LOCK:
+        now = time.time()
+        for t in [t for t, exp in SESSIONS.items() if exp <= now]:
+            del SESSIONS[t]
+        SESSIONS[tok] = now + SESSION_TTL
+    return tok
+
+
+def session_valid(tok):
+    with SESSIONS_LOCK:
+        exp = SESSIONS.get(tok)
+    return exp is not None and exp > time.time()
+
+
+def drop_session(tok):
+    with SESSIONS_LOCK:
+        SESSIONS.pop(tok, None)
+
+
+def check_login(user, password):
+    ok_u = hmac.compare_digest(str(user or "").encode(), AUTH_USER.encode())
+    ok_p = hmac.compare_digest(str(password or "").encode(), AUTH_PASS.encode())
+    return ok_u and ok_p and bool(AUTH_PASS)
 
 RTT_READ_OPS = ("catalog", "ping", "pinfo")
 
@@ -180,6 +248,36 @@ def api_rtt(op, name):
 
 
 # ------------------------------------------------------------------ page ----
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>director-drop web-gui - login</title>
+<style>
+body{margin:0;background:#15171d;color:#d8dce4;font:14px/1.5 system-ui,sans-serif;
+display:flex;align-items:center;justify-content:center;min-height:100vh}
+form{background:#1d2027;border:1px solid #2a2e38;border-radius:8px;padding:24px;width:300px}
+h1{font-size:16px;margin:0 0 14px}label{display:block;margin:8px 0 3px;color:#8b93a3;font-size:12px}
+input{width:100%;box-sizing:border-box;background:#15171d;color:#d8dce4;
+border:1px solid #2a2e38;border-radius:5px;padding:6px 8px;font-size:13px}
+button{margin-top:14px;width:100%;background:#3b82c4;color:#fff;border:none;
+border-radius:5px;padding:8px;font-size:13px;cursor:pointer}
+.err{color:#d05b5b;font-size:12px;min-height:16px;margin-top:8px}
+</style></head><body>
+<form id="f">
+  <h1>director-drop web-gui</h1>
+  <label>user</label><input id="u" autocomplete="username">
+  <label>password</label><input id="p" type="password" autocomplete="current-password">
+  <button type="submit">log in</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+document.getElementById('f').onsubmit=async(e)=>{
+  e.preventDefault();
+  const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({user:u.value,pass:p.value})});
+  if(r.ok){location.href='/';return}
+  document.getElementById('e').textContent='login failed';
+};</script>
+</body></html>"""
 PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -385,16 +483,40 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def reply(self, code, obj, ctype="application/json"):
+    def reply(self, code, obj, ctype="application/json", headers=()):
         body = (obj if isinstance(obj, bytes) else
                 json.dumps(obj).encode())
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in headers:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    def session_token(self):
+        c = SimpleCookie()
+        c.load(self.headers.get("Cookie") or "")
+        m = c.get(COOKIE_NAME)
+        return m.value if m else None
+
+    def authed(self):
+        if not AUTH_ENABLED:
+            return True
+        tok = self.session_token()
+        return tok is not None and session_valid(tok)
+
     def do_GET(self):
+        if AUTH_ENABLED and not self.authed():
+            if self.path.startswith("/api/") or self.path == "/health":
+                self.reply(401, {"ok": False,
+                                 "error": "not logged in (POST /login first)"})
+            elif self.path == "/login":
+                self.reply(200, LOGIN_PAGE.encode(), "text/html; charset=utf-8")
+            else:
+                self.reply(302, b"", "text/plain",
+                           headers=(("Location", "/login"),))
+            return
         if self.path == "/" or self.path.startswith("/index.html"):
             self.reply(200, PAGE.encode(), "text/html; charset=utf-8")
         elif self.path == "/health":
@@ -416,6 +538,21 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"ok": False, "error": "no such path"})
 
     def do_POST(self):
+        if self.path == "/login":
+            self.do_login()
+            return
+        if self.path == "/logout" and AUTH_ENABLED:
+            tok = self.session_token()
+            if tok:
+                drop_session(tok)
+            self.reply(200, {"ok": True},
+                       headers=(("Set-Cookie",
+                                 "%s=deleted; Path=/; Max-Age=0" % COOKIE_NAME),))
+            return
+        if AUTH_ENABLED and not self.authed():
+            self.reply(401, {"ok": False,
+                             "error": "not logged in (POST /login first)"})
+            return
         if self.path not in ("/api/query", "/api/rtt"):
             self.reply(404, {"ok": False, "error": "no such path"})
             return
@@ -432,13 +569,75 @@ class Handler(BaseHTTPRequestHandler):
             resp = api_rtt(req.get("op"), req.get("name"))
         self.reply(200, resp)
 
+    def do_login(self):
+        if not AUTH_ENABLED:
+            self.reply(200, {"ok": True, "note": "loopback bind - no login required"})
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            req = json.loads(self.rfile.read(n).decode() or "{}")
+        except (ValueError, UnicodeDecodeError) as e:
+            self.reply(400, {"ok": False, "error": "bad JSON: %s" % e})
+            return
+        if not check_login(req.get("user"), req.get("pass")):
+            time.sleep(0.5)
+            self.reply(401, {"ok": False, "error": "login failed"})
+            return
+        tok = new_session()
+        self.reply(200, {"ok": True},
+                   headers=(("Set-Cookie",
+                             "%s=%s; Path=/; HttpOnly; SameSite=Strict" %
+                             (COOKIE_NAME, tok)),))
+
+
+def resolve_lan_addr():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
 
 def main():
-    if ADDR not in ("127.0.0.1", "localhost", "::1"):
-        sys.exit("web-gui: refusing to bind %r - local-only by contract" % ADDR)
-    srv = ThreadingHTTPServer((ADDR, PORT), Handler)
+    global BIND
+    if BIND in ("", "0.0.0.0", "::"):
+        sys.exit("web-gui: refusing to bind %r - WEB_GUI_BIND needs a SPECIFIC "
+                 "address (e.g. 192.168.88.2 or lan), never the wildcard" % BIND)
+    if BIND.lower() in ("lan", "auto"):
+        addr = resolve_lan_addr()
+        if not addr or is_loopback(addr):
+            sys.exit("web-gui: WEB_GUI_BIND=lan could not resolve a non-loopback "
+                     "address on this host (no route out?); pass an explicit "
+                     "address or keep the 127.0.0.1 default")
+        BIND = addr
+    if AUTH_MODE == "off" and not is_loopback(BIND):
+        sys.exit("web-gui: WEB_GUI_AUTH=off with a non-loopback bind (%s) is "
+                 "refused - the LAN bind requires the login screen" % BIND)
+    if AUTH_ENABLED and not AUTH_PASS:
+        sys.exit("web-gui: WEB_GUI_BIND=%s is not loopback and WEB_GUI_PASS "
+                 "is not set - the login screen gates the whole GUI (the "
+                 "query browser executes real DB reads); set WEB_GUI_USER / "
+                 "WEB_GUI_PASS, or keep the 127.0.0.1 default and use an SSH "
+                 "tunnel" % BIND)
+    if AUTH_ENABLED:
+        warn = ("\n" + "!" * 70 + "\n"
+                "WARNING: web-gui is bound to %s - NOT loopback.\n"
+                "The GUI has no TLS: the login and session cookie cross the \n"
+                "network in CLEARTEXT, and behind the login the query browser \n"
+                "executes REAL DB reads. Anyone who can reach this address and \n"
+                "guesses the password can read your roster data.\n"
+                "You are responsible for firewalling %s:%d (allow only the \n"
+                "trusted LAN segment). Recommended default: keep 127.0.0.1 and \n"
+                "ssh -N -L 8766:127.0.0.1:8766 <host> from the laptop.\n"
+                + "!" * 70 + "\n") % (BIND, BIND, PORT)
+        print(warn, file=sys.stderr)
+        print(warn)
+    srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print("web-gui: http://%s:%d/ (tunnel %s, db-search %s, rtt-engine %s, "
-          "census prefix %r)" % (ADDR, PORT, TUNNEL, DB_SOCK, RTT_SOCK, CENSUS))
+          "census prefix %r)" % (BIND, PORT, TUNNEL, DB_SOCK, RTT_SOCK, CENSUS))
     srv.serve_forever()
 
 
