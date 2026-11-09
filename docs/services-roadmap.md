@@ -25,7 +25,7 @@ Shared rules for all four conversations:
 |---|---|---|---|---|---|
 | 1. chat-tunnel | `services/chat-tunnel/` | single owner of `/tmp/leo.log`: tailer → SQLite (WAL) with retention purge; sends commands with correlation IDs; matches replies to the command that triggered them (sender + window) — kills the stale-line false positive | SHIPPED (PR) | `services/chat-tunnel/proof.py`: 6/6 replay scenarios green without a live worldserver (basic bind, interleaved out-of-order replies, garbled-line corpus `fixtures/replay-corrupt.log.txt`, late past-window reply, ordered same-bot replies, retention purge) | build FIRST: ground-truth layer everything else verifies against |
 | 2. db-search | `services/db-search/` | premade read-only query catalog (typed tools with "what it can/can't answer" contracts); every result carries `queried_at` + staleness caveat; hard allowlist, read-only DB user, per-query timeout | SHIPPED (PR #45) | `services/db-search/harness.py`: 30 pass / 0 fail offline (allowlist, static-SQL assertions, SELECT-only identity, per-tool timeout, staleness envelope, unix-socket e2e) | free from a world-tick perspective; LLM never writes free-form SQL |
-| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries + commands; stable JSON interface, SOAP backend initially, swap for an in-core command bus later | **SHIPPED (mock-proofed)** — `rtt-engine/1` over unix socket; SOAP wrapped verbatim, seam ready for the in-core bus; live SOAP run pending on serverpc | `bash services/rtt-engine/prove.sh` (16 checks, no worldserver needed) | only for tick-time-sensitive data; anything the DB answers never routes here — refused with a `route_hint` to db-search (structural, in the op catalog) |
+| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries; stable JSON interface; backend = the stock mod-playerbots command server (8888, read-only `<verb>,<guid>\n`) | **SHIPPED (pbcmd)** — `rtt-engine/1` over unix socket, backend `pbcmd` (name→GUID via the RO DB identity, cached; `<verb>,<guid>\n` per PlayerbotCommandServer.cpp); ops `catalog`/`ping`/`pinfo`; `kick` refused → chat-tunnel (accepted gap); SOAP gone from the repo (this pass) | `bash services/rtt-engine/prove.sh` — 15 checks offline vs a mock 8888 server (envelope key-for-key unchanged, live position, offline/invalid-guid → db-search fallback, kick → chat-tunnel, GUID cache, backend-down envelope) | only for tick-time-sensitive ONLINE-bot data; anything the DB answers never routes here — refused with a `route_hint` (db-search / chat-tunnel), structural in the op catalog |
 | 4. web-gui | `services/web-gui/` | read-only dashboard over 1–3: bot status table, live tunnel event feed, query catalog browser | NOT STARTED | — | LAST; trivial once the services expose JSON |
 
 ## Cross-service contracts
@@ -45,11 +45,12 @@ Contracts live here so a change is visible to every conversation:
 - **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
-  error:{code, message, route_hint?}}`. Ops: `catalog`, `ping`,
-  `server_info`, `pinfo`, `console` (allowlist-gated). DB-answerable op names
-  are refused with `route_hint: "db-search"`. The envelope is identical for
-  every backend (`soap` now, `cmdbus` later) — callers must not depend on
-  `backend` beyond display.
+  error:{code, message, route_hint?}}`. Ops: `catalog`, `ping`, `pinfo`
+  (live position of an ONLINE bot via the 8888 command server). Refused:
+  DB-answerable names → `route_hint: "db-search"`; `kick` → `route_hint:
+  "chat-tunnel"` (accepted gap). `backend` is always `pbcmd` — callers must
+  not depend on it beyond display. Offline truth is db-search (logout
+  flushes final position to `characters`).
 
 ## SOAP end-of-life decision (2026-11-09)
 
@@ -77,6 +78,7 @@ layer to break. Consequences, settled at tracker level:
    command under replay (including a late/garbled line fixture).
 2. db-search ships with the query catalog documented, each query proofed
    against a DB fixture.
-3. rtt-engine ships with the SOAP backend wrapped and a backend-swap seam
-   (interface unchanged).
+3. rtt-engine ships with the pbcmd backend (stock 8888 command server) and
+   the response envelope unchanged from the original `rtt-engine/1` shape —
+   callers must not notice the backend swap (harness asserts it).
 4. web-gui starts only after 1–3 answer JSON.

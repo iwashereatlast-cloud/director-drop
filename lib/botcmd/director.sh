@@ -154,7 +154,7 @@ director_commands() {
   awk '/^MASTER_CMDS = \(/{f=1} f{print} f && /\)$/{exit}' "$d" \
     | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -
   echo
-  echo "== group commands ('.group ...' from Leo's session; Console::No = NOT via SOAP) =="
+  echo "== group commands ('.group ...' from Leo's session; Console::No = in-session only) =="
   awk '/^GROUP_CMDS = \(/{f=1} f{print} f && /\)$/{exit}' "$d" \
     | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -
   echo

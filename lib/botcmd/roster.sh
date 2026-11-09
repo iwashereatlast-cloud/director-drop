@@ -143,43 +143,21 @@ roster_go() {  # botcmd go <toon> <zone words...> -> /w <toon> go travel <zone>
   warn "receipt: botcmd leo chat 40  (bot answers 'Traveling to <zone>'; destinations are level-filtered by the engine)"
 }
 
-# Kick a toon's session via SOAP '.kick' (Console::Yes, rbac command_kick -
-# needs gmlevel 3 on I_WAS_CMD, same grant as '.group remove'). This logs a
-# toon out WITHOUT the game client or a worldserver restart, so the ritual's
-# addaccount can attach bot AI on the fresh login.
-_roster_kick() {  # $1 = toon name
-  local out code
-  if out=$(_soap_run ".kick $1" 2>/dev/null); then
-    code=$(printf '%s\n' "$out" | head -n 1)
-    if [ "$code" = "200" ]; then
-      okmsg "kicked $1 via SOAP .kick - offline now, the ritual can add them as a bot"
-      return 0
-    fi
-    warn "SOAP .kick $1 -> HTTP $code: $(printf '%s\n' "$out" | tail -n +2 | head -c 120)"
-    return 1
-  fi
-  # SOAP gate not armed - fall back to Leo's own session (same rbac perm needed)
-  if game_send ".kick $1"; then
-    okmsg "queued via Leo's session: .kick $1   (result shows in the worldserver console)"
-    return 0
-  fi
-  errmsg "kick $1 failed - arm SOAP (botcmd system arm) and check Leo is up (botcmd leo status)"
-  return 1
-}
-
 # Graceful first: '.playerbots bot remove <toon>' works on any REGISTERED bot
-# while online (LogoutPlayerBot logs the bot session out). Only if the toon is
-# STILL online afterwards (plain character session, no bot AI - remove answers
-# "not your bot") do we kick via SOAP, so the ritual's addaccount can attach
-# bot AI on the fresh login.
+# while online (LogoutPlayerBot logs the bot session out). If the toon is
+# STILL online afterwards it is a plain character session (no bot AI) -
+# force-kicking those is an ACCEPTED GAP since the console end-of-life
+# pass (docs/services-roadmap.md): log it out by hand if it really must go
+# down.
 _roster_down_one() {  # $1 = toon name
   local n="$1" on
   game_send ".playerbots bot remove $n" && okmsg "queued: bot remove $n (graceful - works if $n is a registered bot)"
   sleep "${BOTCMD_DOWN_WAIT:-3}"
   on=$(db_ro -N -B -e "SELECT online FROM acore_characters.characters WHERE name='$n'" 2>/dev/null | head -n 1)
   if [ "$on" = "1" ]; then
-    warn "$n still online after 'bot remove' (not a registered bot - plain session) -> SOAP .kick"
-    _roster_kick "$n"
+    warn "$n still online after 'bot remove' (not a registered bot - plain session)"
+    warn "accepted gap: force-kicking a non-bot session is retired with the old kick path;"
+    warn "  log the toon out by hand if it really must go down, then re-run the ritual"
   else
     okmsg "$n is offline now - the ritual can add them as a bot"
   fi
@@ -314,14 +292,14 @@ roster_link() {  # botcmd roster link [list] | check <ACCT> | <ACCT> <KEY> | set
   esac
 }
 
-# one-command repair: kick every online watched toon (they cannot have bot AI
+# one-command repair: down every online watched toon (they cannot have bot AI
 # while their human session is up), then ritual (attaches AI on fresh login),
 # then verify the live rpg statuses
 roster_fix() {
-  hdr "Roster fix: kick online watched toons -> ritual -> verify"
-  warn "kicks every ONLINE watched toon (never G1, never Leo) - the only way to make"
+  hdr "Roster fix: down online watched toons -> ritual -> verify"
+  warn "downs every ONLINE watched toon (never G1, never Leo) - the only way to make"
   warn "addaccount attach bot AI: add/addaccount refuse online toons (module design)"
-  roster_down all || warn "some kicks failed - continuing anyway"
+  roster_down all || warn "some downs failed - continuing anyway"
   sleep 3
   roster_ritual
   echo
@@ -339,8 +317,8 @@ roster_menu() {
  3. Add a bot
  4. Remove a bot
  5. Send a bot to a zone (go travel)
- 6. Kick a toon out (SOAP .kick - no game client needed)
- 7. FIX roster: kick all online bots + ritual + verify
+ 6. Take a toon down (bot remove first; plain sessions = accepted gap)
+ 7. FIX roster: down all online bots + ritual + verify
  8. Account links (list | check ACCT | ACCT KEY | setkey KEY | unlink ACCT)
  9. Return to main menu   (blank Enter = back)
 EOF
@@ -355,7 +333,7 @@ EOF
          printf '%s' "zone (e.g. Westfall, Barrens, Feralas - botcmd states zones): "; IFS= read -r z
          [ -n "$n" ] && [ -n "$z" ] && roster_go "$n" $z
          pause ;;
-      6) printf '%s' "toon to kick (or 'all'): "; IFS= read -r n; roster_down "$n"; pause ;;
+      6) printf '%s' "toon to take down (or 'all'): "; IFS= read -r n; roster_down "$n"; pause ;;
       7) roster_fix; pause ;;
       8) printf '%s' "link args (list | check I_WAS_HERE5TH | I_WAS_HERE5TH mykey | setkey mykey | unlink I_WAS_HERE5TH): "; IFS= read -r lnk
          roster_link $lnk; pause ;;

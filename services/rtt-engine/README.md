@@ -1,10 +1,25 @@
 # rtt-engine ("8.8.8.8") — service 3 of 4
 
-Real-time / **non-polled** query-and-command engine. This is the ONLY thing
-in the stack that talks to the worldserver's live console surface; everything
-the DB can answer belongs to `services/db-search/` (service 2) and is
-**refused here** with a `route_hint` — the roadmap's routing rule is
-structural, not a convention.
+Real-time / **non-polled** query service. Owns the tick-time-sensitive
+surface: LIVE reads of ONLINE bots through the **stock mod-playerbots
+command server** (`Playerbots.CommandServerPort`, default 8888, read-only
+line protocol `<verb>,<guid>\n` per `PlayerbotCommandServer.cpp` — zero
+module changes). Everything the DB can answer belongs to
+`services/db-search/` (service 2) and is **refused here** with a
+`route_hint` — the routing rule is structural, not a convention.
+
+**The old console-credential path is end-of-life** (decision 2026-11-09,
+`docs/services-roadmap.md`): no console credentials anywhere, no
+`executeCommand` envelope, no credential side-file. The command server is
+the only real-time backend; no in-core command bus will be built.
+
+## ⚠ Security
+
+The module's command server has **no authentication and binds 0.0.0.0**.
+This service must talk to **127.0.0.1:8888 only** (`RTT_PBHOST` — do not
+point it at anything else), and the operator **must firewall port 8888
+from the outside** (e.g. `sudo ufw deny 8888/tcp` or an equivalent
+firewall rule on the host's external interface).
 
 ## Stable interface — `rtt-engine/1`
 
@@ -14,60 +29,54 @@ local-only). One JSON request per line → one JSON response per line.
 ```json
 // request
 {"op": "pinfo", "name": "Vivi"}
-// response envelope — identical keys for every op and every backend
-{"interface": "rtt-engine/1", "ok": true, "op": "pinfo", "backend": "soap",
- "queried_at": "2026-11-08T23:11:04Z", "latency_ms": 41,
- "result": {"name": "Vivi", "online": true, "map": 1, "zone": "Dun Morogh",
-            "position": [-8925.06, 133.77, 83.33], "detail": "..."},
+// response envelope — identical keys for every op
+{"interface": "rtt-engine/1", "ok": true, "op": "pinfo", "backend": "pbcmd",
+ "queried_at": "2026-11-09T06:01:06Z", "latency_ms": 12,
+ "result": {"name": "Vivi", "online": true, "guid": 9, "map": 1,
+            "position": [-8925.06, 133.77, 83.33], "zone": "Dun Morogh",
+            "reply": "Vivi position (live): map 1 at ... in Dun Morogh"},
  "error": null}
 ```
 
 `error` is `null` on success, else `{"code", "message", "route_hint"?}`.
 Codes: `unknown_op`, `wrong_service`, `bad_params`, `backend_unavailable`,
-`backend_error`, `refused_console`.
+`backend_error`.
 
 ### Op catalog (tick-time-sensitive only)
 
 | op | params | answers | why it routes HERE (not db-search) |
 |---|---|---|---|
 | `catalog` | — | this list + the refused set | — |
-| `ping` | — | backend liveness + latency | health of the live path |
-| `server_info` | — | online players, uptime, revision | changes every tick |
-| `pinfo` | `name` | live online/map/zone/position of a toon | the DB only has the LAST LOGOUT position; `online` resets at worldserver boot (assumption A5) |
-| `console` | `command` | allowlisted console passthrough | escape hatch for tick-sensitive console verbs |
+| `ping` | — | command-server liveness + latency | health of the live path |
+| `pinfo` | `name` | LIVE position of an ONLINE bot (map/zone/xyz) | the DB only has the LAST LOGOUT position; `online` resets at worldserver boot (assumption A5) |
 
-**Refused** (→ `route_hint: "db-search"`): `location-static`, `quest`,
-`money`, `skills`, `bags`, `played`, `raid`, `census` — the DB-answerable
-names, mirroring director.py's `DB_QUERIES` catalog. Unknown ops get the same
-treatment. Never whisper-probe or console-probe for something the DB knows.
+**Refused:**
 
-`console` is prefix-gated by `RTT_CONSOLE_ALLOW` (default
-`.pinfo .server info .group list .group revive` — the Console::Yes read verbs
-we already use). Widen it only with a tracker note in
-`docs/services-roadmap.md`.
+- DB-answerable names (`location-static`, `quest`, `money`, `skills`,
+  `bags`, `played`, `raid`, `census`) → `route_hint: "db-search"`.
+- `kick` → `route_hint: "chat-tunnel"` — `.playerbots bot remove` covers
+  registered bots (chat-tunnel owns command sends); force-kicking a non-bot
+  plain session is an **accepted gap** (DB logout flush covers offline
+  truth).
 
-## The backend seam
+Unknown ops get the same `db-search` hint. Never live-probe for something
+the DB already knows.
 
-Every op funnels through one seam:
+### Offline fallback
 
-```python
-class Backend:
-    def execute(self, command, timeout) -> (ok, text)
-    def health(self)                       -> (ok, detail)
-```
+The command server answers **online bots only**. An offline bot, a
+non-bot toon, or a name with no GUID resolves to
+`{"online": false, "caveat": "... offline truth is db-search"}` — never an
+error, and never a guess: db-search owns the offline truth (logout flushes
+the final position to `characters`).
 
-- **`soap`** (default) — wraps the EXISTING SOAP path verbatim: same envelope,
-  same `~/.soap-director` 3-line conf, same Basic-auth shape as
-  `director.py soap_command` / `lib/botcmd/common.sh _soap_post`. Nothing
-  else in the stack should touch SOAP after this — call rtt-engine instead.
-- **`cmdbus`** — stub for the future **in-core command bus**. Same signature;
-  answers `backend_unavailable: not wired yet`. When the core endpoint lands,
-  only this class changes — the interface, the op catalog and every caller
-  stay untouched.
-- **`mock`** — scripted fixture backend (`fixtures/mock-responses.json`) so
-  the harness runs without a worldserver.
+## Backend: pbcmd
 
-Select with `RTT_BACKEND=soap|cmdbus|mock`.
+`PbCmdBackend` resolves **name → GUID** through the read-only DB identity
+(`RTT_MYCNF`, default `~/.my.cnf-director`; cached `RTT_GUID_TTL` seconds,
+default 300), then sends `<verb>,<guid>\n` to the command server and reads
+the reply line(s). Read-only verbs only (`position` today; `state`/`hp`
+are available the same way if a caller ever needs them).
 
 ## Run / install
 
@@ -77,9 +86,9 @@ python3 services/rtt-engine/rtt_engine.py query '{"op":"ping"}'   # client
 bash   services/rtt-engine/prove.sh                        # proof harness
 ```
 
-Env knobs: `RTT_SOCK`, `RTT_BACKEND`, `RTT_SOAPCNF` (default
-`~/.soap-director`), `RTT_TIMEOUT`, `RTT_CONSOLE_ALLOW`,
-`RTT_MOCK_FIXTURE`.
+Env knobs: `RTT_SOCK`, `RTT_PBHOST` (127.0.0.1 — keep it that way),
+`RTT_PBPORT` (8888), `RTT_TIMEOUT`, `RTT_MYCNF`, `RTT_GUID_TTL`,
+`RTT_GUID_SOURCE` (`mysql` | `fixture`), `RTT_GUID_FIXTURE`.
 
 systemd (same pattern as `leo/`):
 
@@ -92,9 +101,10 @@ systemctl --user daemon-reload && systemctl --user enable --now rtt-engine
 
 ## Proof
 
-`prove.sh` (no worldserver needed): mock-backend battery over the real
-socket+client — envelope shape, catalog, tick-sensitive reads (`server_info`,
-`pinfo` online/offline), console allowlist refusal (`.kick`), routing-rule
-refusals (`raid`/`money` → `db-search`), bad params — then the **swap seam**:
-`cmdbus` stub and unconfigured `soap` answer through the SAME envelope keys,
-proving the backend swaps without touching the interface.
+`prove.sh` (no worldserver, no DB): a mock of the 8888 command server
+(`fixtures/mock-cmdserver.py`, scripted replies) plus the REAL pbcmd
+backend with fixture GUID lookups — envelope key-for-key unchanged from
+`rtt-engine/1`, live position reads, offline/invalid-guid/no-GUID
+fallback to db-search, `kick` → chat-tunnel with the accepted-gap message,
+routing refusals, bad params, backend-down envelope, and the GUID-lookup
+cache (second lookup served from cache; a fresh resolver sees the change).
