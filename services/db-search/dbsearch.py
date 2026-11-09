@@ -306,7 +306,6 @@ def serve():
             os.unlink(SOCKET_PATH)
         class UnixServer(socketserver.ThreadingUnixStreamServer):
             daemon_threads = True
-            adapter = adapter
         srv = UnixServer(SOCKET_PATH, Handler)
         os.chmod(SOCKET_PATH, 0o600)
         where = SOCKET_PATH
