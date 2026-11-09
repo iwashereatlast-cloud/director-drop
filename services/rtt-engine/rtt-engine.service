@@ -1,0 +1,21 @@
+# rtt-engine - systemctl --user unit (same install pattern as leo/).
+# Install once:
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf ~/downloads/director-drop/services/rtt-engine/rtt-engine.service \
+#       ~/.config/systemd/user/rtt-engine.service
+#   systemctl --user daemon-reload && systemctl --user enable --now rtt-engine
+#
+# Knobs (environment or ~/.config/systemd/user/rtt-engine.service.d/):
+#   RTT_SOCK=/tmp/rtt-engine.sock   RTT_BACKEND=soap|cmdbus|mock
+#   RTT_SOAPCNF=~/.soap-director    RTT_CONSOLE_ALLOW=".pinfo .server info ..."
+[Unit]
+Description=rtt-engine: real-time/non-polled query+command service (SOAP-backed)
+After=network-online.target
+
+[Service]
+ExecStart=/bin/bash -c 'exec python3 -u %h/downloads/director-drop/services/rtt-engine/rtt_engine.py serve'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
