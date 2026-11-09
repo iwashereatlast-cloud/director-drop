@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""chat-tunnel proof harness - replay/fixture proof, no live worldserver.
+
+Starts the real service against a fixture log + FIFO in a temp dir and drives
+it over its local-only JSON interface. Scenarios:
+
+  1 basic        - one command, one reply: get_reply binds the right cid
+  2 interleaved  - two commands to two bots, replies out of order: each reply
+                   binds to ITS bot's command, not "the next line seen"
+  3 garbled      - every line of fixtures/replay-corrupt.log.txt is ignored;
+                   the following good reply still binds to the pending cid
+  4 late         - reply lands after the window: command times out, the late
+                   reply is stored unmatched (no false binding)
+  5 ordered      - two commands to the SAME bot: each reply binds to its own
+                   command, oldest-pending first
+  6 retention    - old events are purged on the retention sweep (DB bounded)
+
+Run:  python3 services/chat-tunnel/proof.py   (exit 0 = all scenarios PASS)
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SERVICE = os.path.join(HERE, "chat_tunnel.py")
+FIXTURE = os.path.join(HERE, "fixtures", "replay-corrupt.log.txt")
+
+WINDOW = 3.0          # seconds; small so the late-reply scenario runs fast
+RETENTION = 30.0      # main run; the retention scenario spins up its own
+                      # short-retention instance (a tiny retention here would
+                      # purge events mid-scenario and fake a "late" failure)
+PURGE_EVERY = 1.0
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+class Tunnel:
+    def __init__(self, tmp, retention=RETENTION):
+        self.log = os.path.join(tmp, "leo.log")
+        self.fifo = os.path.join(tmp, "leo.in")
+        self.db = os.path.join(tmp, "tunnel.db")
+        os.mkfifo(self.fifo)
+        open(self.log, "w").close()
+        self.port = free_port()
+        env = dict(os.environ,
+                   CHAT_TUNNEL_LOG=self.log,
+                   CHAT_TUNNEL_FIFO=self.fifo,
+                   CHAT_TUNNEL_DB=self.db,
+                   CHAT_TUNNEL_PORT=str(self.port),
+                   CHAT_TUNNEL_WINDOW=str(WINDOW),
+                   CHAT_TUNNEL_RETENTION=str(retention),
+                   CHAT_TUNNEL_PURGE_EVERY=str(PURGE_EVERY))
+        self.proc = subprocess.Popen([sys.executable, SERVICE], env=env,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True)
+        self._drain = threading.Thread(target=self._fifo_reader, daemon=True)
+        self._drain.start()
+        self._wait_health()
+
+    def _fifo_reader(self):
+        fd = os.open(self.fifo, os.O_RDONLY)
+        while True:
+            if not os.read(fd, 4096):
+                time.sleep(0.1)
+
+    def _wait_health(self, timeout=10):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                self.call("get_recent_events", {"limit": 1})
+                return
+            except OSError:
+                time.sleep(0.1)
+        raise RuntimeError("service did not come up: %s"
+                           % self.proc.stdout.read())
+
+    def call(self, tool, args=None):
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/" % self.port,
+            data=json.dumps({"tool": tool, "args": args or {}}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read().decode())
+
+    def send(self, bot, cmd):
+        r = self.call("send_command", {"bot": bot, "cmd": cmd})
+        assert r["ok"], r
+        return r["result"]["correlation_id"]
+
+    def append_log(self, line):
+        with open(self.log, "a") as f:
+            f.write(line + "\n")
+
+    def reply(self, bot, text):
+        self.append_log("[%s] [whisper]: %s" % (bot, text))
+
+    def sync(self, text, timeout=5):
+        """Wait until the tailer has ingested a reply line with this text.
+        Scenarios MUST sync before ending, or a not-yet-ingested line leaks
+        into the next scenario and can legitimately steal its match (the
+        service matches sender+window; it cannot know the line is 'old')."""
+        self.wait_for(
+            lambda: any(e["command"] == text for e in
+                       self.call("get_recent_events", {"limit": 50})
+                       ["result"]["events"]),
+            timeout, "ingestion of %r" % text)
+
+    def get_reply(self, cid):
+        r = self.call("get_reply", {"correlation_id": cid})
+        assert r["ok"], r
+        return r["result"]
+
+    def wait_for(self, fn, timeout, what):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.1)
+        raise AssertionError("timeout waiting for %s" % what)
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+RESULTS = []
+
+
+def scenario(name):
+    def deco(fn):
+        def run(t):
+            fn(t)
+            RESULTS.append((name, True, ""))
+        return run
+    return deco
+
+
+def check(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+
+
+def s_basic(t):
+    cid = t.send("Ayla", "nc ?")
+    t.reply("Ayla", "Strategies: -new rpg,+grind")
+    r = t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "reply to bind")
+    check(r["matched_correlation_id"] == cid, "reply bound to wrong command")
+    check(r["sender"] == "Ayla" and r["command"].startswith("Strategies:"),
+          "reply content wrong: %r" % r)
+    check(t.get_reply(cid)["sent"]["status"] == "replied", "sent not replied")
+    # a later unrelated line must NOT rebind anything
+    t.reply("Ayla", "late chatter")
+    t.sync("late chatter")
+    check(t.get_reply(cid)["reply"]["id"] == r["id"],
+          "later line stole the binding")
+
+
+def s_interleaved(t):
+    cid_ayla = t.send("Ayla", "nc ?")
+    cid_locke = t.send("Locke", "co ?")
+    t.reply("Locke", "Combat: -flee" )        # out of order
+    t.reply("Ayla", "Strategies: -new rpg")
+    r1 = t.wait_for(lambda: t.get_reply(cid_locke)["reply"], 5, "locke reply")
+    r2 = t.wait_for(lambda: t.get_reply(cid_ayla)["reply"], 5, "ayla reply")
+    check(r1["matched_correlation_id"] == cid_locke,
+          "Locke reply bound to wrong command")
+    check(r2["matched_correlation_id"] == cid_ayla,
+          "Ayla reply bound to wrong command")
+    check(r1["id"] < r2["id"], "reply order not preserved")
+
+
+def s_garbled(t):
+    cid = t.send("Gau", "nc ?")
+    with open(FIXTURE) as f:
+        for line in f.read().splitlines():
+            if line.strip() and not line.startswith("#"):
+                t.append_log(line)
+    time.sleep(0.4)
+    check(t.get_reply(cid)["reply"] is None,
+          "a garbled line consumed the pending match")
+    t.reply("Gau", "Strategies: -follow")
+    r = t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "reply after garble")
+    check(r["matched_correlation_id"] == cid,
+          "reply after garble bound to wrong command")
+
+
+def s_late(t):
+    cid = t.send("Ayla", "nc ?")
+    t.reply("Locke", "someone else replies first")   # different bot: no match
+    t.sync("someone else replies first")
+    time.sleep(WINDOW + 1.0)                          # window lapses
+    t.wait_for(lambda: t.get_reply(cid)["sent"]["status"] == "timeout",
+               WINDOW + 5, "timeout state")
+    t.reply("Ayla", "very late reply")                # now too late to bind
+    t.sync("very late reply")
+    got = t.get_reply(cid)
+    check(got["reply"] is None, "late reply falsely bound to a timed-out command")
+    ev = t.call("get_recent_events", {"limit": 50, "direction": "reply"})
+    late = [e for e in ev["result"]["events"] if e["command"] == "very late reply"]
+    check(late and late[0]["matched_correlation_id"] is None,
+          "late reply not stored as unmatched")
+    check(late[0]["correlation_id"] != cid, "late reply stole the command's cid")
+
+
+def s_ordered(t):
+    cid1 = t.send("Gau", "who")
+    cid2 = t.send("Gau", "wts")
+    t.reply("Gau", "answer to who")
+    t.reply("Gau", "answer to wts")
+    t.sync("answer to wts")
+    r1 = t.wait_for(lambda: t.get_reply(cid1)["reply"], 5, "first reply")
+    r2 = t.wait_for(lambda: t.get_reply(cid2)["reply"], 5, "second reply")
+    check(r1["matched_correlation_id"] == cid1, "reply 1 bound to wrong command")
+    check(r2["matched_correlation_id"] == cid2, "reply 2 bound to wrong command")
+    check(r1["command"] == "answer to who" and r2["command"] == "answer to wts",
+          "replies bound out of order (oldest-pending-first violated)")
+
+
+def s_retention(t):
+    # a dedicated short-retention instance: old events must vanish on sweep
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="chat-tunnel-proof-ret-")
+    r = Tunnel(tmp, retention=2.0)
+    try:
+        cid = r.send("Ayla", "nc ?")
+        r.reply("Ayla", "to be purged")
+        r.wait_for(lambda: r.get_reply(cid)["reply"], 5, "reply stored")
+        r.wait_for(lambda: r.call("get_recent_events", {"limit": 1})
+                   ["result"]["events"] == [], 2.0 + PURGE_EVERY + 3,
+                   "retention purge")
+        ev = r.call("get_recent_events", {"limit": 100})
+        check(ev["result"]["events"] == [], "events survived the retention purge")
+    finally:
+        r.stop()
+
+
+SCENARIOS = [
+    ("basic - reply binds to its own correlation_id", s_basic),
+    ("interleaved - per-bot binding, out-of-order replies", s_interleaved),
+    ("garbled - junk lines never consume a match", s_garbled),
+    ("late - past-window reply never falsely binds", s_late),
+    ("ordered - same-bot replies bind oldest-pending-first", s_ordered),
+    ("retention - purge keeps the DB bounded", s_retention),
+]
+
+
+def main():
+    tmp = tempfile.mkdtemp(prefix="chat-tunnel-proof-")
+    t = Tunnel(tmp)
+    failed = 0
+    try:
+        for name, fn in SCENARIOS:
+            try:
+                fn(t)
+                print("PASS  %s" % name)
+            except Exception as e:
+                failed += 1
+                print("FAIL  %s: %s" % (name, e))
+    finally:
+        t.stop()
+    print("%d/%d scenarios passed" % (len(SCENARIOS) - failed, len(SCENARIOS)))
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
