@@ -51,6 +51,26 @@ Contracts live here so a change is visible to every conversation:
   every backend (`soap` now, `cmdbus` later) — callers must not depend on
   `backend` beyond display.
 
+## SOAP end-of-life decision (2026-11-09)
+
+SOAP is removed completely — even a single command riding on it is one more
+layer to break. Consequences, settled at tracker level:
+
+- rtt-engine's real-time backend is the stock mod-playerbots command server
+  (`Playerbots.CommandServerPort`, default 8888, read-only line protocol
+  `<verb>,<guid>\n`, answers live position/state/HP for ONLINE bots only).
+  No in-core command bus will be built.
+- `server_info` and generic `console` passthrough are deleted (nothing in
+  the stack consumes them).
+- `kick` is refused with `route_hint: "chat-tunnel"` — `.playerbots bot
+  remove` covers registered bots; force-kicking a non-bot plain session is
+  an accepted gap (DB logout flush covers offline truth).
+- Live position of an online bot is a nice-to-have query, never load-bearing;
+  offline truth is db-search (logout flushes final position to `characters`).
+- Legacy SOAP paths outside rtt-engine (director.py soap_command, the
+  location query's SOAP layer, lib/botcmd common.sh/system.sh/roster.sh,
+  `botcmd system arm/soap/cmd`) are deleted in the same removal pass.
+
 ## Order & gates
 
 1. chat-tunnel ships with a proof that a reply is matched to the right
