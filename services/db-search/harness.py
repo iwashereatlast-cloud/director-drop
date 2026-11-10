@@ -176,6 +176,23 @@ def main():
         check("guild: Cecil is Guild Master", g["Cecil"][1] == "Guild Master", g.get("Cecil"))
 
         print("== 2. hard allowlist & param validation ==")
+        r = handle(adapter, {"tool": "get_character", "params": {"toon": "Zem"}})
+        check("scope: outsider toon refused (not on family, not in guild)",
+              r.get("ok") is False and r.get("code") == "out_of_scope", r)
+        r = handle(adapter, {"tool": "get_guild_members", "params": {"guild": "Someother Guild"}})
+        check("scope: unwatched guild refused", r.get("code") == "out_of_scope", r)
+        r = handle(adapter, {"tool": "get_wallets", "params": {"account": "someother"}})
+        check("scope: off-family account prefix refused", r.get("code") == "out_of_scope", r)
+        r = handle(adapter, {"tool": "get_wallets", "params": {"account": "i_was"}})
+        check("scope: in-family prefix allowed", r.get("ok") is True, r)
+        r = handle(adapter, {"tool": "get_character", "params": {"toon": "Leo"}})
+        check("scope: Leo allowed via guild membership",
+              r.get("ok") is True and r["row_count"] == 1, r)
+        dbsearch.SCOPE = False
+        r = handle(adapter, {"tool": "get_character", "params": {"toon": "Zem"}})
+        check("scope: DBSEARCH_SCOPE=0 disables the gate",
+              r.get("ok") is True and r["row_count"] == 1, r)
+        dbsearch.SCOPE = True
         r = handle(adapter, {"tool": "drop table characters"})
         check("unknown tool refused", r.get("ok") is False and r.get("code") == "unknown_tool", r)
         check("unknown-tool error names the redirects",
@@ -204,9 +221,12 @@ def main():
               and r.get("redirect_to") == "rtt-engine", r)
         r = handle(adapter, {"tool": "get_current_position", "id": "z9"})
         check("redirect: correlation id echoed", r.get("id") == "z9", r)
-        r = handle(adapter, {"tool": "get_character", "params": {"toon": "Nope"}, "id": "abc"})
+        r = handle(adapter, {"tool": "get_equipped_gear", "params": {"toon": "Cecil"}, "id": "abc"})
         check("empty result still ok + correlation id echoed",
               r.get("ok") is True and r.get("id") == "abc" and r["row_count"] == 0, r)
+        r = handle(adapter, {"tool": "get_character", "params": {"toon": "Nope"}})
+        check("scope: nonexistent toon reads as out_of_scope (no existence leak)",
+              r.get("ok") is False and r.get("code") == "out_of_scope", r)
 
         print("== 3. read-only by construction ==")
         try:

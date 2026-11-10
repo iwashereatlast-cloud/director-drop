@@ -63,6 +63,7 @@ INSERT INTO acore_characters.guild VALUES (7, 'Special FXc');
 CREATE TABLE acore_characters.guild_member (
   guildid INTEGER, guid INTEGER, rank INTEGER);
 INSERT INTO acore_characters.guild_member VALUES
+  (7, 10, 3),   -- Leo, Leveling Master (live: in the watched guild)
   (7, 11, 0),   -- Cecil, guild master rank
   (7, 12, 1),
   (7, 23, 2);
@@ -70,7 +71,7 @@ INSERT INTO acore_characters.guild_member VALUES
 CREATE TABLE acore_characters.`guild_rank` (
   guildid INTEGER, rid INTEGER, rname TEXT);
 INSERT INTO acore_characters.`guild_rank` VALUES
-  (7, 0, 'Guild Master'), (7, 1, 'Officer'), (7, 2, 'Member');
+  (7, 0, 'Guild Master'), (7, 1, 'Officer'), (7, 2, 'Member'), (7, 3, 'Leveling Master');
 
 CREATE TABLE acore_characters.character_queststatus (
   guid INTEGER, quest INTEGER, status INTEGER, explored INTEGER);
@@ -155,3 +156,9 @@ INSERT INTO acore_characters.character_skills VALUES
   (20, 136, 130, 130),  -- staves
   (20, 413, 1, 1),      -- cloth
   (20, 414, 1, 1);      -- leather
+
+-- scope-gate outsiders: an account outside the i_was_here% family and a
+-- toon on it that is NOT in the watched guild.
+INSERT INTO acore_auth.account VALUES (9, 'someother', 0, -1);
+INSERT INTO acore_characters.characters VALUES
+  (30, 9, 'Zem', 2, 3, 20, 0, 12, 100, 0, 0, 1731000000, 500, 1);

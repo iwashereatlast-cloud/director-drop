@@ -16,6 +16,23 @@ and a per-query staleness `caveat` (the roadmap's staleness contract).
 | per-query timeout | each tool declares its own; the mysql subprocess is killed at the deadline → `{"ok": false, "code": "timeout"}` |
 | local-only | AF_UNIX socket `/tmp/db-search.sock` (mode `0600`); TCP mode refuses to bind anything but 127.0.0.1/::1 |
 
+## Subject scope gate
+
+The allowlist bounds HOW the LLM can call; the scope gate bounds WHO the
+queries can be about. A toon is queryable only if it is on the watched
+account family OR a member of the watched guild (the census watch rule —
+Leo and G1 qualify via guild membership, the bots via accounts). Guild
+queries accept only the watched guild; account-prefix params must be within
+the family (either direction: `i_was`, `i_was_here`, `i_was_here4th` all
+pass; `someother` is refused). Out-of-scope calls get
+`{"ok": false, "code": "out_of_scope"}` — and a nonexistent toon reads the
+same way, so the gate does not leak whether a name exists.
+
+Env: `DBSEARCH_SCOPE` (1/0, default on), `DBSEARCH_WATCH_GUILD`
+(default `Special FXc`), `DBSEARCH_ACCOUNT_PREFIX` (default `i_was_here`),
+`DBSEARCH_SHELL_ACCOUNT` (default `i_was_cmd`). Set `DBSEARCH_SCOPE=0` for
+one-off admin lookups.
+
 ## Interface
 
 ```
