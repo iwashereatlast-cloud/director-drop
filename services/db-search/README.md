@@ -66,6 +66,9 @@ arrays (same wire shape the mysql CLI produces); column order per tool below.
 | `get_mount_items` | `toon` | mount ITEMS carried (bag/slot, name, quality, required level) | mounts LEARNED as spells (names are DBC-only, not in the world DB); riding skill → `get_skills` (id 148) | inventory flushes with the save; class 15/subclass 5 mount mapping is the 3.3.5 standard, not yet live-verified |
 | `get_talents` | `toon` | learned talents as (spell id, specMask) rows — talent count + spec spread | talent NAMES/trees — DBC-only on this build (no `acore_world.talent`, confirmed live); named lists via the bot's live `talents` whisper through chat-tunnel | talents flush with the character save; rows are raw spell ids |
 | `get_wallets` | `account` (bare prefix) | money (copper) per toon, richest first | COD mail; guild bank; pending sales | money flushes with the character save |
+| `get_game_tele` | `name` (partial, letters/digits/spaces) | the core's named teleport locations (game_tele): exact name, map, coordinates - the ONLY names legal in a GM `.tele name` command | arbitrary coordinates; whether a spot is safe for a given bot | static core data, effectively never stale; 0 rows = the name does not exist |
+| `get_mat_spawns` | `mat` (partial gameobject name, e.g. Peacebloom / Copper Vein) | which named teleport locations have the most spawns of a farmable mat (herb/vein, GO type 3) within 1000 yards, ranked - the answer arrives as a teleportable destination name | live node availability (this is the spawn table, not what's up right now); mob-dropped mats; exact density at radius edges | static world data; nodes are dynamic shared spawns - the table is the potential, not the current world |
+
 ### Redirects — names that deliberately do NOT go here
 
 Reaching for one of these does not return `unknown_tool`; it answers
@@ -114,7 +117,7 @@ Env: `DBSEARCH_ADAPTER` (mysql|sqlite), `DBSEARCH_SOCKET`, `DBSEARCH_ADDR`
 ## Proof harness (no worldserver needed)
 
 ```bash
-python3 harness.py     # 30 checks: 30 pass, 0 fail
+python3 harness.py     # 85 checks: 85 pass, 0 fail
 ```
 
 Proves: every tool returns the expected fixture rows; every envelope carries

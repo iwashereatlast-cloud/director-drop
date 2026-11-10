@@ -399,6 +399,38 @@ CATALOG = {
     "fill": lambda p: {"account": _p("get_wallets", p, "account")},
   },
 
+  "get_game_tele": {
+    "sql": ("SELECT name, map, position_x, position_y, position_z "
+            "FROM acore_world.game_tele "
+            "WHERE name LIKE '%{name}%' ORDER BY name LIMIT 20"),
+    "params": {"name": "required - (partial) teleport location name, letters/digits/spaces"},
+    "timeout": 10,
+    "can": "the core's named teleport locations (game_tele): exact name, map, coordinates - the ONLY names legal in a GM '.tele name' command",
+    "cannot": "arbitrary coordinates (no such table); whether a spot is safe/faction-appropriate for a given bot",
+    "caveat": "static core data - effectively never stale. A 0-row answer means the location name does not exist; never guess a tele name the LLM has not seen in these rows.",
+    "fill": lambda p: {"name": _p("get_game_tele", p, "name", pattern=GUILD_RE)},
+  },
+
+  "get_mat_spawns": {
+    # herbs and veins are GAMEOBJECT_TYPE_CHEST (type 3) spawns; ranking =
+    # spawn count within 1000 yards of each named teleport location, so the
+    # answer arrives as a teleportable destination, not raw coordinates
+    "sql": ("SELECT t.name, t.map, COUNT(*) AS spawns "
+            "FROM acore_world.gameobject go "
+            "JOIN acore_world.gameobject_template gt ON gt.entry = go.id "
+            "JOIN acore_world.game_tele t ON t.map = go.map "
+            "WHERE gt.type = 3 AND gt.name LIKE '%{mat}%' "
+            "AND (go.position_x - t.position_x) * (go.position_x - t.position_x) "
+            "+ (go.position_y - t.position_y) * (go.position_y - t.position_y) < 1000000 "
+            "GROUP BY t.name, t.map ORDER BY spawns DESC LIMIT 10"),
+    "params": {"mat": "required - (partial) gameobject name, e.g. Peacebloom or Copper Vein"},
+    "timeout": 10,
+    "can": "which named teleport locations have the most spawns of a farmable mat (herb/vein) within 1000 yards, ranked - answers 'where do I send a bot to farm peacebloom' with a destination name usable in .tele name",
+    "cannot": "live node availability (nodes spawn/despawn on a timer - this is the spawn table, not what is up right now); skinning/mob drops (not gameobjects); exact in-range density at radius edges",
+    "caveat": "static world data (effectively never stale), but nodes are shared dynamic spawns: the table is the potential, not the current world. The 1000-yard radius around each teleport point is a density proxy, not a guarantee.",
+    "fill": lambda p: {"mat": _p("get_mat_spawns", p, "mat", pattern=GUILD_RE)},
+  },
+
   "get_guild_members": {
     "sql": ("SELECT c.name, g_r.rname AS `rank`, c.level, c.class, c.online "
             "FROM acore_characters.guild g "

@@ -162,3 +162,37 @@ INSERT INTO acore_characters.character_skills VALUES
 INSERT INTO acore_auth.account VALUES (9, 'someother', 0, -1);
 INSERT INTO acore_characters.characters VALUES
   (30, 9, 'Zem', 2, 3, 20, 0, 12, 100, 0, 0, 1731000000, 500, 1);
+
+-- ---------------------------------------------------------------------------
+-- game_tele + gameobject spawns (get_game_tele / get_mat_spawns tools).
+-- A small slice of the core's teleport table (the harbormaster routes) and
+-- herb/vein spawn rows clustered near their classic zones.
+CREATE TABLE acore_world.game_tele (
+  id INTEGER PRIMARY KEY, name TEXT, map INTEGER,
+  position_x REAL, position_y REAL, position_z REAL, orientation REAL);
+INSERT INTO acore_world.game_tele VALUES
+  (1, 'Goldshire',      0, -9446.0, 64.0, 56.0, 0),
+  (2, 'Auberdine',      1, 6440.0, 126.0, 6.0, 0),
+  (3, 'Menethil Harbor',0, -3760.0, -868.0, 10.0, 0),
+  (4, 'Theramore',      1, -4010.0, -4500.0, 10.0, 0),
+  (5, 'Booty Bay',      0, -14420.0, 480.0, 26.0, 0),
+  (6, 'Ratchet',        1, -870.0, -3700.0, 10.0, 0),
+  (7, 'Kharanos',       0, -5690.0, -510.0, 400.0, 0);
+
+-- herbs/veins are GAMEOBJECT_TYPE_CHEST (type 3)
+CREATE TABLE acore_world.gameobject_template (
+  entry INTEGER PRIMARY KEY, name TEXT, type INTEGER);
+INSERT INTO acore_world.gameobject_template VALUES
+  (1618, 'Peacebloom', 3), (1619, 'Peacebloom', 3),
+  (1731, 'Copper Vein', 3);
+
+CREATE TABLE acore_world.gameobject (
+  guid INTEGER PRIMARY KEY, id INTEGER, map INTEGER,
+  position_x REAL, position_y REAL, position_z REAL);
+-- 3 Peacebloom near Goldshire (Elwynn), 1 near Kharanos (Dun Morogh)
+INSERT INTO acore_world.gameobject VALUES
+  (1, 1618, 0, -9400.0, 80.0, 56.0),
+  (2, 1618, 0, -9500.0, 40.0, 56.0),
+  (3, 1619, 0, -9450.0, 100.0, 56.0),
+  (4, 1618, 0, -5700.0, -480.0, 400.0),
+  (5, 1731, 0, -5650.0, -530.0, 400.0);

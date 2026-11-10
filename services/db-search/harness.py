@@ -305,6 +305,31 @@ def main():
         con.close()
         check("fixture unchanged after queries (no writes)", before == after)
 
+        print("== 4b. game_tele + mat spawn tools (harbormaster seam) ==")
+        r = handle(adapter, {"tool": "get_game_tele", "params": {"name": "Menethil"}})
+        check("tele envelope", envelope_ok(r, "get_game_tele"), json.dumps(r)[:200])
+        check("tele: partial name finds Menethil Harbor",
+              r.get("ok") and r["rows"] and r["rows"][0][0] == "Menethil Harbor", r)
+        r = handle(adapter, {"tool": "get_game_tele", "params": {"name": "Nowhereville"}})
+        check("tele: unknown name -> 0 rows, still ok",
+              r.get("ok") and r["row_count"] == 0, r)
+        r = handle(adapter, {"tool": "get_game_tele", "params": {"name": "x'; DROP TABLE game_tele; --"}})
+        check("tele: SQL metacharacters refused at the param gate",
+              r.get("ok") is False and r.get("code") == "bad_param", r)
+        r = handle(adapter, {"tool": "get_mat_spawns", "params": {"mat": "Peacebloom"}})
+        check("mat spawns envelope", envelope_ok(r, "get_mat_spawns"), json.dumps(r)[:200])
+        check("mat: Goldshire ranks first for Peacebloom (3 spawns in radius)",
+              r.get("ok") and r["rows"] and r["rows"][0][0] == "Goldshire"
+              and r["rows"][0][2] == "3", r)
+        check("mat: Kharanos also has Peacebloom (1 spawn), ranked second",
+              any(row[0] == "Kharanos" and row[2] == "1" for row in r["rows"]), r)
+        r = handle(adapter, {"tool": "get_mat_spawns", "params": {"mat": "Copper Vein"}})
+        check("mat: Copper Vein found near Kharanos",
+              r.get("ok") and any(row[0] == "Kharanos" for row in r["rows"]), r)
+        r = handle(adapter, {"tool": "get_mat_spawns", "params": {"mat": "Thorium"}})
+        check("mat: unknown mat -> 0 rows, still ok",
+              r.get("ok") and r["row_count"] == 0, r)
+
         print("== 5. per-query timeout fires ==")
         # the sqlite fixture adapter DETECTS timeouts post-hoc (deadline checked
         # after the query completes - the real mysql adapter ENFORCES by killing
