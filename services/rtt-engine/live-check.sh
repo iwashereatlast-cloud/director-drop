@@ -52,18 +52,15 @@ fi
 # is_watched <name>: the SAME watch-list gate the service enforces (guild
 # 'Special FXc' + bot accounts) - live-check refuses to query off-roster
 # names even when they are handed to it.
+# LESSON (live 2026-11-10, twice): (a) a literal quote in a case pattern
+# silently re-parses the rest of the file; (b) bash does NOT concatenate
+# adjacent quoted strings across newlines - a multi-line -e argument needs
+# a backslash on EVERY line or the SQL silently truncates and mysql dumps
+# the whole table. Both passed bash -n. So: names validate via grep, and
+# every SQL here is ONE line.
 is_watched() {
-  case "$1" in
-    *[!A-Za-z0-9_\'-]*) return 1 ;;
-  esac
-  mysql --defaults-file="$MYCNF" -N -B -e \
-    "SELECT c.name FROM acore_characters.characters c "
-    "JOIN acore_auth.account a ON a.id=c.account "
-    "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-    "WHERE c.name='$1' AND (a.username LIKE 'i_was_here%' "
-    "OR gm.guildid IN (SELECT guildid FROM acore_characters.guild "
-    "WHERE name='Special FXc'))" \
-    2>/dev/null | grep -q .
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]{1,12}$' || return 1
+  mysql --defaults-file="$MYCNF" -N -B -e "SELECT c.name FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid WHERE c.name='$1' AND (a.username LIKE 'i_was_here%' OR gm.guildid IN (SELECT guildid FROM acore_characters.guild WHERE name='Special FXc'))" 2>/dev/null | grep -q .
 }
 if [ $# -gt 0 ]; then
   KEPT=""
@@ -77,13 +74,7 @@ if [ $# -gt 0 ]; then
   BOTS="${KEPT# }"
   [ -n "$BOTS" ] || { fail "none of the given names are on the watch list"; exit 1; }
 else
-  BOTS=$(mysql --defaults-file="$MYCNF" -N -B -e \
-    "SELECT c.name FROM acore_characters.characters c "
-    "JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-    "WHERE c.online=1 AND gm.guildid IN "
-    "(SELECT guildid FROM acore_characters.guild WHERE name='Special FXc') "
-    "ORDER BY c.name LIMIT 3" \
-    2>/dev/null | tr '\n' ' ')
+  BOTS=$(mysql --defaults-file="$MYCNF" -N -B -e "SELECT c.name FROM acore_characters.characters c JOIN acore_characters.guild_member gm ON gm.guid=c.guid WHERE c.online=1 AND gm.guildid IN (SELECT guildid FROM acore_characters.guild WHERE name='Special FXc') ORDER BY c.name LIMIT 3" 2>/dev/null | tr '\n' ' ')
   [ -n "$BOTS" ] || { fail "no online guild bots found (census empty "
     "- is the DB reachable via $MYCNF, and are guild bots online? "
     "or pass bot names as args)"; exit 1; }

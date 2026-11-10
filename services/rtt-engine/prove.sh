@@ -183,6 +183,44 @@ else
   fail "GUID cache: lookup was not cached (or fresh resolver stale)"
 fi
 
+# --- live-check.sh self-test: the watch-list gate + auto-pick SQL must reach
+# mysql IN ONE PIECE (live 2026-11-10: bash does not concatenate quoted
+# strings across newlines, so a multi-line -e argument silently truncated
+# the SQL and dumped the whole characters table; bash -n passed both times).
+STUB="$TMP/mysqlstub"; mkdir -p "$STUB"; rm -f "$STUB/calls.log"; export STUB
+cat >"$STUB/mysql" <<'STUBEOF'
+#!/usr/bin/env bash
+echo "MYSQLARGS: $*" >>"$STUB/calls.log"
+echo Cyan
+STUBEOF
+chmod +x "$STUB/mysql"
+sed -n '/^is_watched() {/,/^}/p' "$HERE/live-check.sh" >"$TMP/func.sh"
+if (
+  set -u; MYCNF="$STUB/my.cnf"
+  . "$TMP/func.sh"
+  export PATH="$STUB:$PATH"
+  is_watched "Cyan" && ! is_watched "Ed;ge" && ! is_watched "O'Brien" \
+    && ! is_watched ""
+) then
+  pass "live-check is_watched: valid name queried, junk/quote/empty refused"
+else
+  fail "live-check is_watched: validation or gate broken"
+fi
+if [ -s "$STUB/calls.log" ] \
+   && grep -q "JOIN acore_auth.account a ON a.id=c.account" "$STUB/calls.log" \
+   && grep -q "WHERE c.name='Cyan'" "$STUB/calls.log" \
+   && grep -q "Special FXc" "$STUB/calls.log"; then
+  pass "live-check is_watched: full SQL reached mysql in one piece"
+else
+  fail "live-check is_watched: SQL truncated (multi-line string bug)"
+fi
+if grep -q 'mysql .*-e "SELECT.*LIMIT 3"' "$HERE/live-check.sh" \
+   && ! grep -Eq '^[[:space:]]+"(JOIN|WHERE|ORDER|LEFT|OR|\()' "$HERE/live-check.sh"; then
+  pass "live-check auto-pick: single-line SQL (no dangling string literals)"
+else
+  fail "live-check: dangling multi-line SQL string literal found"
+fi
+
 say
 if [ "$FAILS" -eq 0 ]; then
   say "ALL CHECKS PASSED"
