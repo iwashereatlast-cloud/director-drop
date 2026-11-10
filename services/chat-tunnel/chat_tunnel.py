@@ -406,13 +406,20 @@ def _verify_side(ev, direction):
         needle = "Player %s whisper %s: %s" % (MASTER, ev["target"], ev["command"])
     else:
         needle = "Player %s whisper %s: %s" % (ev["sender"], MASTER, ev["command"])
+    # two-pass: scan ALL rows for the exact line first; only if no exact
+    # match exists does a same-speaker row mean the text was garbled. (One
+    # live false positive: two probes to the same bot inside the window made
+    # the FIRST same-speaker row - the other probe's whisper - look like a
+    # garble. The exact match must win over any same-speaker neighbor.)
+    head = needle.split(":")[0]
+    same_speaker = None
     for _, s in rows:
         if s == needle:
             return {"verdict": "delivered", "db_line": s}
-        # same speakers, different text = garbled in transit
-        head = needle.split(":")[0]
-        if s.startswith(head + ":"):
-            return {"verdict": "garbled", "db_line": s, "expected": needle}
+        if same_speaker is None and s.startswith(head + ":"):
+            same_speaker = s
+    if same_speaker is not None:
+        return {"verdict": "garbled", "db_line": same_speaker, "expected": needle}
     return {"verdict": "not_found"}
 
 
