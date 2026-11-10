@@ -86,7 +86,11 @@ Contracts live here so a change is visible to every conversation:
   14 days every 10 min (tighten if needed). Still POLLED — a db-search
   catalog query with the staleness caveat, never a replacement for the
   tunnel's real-time feed. Encoding issue azerothcore#17519 did NOT
-  reproduce (clean UTF-8 in the live rows).
+  reproduce (clean UTF-8 in the live rows). Caveat (A21, live-proven): NOT
+  every mod-generated reply type passes the chat logger — `who` replies are
+  logged, the strategy-listing reply is not; consumers must treat the
+  transcript as partial for bot-originated traffic, never as proof a reply
+  did not happen.
 - **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
