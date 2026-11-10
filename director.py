@@ -31,7 +31,7 @@ Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
-import argparse, fcntl, json, os, random, re, socket, subprocess, sys, time, urllib.request
+import argparse, fcntl, json, os, random, re, socket, subprocess, sys, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -168,7 +168,7 @@ CAST_SPELLS = {"tailor": ("Mooncloth",),
 CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 
 # master-issued server commands (Leo runs them himself via the shell, not /w to a bot)
-MASTER_CMDS = ("bot add", "bot remove")
+MASTER_CMDS = ("bot add", "bot remove", "bot addaccount")
 
 # group-management server commands, same FIFO path but formatted '.group ...'
 # (cs_group.cpp). NOTE: '.group remove' is Console::No in AzerothCore, so it
@@ -994,6 +994,193 @@ def _is_bot_sender(name):
     return (a.startswith(bot_pfx) and not a.startswith(master_pfx)) or a.startswith(shell_pfx)
 
 
+# ---------------------------------------------------------------------------
+# Presence heartbeat (single-brain rule, docs/services-roadmap.md 2026-11-10):
+# the LLM is the ONLY decision-maker about game state. This thread decides
+# NOTHING - it gathers facts and, when something needs attention (state
+# change or a standing alarm like "wanted-online but Leo is down"), it hands
+# the facts to the LLM as a heartbeat turn. The LLM's orders flow through
+# the SAME validated pipeline as human orders (parse_orders -> execute);
+# service control goes through a strict allowlist. Every heartbeat and every
+# executed order lands in daemon.log + audit.log - one brain, visible.
+# ---------------------------------------------------------------------------
+
+WATCHDOG_CONF = os.environ.get("DIRECTOR_WATCHDOG_CONF",
+                               os.path.expanduser("~/.leo-watchdog.conf"))
+
+
+def _wd_conf():
+    cfg = {"ON_H": "8", "OFF_H": "22",
+           "GROUP": "Cecil Rydia Shadow Vivi Aeris Aerith",
+           "AUTORITUAL": "1", "AUTORITUAL_CLEAR": "1",
+           "RITUAL_ACCOUNTS": "I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH",
+           "RITUAL_BOTS": "Golbez"}
+    try:
+        with open(WATCHDOG_CONF) as f:
+            for ln in f:
+                ln = ln.split("#", 1)[0].strip()
+                if "=" in ln:
+                    k, v = ln.split("=", 1)
+                    if k.strip() in cfg:
+                        cfg[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def _svc_state():
+    r = subprocess.run(["systemctl", "--user", "is-active", "leo"],
+                        capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def _presence_facts(cfg):
+    """One read of the world: (leo_online, group_online, wanted, svc).
+    A DB hiccup reads as leo_online=1/wanted=1 - never alarm on a blind DB."""
+    try:
+        v = _mysql("SELECT online FROM acore_characters.characters WHERE name='%s'" % LEO)
+        leo = int(v) if v.strip() in ("0", "1") else 1
+    except Exception:
+        leo = 1
+    group_on = 0
+    for n in str(cfg["GROUP"]).split():
+        if not re.fullmatch(r"[A-Za-z]+", n):
+            continue
+        try:
+            c = _mysql("SELECT COUNT(*) FROM acore_characters.characters "
+                       "WHERE name='%s' AND online=1" % n)
+            group_on += int(c) if c.strip().isdigit() else 0
+        except Exception:
+            pass
+    hour = time.localtime().tm_hour
+    wanted = 1 if (int(cfg["ON_H"]) <= hour < int(cfg["OFF_H"])) or group_on else 0
+    return leo, group_on, wanted, _svc_state()
+
+
+def _hb_condition(facts, state):
+    """What (if anything) needs the LLM's attention this tick.
+    ("", False) = nothing; (text, True) = state change (fires immediately);
+    (text, False) = standing alarm (re-fires rate-limited)."""
+    leo, group_on, wanted, svc = facts
+    sig = (leo, svc, wanted)
+    if state.get("prev_sig") is None:
+        state["prev_sig"] = sig
+        state["off_streak"] = 0
+        return "", False
+    if sig != state["prev_sig"]:
+        state["prev_sig"] = sig
+        state["off_streak"] = 0
+        return ("state change (Leo online flag %d, leo service '%s', wanted %d)" % sig,
+                True)
+    if wanted and svc != "active":
+        return ("wanted-online (policy hours / group) but leo service is '%s'" % svc,
+                False)
+    if wanted and svc == "active" and leo == 0:
+        state["off_streak"] = state.get("off_streak", 0) + 1
+        if state["off_streak"] >= 2:
+            state["off_streak"] = 0
+            return ("leo service active but server says Leo offline twice "
+                    "(zombie candidate)", False)
+    return "", False
+
+
+HB_MIN_INTERVAL = 300.0   # a standing alarm re-notifies at most every 5 min
+HB_CONV = []              # heartbeat conversation (system prompt added lazily)
+
+
+def _hb_system(cfg):
+    return (
+        "You are the operator's single brain for this WoW bot server (Leo is "
+        "your voice in-game). This is an AUTOMATED PRESENCE HEARTBEAT: no human "
+        "sent this. You decide what to do about Leo's presence and the bots. "
+        "Standing operator policy: Leo should be online during hours %s-%s "
+        "server time, or whenever any of the hand-play toons (%s) is online; "
+        "outside that Leo stays logged out. After Leo logs in, freshly "
+        "logged-in bots AUTO-JOIN his group (hurting XP) - clear them with "
+        "whisper 'leave' orders, and bring bots online with the ritual recipe "
+        "below. Ritual recipe: master cmds 'bot addaccount <account>' for %s "
+        "plus 'bot add <name>' for %s. Reply with your JSON object as usual; "
+        "reply is ignored (no human reads it), only orders act. Service "
+        "control order: {\"service\": \"leo\", \"cmd\": \"start\"} with cmd one "
+        "of start|stop|restart - use it instead of whisper orders for Leo's "
+        "own session. Orders from heartbeats execute immediately (validated); "
+        "if nothing needs doing, return empty orders."
+        % (cfg["ON_H"], cfg["OFF_H"], cfg["GROUP"],
+           " ".join(str(cfg["RITUAL_ACCOUNTS"]).split()),
+           " ".join(str(cfg["RITUAL_BOTS"]).split())))
+
+
+def _hb_msg(facts, cond, cfg):
+    leo, group_on, wanted, svc = facts
+    members = []
+    try:
+        members = _mysql(
+            "SELECT c.name FROM acore_characters.characters lc "
+            "JOIN acore_characters.group_member gm ON gm.memberGuid=lc.guid "
+            "JOIN acore_characters.group_member gm2 ON gm2.guid=gm.guid "
+            "JOIN acore_characters.characters c ON c.guid=gm2.memberGuid "
+            "WHERE lc.name='%s' ORDER BY c.name" % LEO).split()
+    except Exception:
+        pass
+    lines = ["PRESENCE HEARTBEAT - attention needed: %s" % cond,
+             "Leo online flag: %d" % leo,
+             "leo service: %s" % svc,
+             "hour policy wanted-online: %s (hand-play group online: %d)" % (wanted, group_on)]
+    if members:
+        lines.append("Leo's current group members: %s" % ", ".join(members))
+    return "\n".join(lines)
+
+
+def _hb_exec_service(order):
+    svc = str(order.get("service", ""))
+    cmd = str(order.get("cmd", ""))
+    if svc != "leo" or cmd not in ("start", "stop", "restart"):
+        return "SKIP: bad service order %r (only leo start|stop|restart)" % order
+    subprocess.run(["systemctl", "--user", cmd, "leo"], capture_output=True)
+    with open(AUDIT, "a") as f:
+        f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "HB SERVICE %s %s\n" % (cmd, svc))
+    return "service %s %s executed" % (cmd, svc)
+
+
+def _hb_turn(facts, cond, cfg):
+    global HB_CONV
+    if not HB_CONV:
+        HB_CONV = [{"role": "system", "content": _hb_system(cfg)}]
+    HB_CONV.append({"role": "user", "content": _hb_msg(facts, cond, cfg)})
+    raw = llm_retry(HB_CONV)
+    HB_CONV.append({"role": "assistant", "content": raw})
+    del HB_CONV[1:-8]
+    obj = parse_orders(raw)
+    orders = obj.get("orders") or []
+    svc_orders = [o for o in orders if isinstance(o, dict) and "service" in o]
+    bot_orders = [o for o in orders if isinstance(o, dict) and "service" not in o]
+    print("presence heartbeat: %s | LLM orders: %d bot, %d service"
+          % (cond, len(bot_orders), len(svc_orders)))
+    for o in svc_orders:
+        print("presence heartbeat: %s" % _hb_exec_service(o))
+    if bot_orders:
+        sent = execute(bot_orders, census(), 1.0, dry=False)
+        print("presence heartbeat: executed %d bot order(s)" % (len(sent) if sent else 0))
+
+
+def presence_loop(interval=30.0):
+    cfg = _wd_conf()
+    state = {"prev_sig": None, "off_streak": 0}
+    print("presence: heartbeat up - facts only, the LLM decides (policy hours "
+          "%s-%s, group '%s')" % (cfg["ON_H"], cfg["OFF_H"], cfg["GROUP"]))
+    last_hb = 0.0
+    while True:
+        try:
+            facts = _presence_facts(cfg)
+            cond, changed = _hb_condition(facts, state)
+            if cond and (changed or time.time() - last_hb >= HB_MIN_INTERVAL):
+                last_hb = time.time()
+                _hb_turn(facts, cond, cfg)
+        except Exception as e:
+            print("presence: poll error: %s" % e)
+        time.sleep(interval)
+
+
 def daemon():
     # single-instance guard: a second daemon would double-answer every whisper
     lock_fd = os.open(os.path.join(HERE, "daemon.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
@@ -1025,6 +1212,7 @@ def daemon():
                   "queries fall back to the DB last-logout position."
                   % (CMDSRV_HOST, CMDSRV_PORT))
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
+    threading.Thread(target=presence_loop, daemon=True).start()
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)
     convs = {}         # sender -> [messages]
