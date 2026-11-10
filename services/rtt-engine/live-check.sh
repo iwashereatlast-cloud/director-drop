@@ -38,13 +38,44 @@ fi
 # pick bots: args (capped at 5 - this is a spot check, not a fleet sweep),
 # else up to 3 online GUILD members. The guild ('Special FXc') is the main
 # filter - the roster IS the guild; never sweep every toon on the server
-# (live finding 2026-11-10).
+# (live finding 2026-11-10: a quoted blob of names bypassed an arg-count
+# cap, so the cap counts WORDS and given names are filtered through the
+# watch list before anything is queried).
+#
+# normalize args to a word list first: "A B C" as ONE quoted argument counts
+# as three names, not one.
+set -- $*
 if [ $# -gt 5 ]; then
   say "note: more than 5 names given - using the first 5 (spot check, not a sweep)"
   set -- $(printf '%s\n' "$@" | head -5)
 fi
+# is_watched <name>: the SAME watch-list gate the service enforces (guild
+# 'Special FXc' + bot accounts) - live-check refuses to query off-roster
+# names even when they are handed to it.
+is_watched() {
+  case "$1" in
+    *[!A-Za-z0-9_\'-]*) return 1 ;;
+  esac
+  mysql --defaults-file="$MYCNF" -N -B -e \
+    "SELECT c.name FROM acore_characters.characters c "
+    "JOIN acore_auth.account a ON a.id=c.account "
+    "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
+    "WHERE c.name='$1' AND (a.username LIKE 'i_was_here%' "
+    "OR gm.guildid IN (SELECT guildid FROM acore_characters.guild "
+    "WHERE name='Special FXc'))" \
+    2>/dev/null | grep -q .
+}
 if [ $# -gt 0 ]; then
-  BOTS="$*"
+  KEPT=""
+  for b in "$@"; do
+    if is_watched "$b"; then
+      KEPT="$KEPT $b"
+    else
+      say "skip $b: not on the watch list (guild 'Special FXc' or a bot account)"
+    fi
+  done
+  BOTS="${KEPT# }"
+  [ -n "$BOTS" ] || { fail "none of the given names are on the watch list"; exit 1; }
 else
   BOTS=$(mysql --defaults-file="$MYCNF" -N -B -e \
     "SELECT c.name FROM acore_characters.characters c "
