@@ -25,7 +25,7 @@ Shared rules for all four conversations:
 |---|---|---|---|---|---|
 | 1. chat-tunnel | `services/chat-tunnel/` | single owner of `/tmp/leo.log`: tailer → SQLite (WAL) with retention purge; sends commands with correlation IDs; matches replies to the command that triggered them (sender + window) — kills the stale-line false positive | SHIPPED (PR) | `services/chat-tunnel/proof.py`: 8/8 replay scenarios green without a live worldserver (basic bind, interleaved out-of-order replies, garbled-line corpus `fixtures/replay-corrupt.log.txt`, late past-window reply, ordered same-bot replies, retention purge, cursor read, long-poll); live gate = `liveprobe.py` (self-contained JSON battery) + `wait_for_events` long-poll seam for the web-gui feed | build FIRST: ground-truth layer everything else verifies against |
 | 2. db-search | `services/db-search/` | premade read-only query catalog (typed tools with "what it can/can't answer" contracts); every result carries `queried_at` + staleness caveat; hard allowlist, read-only DB user, per-query timeout | SHIPPED + LIVE-VERIFIED 2026-11-10 (PRs #45/#70/#71/#73/#74/#76/#77) | `services/db-search/harness.py`: 62/62 offline; 15 tools + `catalog` meta + 4 redirects; live-verified: census, group, character, quest log w/ titles, links (deduped), guild w/ space, skills, redirects, socket e2e; leveling catalog (gear/KPIs/XP-penalty/quest-bands/skills/bags/mounts/wallets/talents) offline-proofed, gear+skills live-run pending post-#77; RO grants landed (`acore_playerbots.*`, `acore_world.quest_template`, `acore_world.item_template`); schema drifts fixed from live evidence (`guild_rank.rname`, `account_access.gmlevel`, `playerbots_account_links` id-pair, `character_talent` spell/specMask, no world talent tables) | free from a world-tick perspective; LLM never writes free-form SQL; out-of-scope names answer code=redirect to rtt-engine |
-| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries; stable `rtt-engine/1` JSON interface; backend = the stock mod-playerbots command server (8888, read-only `<verb>,<guid>\n` per PlayerbotCommandServer.cpp) — no console credentials anywhere | **SHIPPED pbcmd + LIVE-VERIFIED 2026-11-10 (PRs #46/#52/#79-#85)**: ops `catalog`/`ping`/`pinfo`/`get_current_position` (alias)/`get_live_status` (state+HP); brain-facing outline in `TOOLS.md`; `kick`/`get_bot_master`/`is_bot_responding` refused → chat-tunnel. LIVE: ping, watch-list gate, guild-filtered picks, routing rails, `invalid guid` semantics all proven; REACH (A19, source-pinned PlayerbotCommandServer.cpp:49): the 8888 registry is RandomPlayerbotMgr — serves online RANDOM bots only, so guild-invited RNDBOTs parse live; master-owned playerbots answer invalid guid → for THEM, live reads route via chat-tunnel's `.playerbots inspect` path (A23, live-proven, zero module changes; supersedes A22). Position/HP parse on a watch-listed bot awaits a guild-invited RNDBOT | `bash services/rtt-engine/prove.sh` — 20 checks offline vs a mock 8888 server (envelope key-for-key stable, live position/status parsing, offline/invalid-guid → db-search fallback, redirects, GUID cache, backend-down); `live-check.sh` = the live protocol | only for tick-time-sensitive ONLINE-bot data; anything the DB answers never routes here — refused with a `route_hint` (db-search / chat-tunnel), structural in the op catalog. LIVE findings 2026-11-10: raw reply shape `x y z map o |Zone|` + `invalid guid` confirmed (A19 partial pass); watch-list (guild `Special FXc`) now gates every live op structurally; stale-daemon gotcha (restart after git pull) detected by live-check |
+| 3. rtt-engine ("8.8.8.8") | ~~`services/rtt-engine/`~~ (REMOVED) | was: real-time / non-polled queries over the stock 8888 command server | **RETIRED 2026-11-10 (operator decision)** — the 8888 registry serves RANDOM bots only (A19), while `.playerbots inspect`/`exec` (A23, live-proven, zero module changes) serves EVERY online bot with AI through the chat channel — the engine was one extra moving part with no unique reach. Service, harness, fixtures, unit file deleted (git history preserves them); live reads fold into chat-tunnel | retired live-verified: harness was 23/23; live battery ALL PASSED (ping, watch-list gate, routing rails, reach NOTEs) at retirement | all live reads (playerbot + RNDBOT) route through chat-tunnel via `.playerbots inspect <bot> <query>`; the 8888 port can be closed entirely (Playerbots.CommandServerPort=0) — its no-auth 0.0.0.0 bind was the stack's last unauthenticated listener |
 | 4. web-gui | `services/web-gui/` | read-only dashboard over 1–3: bot status table, live tunnel event feed, query catalog browser | NOT STARTED | — | LAST; trivial once the services expose JSON |
 
 ## Cross-service contracts
@@ -62,14 +62,28 @@ Contracts live here so a change is visible to every conversation:
 - **Routing rule (all):** DB-answerable → db-search; tick-sensitive or
   non-polled → rtt-engine; never whisper-probe to learn something the DB
   already knows.
-- **Live-read split (CONFIRMED 2026-11-10, A23):** rtt-engine's 8888
-  backend serves RANDOM bots only (RandomPlayerbotMgr registry,
-  PlayerbotCommandServer.cpp:49). Live reads of MASTER-OWNED playerbots
-  route through chat-tunnel instead: `.playerbots inspect <bot> <query>`
-  from Leo's session (SEC_GAMEMASTER, Console::Yes — already in the build,
-  zero module changes) answers synchronously in leo.log in the same raw
-  shape as 8888; `.playerbots exec` is the state-changing sibling. A22
-  (mod verb) is superseded — no mod change needed.
+- **Live reads (chat-tunnel owns, CONFIRMED 2026-11-10, A23; rtt-engine
+  retired the same day):** ALL live bot reads — playerbot AND random bot —
+  route through chat-tunnel via `.playerbots inspect <bot> <query>` from
+  Leo's session (SEC_GAMEMASTER, Console::Yes — in the module already,
+  zero changes): state, position, tpos, movement, target, hp, strategy,
+  action, values, travel, budget; the reply lands as
+  `[System]: <bot>: <reply>` in leo.log, same raw shape the 8888 port
+  used. `.playerbots exec <bot> <command>` is the state-changing sibling
+  (replies go to the bot's master = Leo). ABSORPTION CHECKLIST for
+  chat-tunnel's owner: (1) send inspect/exec with correlation IDs and
+  match the `[System]` reply lines; (2) keep the watch-list gate
+  (guild 'Special FXc' + bot accounts — rtt-engine's structural rule
+  moves over); (3) keep the offline fallback semantics (no reply →
+  db-search is the offline truth, never a guess); (4) the 8888 port is
+  RETIRED — the operator may set Playerbots.CommandServerPort=0 and drop
+  the firewall exception (the stack no longer talks to it).
+  CONSUMER NOTES (owners, not this pass): db-search should flip its
+  `get_current_position`/`get_live_status`/`get_bot_master`/
+  `is_bot_responding` redirects from rtt-engine to chat-tunnel; web-gui
+  should drop its rtt panel (catalog/ping/pinfo buttons, `/api/overview`
+  rtt ping); chat-tunnel's optional `liveprobe.py --rtt-sock` pre-flight
+  degrades to a no-op on its own (arg defaults to None).
 - **Send-liveness cross-check (chat-tunnel → rtt-engine, PROPOSED
   2026-11-10):** chat-tunnel's `liveprobe.py --rtt-sock` consumes the
   existing `rtt-engine/1` `pinfo` op as a per-bot pre-flight: a server-side
@@ -99,7 +113,7 @@ Contracts live here so a change is visible to every conversation:
   logged, the strategy-listing reply is not; consumers must treat the
   transcript as partial for bot-originated traffic, never as proof a reply
   did not happen.
-- **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
+- **rtt-engine interface (RETIRED 2026-11-10 — service deleted; kept here as history):** `rtt-engine/1` — unix socket
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
   error:{code, message, route_hint?}}`. Ops: `catalog`, `ping`, `pinfo`
@@ -144,9 +158,10 @@ layer to break. Consequences, settled at tracker level:
    command under replay (including a late/garbled line fixture).
 2. db-search ships with the query catalog documented, each query proofed
    against a DB fixture.
-3. rtt-engine ships with the pbcmd backend (stock 8888 command server) and
-   the response envelope unchanged from the original `rtt-engine/1` shape —
-   callers must not notice the backend swap (harness asserts it).
+3. rtt-engine shipped (pbcmd backend, stable `rtt-engine/1` envelope,
+   harness 23/23, live battery green) and was then RETIRED 2026-11-10 —
+   its live-read lane folds into chat-tunnel via `.playerbots inspect`
+   (A23). Gate met and closed.
 4. web-gui starts only after 1–3 answer JSON.
 
 ## Evidence protocol update (2026-11-09)

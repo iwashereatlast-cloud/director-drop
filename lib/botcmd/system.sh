@@ -1,8 +1,8 @@
 # System checks: worldserver, RO DB grants.
 # The old console-credential gate (status/arm/console cmd) was removed in
 # the end-of-life pass (docs/services-roadmap.md): no console credentials
-# in the stack. Live reads route through rtt-engine (service 3), which talks
-# to the mod's command server (8888) - no auth material to arm.
+# in the stack. Live reads route through chat-tunnel (.playerbots inspect
+# via Leo's session) - no auth material to arm.
 
 system_worldserver() {
   hdr "worldserver (system unit)"

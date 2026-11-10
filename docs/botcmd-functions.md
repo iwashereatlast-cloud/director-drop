@@ -75,7 +75,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 | function | what it does | status |
 |---|---|---|
 | `botcmd system worldserver` | ac-worldserver check | HARNESS |
-| `botcmd system arm/soap/cmd` | was: arm the console gate, live test, run console cmd | **REMOVED** (console end-of-life pass, docs/services-roadmap.md) — live reads route through rtt-engine (8888 command server); no console credentials in the stack |
+| `botcmd system arm/soap/cmd` | was: arm the console gate, live test, run console cmd | **REMOVED** (console end-of-life pass, docs/services-roadmap.md) — live reads route through chat-tunnel (`.playerbots inspect` via Leo's session; rtt-engine retired 2026-11-10); no console credentials in the stack |
 | `botcmd system grants` | RO identity SHOW GRANTS | HARNESS |
 
 ## Master (`master`)
