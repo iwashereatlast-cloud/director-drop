@@ -740,15 +740,31 @@ def _live_position(bot):
     return None
 
 
+def _tele_canonical(name):
+    """The game_tele row's own spelling of a location (live rows are
+    concatenated: "BootyBay"), resolved space/case-insensitively, or None."""
+    try:
+        rows = dbsearch("get_game_tele", name=name)["rows"]
+    except Exception:
+        return None
+    want = name.lower().replace(" ", "")
+    for r in rows:
+        if r[0].lower().replace(" ", "") == want:
+            return r[0]
+    return None
+
+
 def _tele_coords(name):
-    """Coordinates of a game_tele location via db-search (exact name match),
+    """Coordinates of a game_tele location via db-search (exact name match,
+    space-insensitive - live game_tele names are concatenated: "BootyBay"),
     or None. The only legal '.tele name' destinations come from that table."""
     try:
         rows = dbsearch("get_game_tele", name=name)["rows"]
     except Exception:
         return None
+    want = name.lower().replace(" ", "")
     for r in rows:
-        if r[0].lower() == name.lower():
+        if r[0].lower().replace(" ", "") == want:
             return (float(r[2]), float(r[3]), int(r[1]))   # x, y, map
     return None
 
@@ -1034,6 +1050,12 @@ def validate(order, bots):
             if dock and dock[2] == pos[3]:
                 if (pos[0] - dock[0]) ** 2 + (pos[1] - dock[1]) ** 2 < BOAT_DOCK_RADIUS ** 2:
                     order["_route"] = (r[0], r[1], r[2])
+                    # canonicalize the destination to the game_tele row's
+                    # own spelling (live rows are concatenated: MenethilHarbor)
+                    # so the '.tele name' line names a location the core knows
+                    canon = _tele_canonical(r[1])
+                    if canon:
+                        order["cmd"] = "boat %s" % canon
                     return None
         return ("SKIP boat %s: not at a departure harbor (needs to be within %d yd "
                 "of %s; live position says %s)"
@@ -1049,6 +1071,8 @@ def validate(order, bots):
             return "SKIP %s: not online (census)" % bot
         if _tele_coords(dest) is None:
             return "SKIP %s: %r is not a real teleport location (db-search)" % (bot, dest)
+        canon = _tele_canonical(dest) or dest   # the row's own spelling
+        order["cmd"] = "carriage %s" % canon
         order["_route"] = (dest, dest, "carriage")
         return None
     if is_master_cmd(cmd):

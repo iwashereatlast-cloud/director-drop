@@ -287,6 +287,13 @@ def main():
         check("boat order line is a GM .tele name",
               director.order_line("Ayla", "boat Ratchet") == ".tele name Ayla Ratchet",
               director.order_line("Ayla", "boat Ratchet"))
+        check("every route harbor resolves against the concatenated fixture rows",
+              all(director._tele_canonical(h) for h in harbors),
+              [(h, director._tele_canonical(h)) for h in harbors])
+        check("_tele_canonical returns the row's own spelling",
+              director._tele_canonical("Booty Bay") == "BootyBay"
+              and director._tele_canonical("menethil harbor") == "MenethilHarbor",
+              director._tele_canonical("Booty Bay"))
         def fake_dock_send():
             time.sleep(1.0)
             with open(log_path, "a") as f:

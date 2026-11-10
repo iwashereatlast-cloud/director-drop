@@ -400,9 +400,13 @@ CATALOG = {
   },
 
   "get_game_tele": {
+    # live game_tele names are concatenated ("BootyBay", "MenethilHarbor" -
+    # live 2026-11-10: LIKE '%Booty Bay%' returned 0 rows while '%Booty%' hit
+    # "BootyBay"), so match space-insensitively on both sides
     "sql": ("SELECT name, map, position_x, position_y, position_z "
             "FROM acore_world.game_tele "
-            "WHERE name LIKE '%{name}%' ORDER BY name LIMIT 20"),
+            "WHERE REPLACE(name, ' ', '') LIKE "
+            "CONCAT('%', REPLACE('{name}', ' ', ''), '%') ORDER BY name LIMIT 20"),
     "params": {"name": "required - (partial) teleport location name, letters/digits/spaces"},
     "timeout": 10,
     "can": "the core's named teleport locations (game_tele): exact name, map, coordinates - the ONLY names legal in a GM '.tele name' command",
