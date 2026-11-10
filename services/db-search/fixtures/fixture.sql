@@ -143,3 +143,15 @@ INSERT INTO acore_characters.character_inventory VALUES
   (20, 0, 23, 9005),    -- backpack: Rough Stone
   (20, 0, 24, 9006),    -- backpack: Linen Cloth
   (20, 0, 25, 9007);    -- backpack: Chestnut Mare Bridle (mount item)
+
+CREATE TABLE acore_characters.character_talent (
+  guid INTEGER, spell INTEGER, specMask INTEGER,
+  PRIMARY KEY (guid, spell));
+-- Ayla (guid 20, druid): points spread across two specMask bits
+INSERT INTO acore_characters.character_talent VALUES
+  (20, 18562, 1), (20, 18571, 1), (20, 20711, 2), (20, 20719, 2);
+-- Ayla's combat/armor skills: staves + cloth/leather (druid-appropriate)
+INSERT INTO acore_characters.character_skills VALUES
+  (20, 136, 130, 130),  -- staves
+  (20, 413, 1, 1),      -- cloth
+  (20, 414, 1, 1);      -- leather

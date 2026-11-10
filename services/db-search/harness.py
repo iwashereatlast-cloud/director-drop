@@ -145,6 +145,18 @@ def main():
               sk.get("herb")[2:] == ["150", "150"] and sk.get("mine")[2:] == ["75", "150"]
               and sk.get("firstaid")[2:] == ["40", "75"]
               and sk.get("riding")[2:] == ["150", "150"], sk)
+        check("skills: combat/armor named (staves, cloth, leather)",
+              sk.get("staves") is not None and sk.get("cloth") is not None
+              and sk.get("leather") is not None, sorted(sk))
+        r = handle(adapter, {"tool": "get_talents", "params": {"toon": "Ayla"}})
+        check("talents envelope", envelope_ok(r, "get_talents"))
+        byspec = {}
+        for row in r["rows"]:
+            byspec[row[1]] = byspec.get(row[1], 0) + 1
+        check("talents: 4 spells, 2 per specMask bit", byspec == {"1": 2, "2": 2}, byspec)
+        r = handle(adapter, {"tool": "get_talents", "params": {"toon": "Cecil"}})
+        check("talents: talentless toon -> 0 rows, still ok",
+              r.get("ok") is True and r["row_count"] == 0, r)
         r = handle(adapter, {"tool": "get_mount_items", "params": {"toon": "Ayla"}})
         check("mounts envelope", envelope_ok(r, "get_mount_items"))
         check("mounts: Chestnut Mare Bridle found in backpack",

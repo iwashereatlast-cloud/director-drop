@@ -235,10 +235,23 @@ CATALOG = {
 
   "get_skills": {
     "sql": ("SELECT cs.skill, "
-            "CASE cs.skill WHEN 129 THEN 'firstaid' WHEN 148 THEN 'riding' WHEN 164 THEN 'bs' "
-            "WHEN 165 THEN 'lw' WHEN 171 THEN 'alchemy' WHEN 182 THEN 'herb' "
-            "WHEN 185 THEN 'cook' WHEN 186 THEN 'mine' WHEN 197 THEN 'tailor' "
+            "CASE cs.skill "
+            "WHEN 43 THEN 'swords' WHEN 44 THEN 'axes' WHEN 45 THEN 'bows' "
+            "WHEN 46 THEN 'guns' WHEN 54 THEN 'maces' "
+            "WHEN 55 THEN 'two-handed swords' WHEN 95 THEN 'defense' "
+            "WHEN 98 THEN 'language: common' WHEN 118 THEN 'dual wield' "
+            "WHEN 129 THEN 'firstaid' WHEN 134 THEN 'feral combat' "
+            "WHEN 136 THEN 'staves' WHEN 148 THEN 'riding' "
+            "WHEN 160 THEN 'two-handed maces' WHEN 162 THEN 'unarmed' "
+            "WHEN 164 THEN 'bs' WHEN 165 THEN 'lw' WHEN 171 THEN 'alchemy' "
+            "WHEN 172 THEN 'two-handed axes' WHEN 173 THEN 'daggers' "
+            "WHEN 176 THEN 'thrown' WHEN 182 THEN 'herb' WHEN 185 THEN 'cook' "
+            "WHEN 186 THEN 'mine' WHEN 197 THEN 'tailor' "
+            "WHEN 226 THEN 'crossbows' WHEN 229 THEN 'polearms' "
             "WHEN 333 THEN 'enchant' WHEN 356 THEN 'fish' WHEN 393 THEN 'skin' "
+            "WHEN 413 THEN 'cloth' WHEN 414 THEN 'leather' WHEN 415 THEN 'mail' "
+            "WHEN 416 THEN 'plate' WHEN 433 THEN 'shield' "
+            "WHEN 473 THEN 'fist weapons' "
             "WHEN 755 THEN 'jewel' WHEN 762 THEN 'eng' WHEN 773 THEN 'scribe' "
             "ELSE 'skill' || cs.skill END AS name, "
             "cs.value, cs.max "
@@ -247,7 +260,7 @@ CATALOG = {
             "ORDER BY cs.skill"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
-    "can": "the toon's profession/secondary skills with the repo's short names (firstaid, bs, lw, alchemy, herb, cook, mine, tailor, enchant, fish, skin, jewel, eng, scribe) and value/max - answers 'can Gau gather while grinding'",
+    "can": "the toon's skills with names - professions (firstaid, riding, bs, lw, alchemy, herb, cook, mine, tailor, enchant, fish, skin, jewel, eng, scribe), weapons (swords, axes, maces, two-handed swords/maces/axes, daggers, staves, polearms, bows, crossbows, guns, thrown, unarmed, fist weapons), armor (cloth, leather, mail, plate, shield), defense, dual wield - with value/max; answers 'can Gau gather while grinding' and 'has Crono trained two-handed maces'",
     "cannot": "weapon skills vs class miss chance (weapon skill ids exist but are not named here); live skill-ups mid-session",
     "caveat": "skill values flush with the character save - a just-leveled skill can lag by minutes.",
     "fill": lambda p: {"toon": _p("get_skills", p, "toon")},
@@ -297,6 +310,23 @@ CATALOG = {
     "cannot": "mounts LEARNED as spells (character_spell) - spell names are not in the world DB (DBC-only), so learned mounts can only be counted as raw spell ids, deliberately not exposed; riding skill level comes from get_skills (id 148)",
     "caveat": "inventory flushes with the character save - a just-looted mount can lag by minutes. The class 15 / subclass 5 mount mapping is the 3.3.5 standard, not yet live-verified on this build.",
     "fill": lambda p: {"toon": _p("get_mount_items", p, "toon")},
+  },
+
+  "get_talents": {
+    # live schema (DESCRIBE 2026-11-10): character_talent (guid, spell,
+    # specMask) - talents are stored as SPELLS with a spec bitmask. This build
+    # has NO world talent/talent_tab tables (confirmed live: SHOW TABLES empty)
+    # and spell names are DBC-only, so only ids + specMask can be returned.
+    "sql": ("SELECT ct.spell, ct.specMask "
+            "FROM acore_characters.character_talent ct "
+            "WHERE ct.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "ORDER BY ct.specMask, ct.spell"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "the toon's learned talents as (spell id, specMask) rows - talent COUNT and spec spread (how many points per specMask bit); useful for 'has X spent talents / how deep in each spec'",
+    "cannot": "talent NAMES or tree positions - spell names and talent trees are DBC-only on this build (no acore_world.talent table, confirmed live 2026-11-10); use the bot's live 'talents' whisper (rtt-engine) for a named list; what specMask bits mean exactly (raw bitmask, live-unverified)",
+    "caveat": "talents flush with the character save - a just-spent point can lag by minutes. Rows are raw spell ids; do not treat them as game-object ids for anything else.",
+    "fill": lambda p: {"toon": _p("get_talents", p, "toon")},
   },
 
   "get_wallets": {
