@@ -1,5 +1,15 @@
 # chat-tunnel (service 1 of 4)
 
+**Reactive-only contract:** this service exposes tools; it NEVER initiates.
+Audited 2026-11-10: the single world-affecting code path is the FIFO write
+inside `send_command`, reachable only from an explicit caller request over
+the JSON interface. The two background threads are a sensor (`tail_loop`
+reads the log and records events into its own DB) and housekeeping
+(`purge_loop` deletes old rows from its own DB). Nothing here starts
+services, sends whispers, or calls other tools on its own — troubleshoot
+simplicity: if the tunnel did something, a caller asked it to, and the
+audit trail (events + caller) says who.
+
 Single owner of the Leo client chat log. Tails `/tmp/leo.log`, parses whisper
 traffic (A14, confirmed live: chat rides a loguru envelope —
 `... | MESSAGES | headless.world.chat.chat:display:124 - [Name] [whisper]: text` —
