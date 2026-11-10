@@ -195,6 +195,31 @@ def main():
         check("prompt has the leveling-in-zone recipe",
               "level in <zone>" in director.ORDER_RULES)
 
+        print("== 1d. agent layers: npc/mob travel, quest-by-name, silent-bot, zone names ==")
+        rules = director.ORDER_RULES
+        check("prompt: NPC/mob destinations rule",
+              "NPC/mob travel" in rules and "yetis" in rules)
+        check("prompt: quest-by-name via id lookup",
+              "Quest by name" in rules and "NEVER invent quest ids" in rules)
+        check("prompt: silent-bot procedure (A20)",
+              "Silent-bot procedure" in rules and "revive" in rules
+              and "bot remove" in rules)
+        check("zone names sourced table present",
+              director.ZONE_NAMES.get(46) == "Burning Steppes"
+              and director.ZONE_NAMES.get(33) == "Stranglethorn Vale"
+              and director.ZONE_NAMES.get(45) == "Arathi Highlands")
+        check("map names table present",
+              director.MAP_NAMES.get(0) == "Eastern Kingdoms")
+        dig = director.run_queries([{"query": "location", "bot": "Gau"}],
+                                   director.census(online_only=False))
+        check("location digest names map + zone (Gau: fixture map 1, zone 14)",
+              "Kalimdor" in dig and "Durotar" in dig, dig)
+        check("roster names the map",
+              "Eastern Kingdoms" in director.roster_text(director.census(online_only=False)))
+        director._note_bot_error("Ayla", "Unknown spell")
+        check("error counter bumps for the presence thread",
+              director.BOTFB_SEQ[0] >= 1, director.BOTFB_SEQ)
+
         print("== 2. db-search facts: census, masters, sender gates ==")
         online = director.census()
         check("census (online): Ayla, Gau, Golbez, Leo",
@@ -377,7 +402,7 @@ def main():
         check("Leo online flag from db-search", leo == 1, leo)
         check("hand-play group offline count", group_on == 0, group_on)
         check("service state passed through", svc == "active", svc)
-        msg = director._hb_msg((leo, group_on, wanted, svc), "state change", cfg)
+        msg = director._hb_msg((leo, group_on, wanted, svc, 0), "state change", cfg)
         check("heartbeat message lists Leo's group members",
               "Ayla" in msg and "Gau" in msg, msg)
         return finish()

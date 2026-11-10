@@ -213,6 +213,27 @@ ZONE_DESTINATIONS = {
     "Winterspring":         ("Everlook",           "53-60"),
     "Silithus":             ("Cenarion Hold",      "55-60"),
 }
+# Zone id -> name and map id -> name, for translating the DB's raw ids into the
+# names players use (the roster and location query report them). Sourced from
+# the engine's own zone documentation (playerbots.conf.dist ZoneBracket
+# comments, mod-playerbots @ 405f8119) - A27; live-verify against the in-game
+# map when a toon's reported zone looks wrong.
+MAP_NAMES = {0: "Eastern Kingdoms", 1: "Kalimdor", 530: "Outland", 571: "Northrend"}
+ZONE_NAMES = {
+    1: "Dun Morogh", 3: "Badlands", 4: "Blasted Lands", 8: "Swamp of Sorrows",
+    10: "Duskwood", 11: "Wetlands", 12: "Elwynn Forest", 14: "Durotar",
+    15: "Dustwallow Marsh", 16: "Azshara", 17: "The Barrens", 28: "Western Plaguelands",
+    33: "Stranglethorn Vale", 38: "Loch Modan", 40: "Westfall", 44: "Redridge Mountains",
+    45: "Arathi Highlands", 46: "Burning Steppes", 47: "The Hinterlands",
+    51: "Searing Gorge", 85: "Tirisfal Glades", 130: "Silverpine Forest",
+    139: "Eastern Plaguelands", 141: "Teldrassil", 148: "Darkshore",
+    215: "Mulgore", 267: "Hillsbrad Foothills", 331: "Ashenvale", 357: "Feralas",
+    361: "Felwood", 400: "Thousand Needles", 405: "Desolace", 406: "Stonetalon Mountains",
+    440: "Tanaris", 490: "Un'Goro Crater", 618: "Winterspring",
+    1377: "Silithus", 1497: "Undercity", 1519: "Stormwind City", 1537: "Ironforge",
+    1637: "Orgrimmar", 1638: "Thunder Bluff",
+}
+
 ZONE_ABBREVIATIONS = {"stv": "Stranglethorn Vale", "wpl": "Western Plaguelands",
                       "epl": "Eastern Plaguelands", "barrens": "The Barrens",
                       "tn": "Thousand Needles", "hillsbrad": "Hillsbrad Foothills",
@@ -236,6 +257,9 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself. ONLY these exact spell names are ever allowed: Mooncloth (tailors), Transmute: Titanium (alchemists), Smelt Titansteel (miners) - the system checks the unit's professions and refuses everything else. Never invent spell names or spell ids.
+- NPC/mob travel: the destination matcher also searches the NPC, mob and boss catalogs, so "send Ayla to the trainer", "have Gau grind yetis" work the same way: cmd "go travel <npc or mob name>" (case-insensitive substring, nearest match wins - A24). Prefer the specific name you mean; say which match you sent them to.
+- Quest by name: to send a bot after a SPECIFIC quest the master names, attach query {"query":"quest","bot":"<name>"} FIRST - the results carry quest ids - then order cmd "rpg do quest <id>". NEVER invent quest ids; if the quest is not in the bot's log, say so.
+- Silent-bot procedure (A20): if a bot ignores orders or a probe times out, do not report it as fine. 1) attach query {"query":"strategies","bot":"<name>"} - a timeout means silent (offline truth is db-search). 2) If the roster shows it ONLINE and it stayed silent, it is a corpse or master-less: order {"bot":"<name>","cmd":"revive"}, wait, then re-probe. 3) Still silent: remaster - {"bot":"<name>","cmd":"bot remove"} then {"bot":"<name>","cmd":"bot add"}. Attach the orders in the same reply; never just describe them.
 - DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only through the DB service and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Each result carries a queried_at time and a staleness caveat - respect both, never present stale numbers as current. Queries: location (the toon's last-flushed map/zone from the DB, marked as such - live position is the tunnel's job), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE strategy read-back through the tunnel's inspect command - returns the bot's live strategy list, or a timeout note if it stays silent). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the system only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
@@ -496,9 +520,12 @@ def _fmt_rows(tool, toon, resp):
         if not rows:
             return "not found"
         _, _, level, _, _, mapid, zone, money, _, online = rows[0]
-        return ("last-flushed map %s zone %s (DB value - live position is the "
-                "tunnel's job), %s" % (mapid, zone,
-                                       "ONLINE" if online == "1" else "OFFLINE"))
+        where = ("%s, zone %s (id %s)" % (MAP_NAMES.get(int(mapid), "map %s" % mapid),
+                                         ZONE_NAMES.get(int(zone), "unknown"),
+                                         zone)) if zone.isdigit() else "unknown"
+        return ("last-flushed %s (DB value - live position is the tunnel's "
+                "job), %s" % (where,
+                              "ONLINE" if online == "1" else "OFFLINE"))
     if tool == "quest":
         if not rows:
             return "no quest log rows"
@@ -617,8 +644,9 @@ def roster_text(bots):
         return "NONE on the bot accounts"
     parts = []
     for n, b in bots.items():
-        parts.append("%s(acc %s, lvl %s, map %s) %s"
-                     % (n, b["account"].lower(), b["level"], b["map"],
+        parts.append("%s(acc %s, lvl %s, %s) %s"
+                     % (n, b["account"].lower(), b["level"],
+                        MAP_NAMES.get(b["map"], "map %s" % b["map"]),
                         "ONLINE" if b["online"] else "OFFLINE"))
     return "; ".join(parts)
 
@@ -974,12 +1002,14 @@ BOT_ERROR_RE = re.compile(
     r"no player named|can't |unable to|not in (your|my) group|too far|out of range|"
     r"not enough mana|no target|invalid|target is)", re.I)
 
-BOTFB = []  # ring of recent bot error whispers, shown in the roster system message
+BOTFB = []      # ring of recent bot error whispers, shown in the roster system message
+BOTFB_SEQ = [0]  # monotonic counter: lets the presence thread detect NEW errors
 
 
 def _note_bot_error(sender, text):
     BOTFB.append("%s: %s" % (sender, text[:200]))
     del BOTFB[:-10]
+    BOTFB_SEQ[0] += 1
 
 
 _sender_acct_cache = {}  # name -> (checked_at, account name or None)
@@ -1077,7 +1107,7 @@ def _hb_condition(facts, state):
     """What (if anything) needs the LLM's attention this tick.
     ("", False) = nothing; (text, True) = state change (fires immediately);
     (text, False) = standing alarm (re-fires rate-limited)."""
-    leo, group_on, wanted, svc = facts
+    leo, group_on, wanted, svc, new_errors = facts
     sig = (leo, svc, wanted)
     if state.get("prev_sig") is None:
         state["prev_sig"] = sig
@@ -1087,6 +1117,11 @@ def _hb_condition(facts, state):
         state["prev_sig"] = sig
         state["off_streak"] = 0
         return ("state change (Leo online flag %d, leo service '%s', wanted %d)" % sig,
+                True)
+    if new_errors:
+        # a bot errored since the last tick - the LLM decides what to do about
+        # it (revive/remaster/ignore); this thread only reports the fact
+        return ("%d new bot error whisper(s) surfaced (see below)" % new_errors,
                 True)
     if wanted and svc != "active":
         return ("wanted-online (policy hours / group) but leo service is '%s'" % svc,
@@ -1124,7 +1159,7 @@ def _hb_system(cfg):
            " ".join(str(cfg["RITUAL_BOTS"]).split())))
 
 def _hb_msg(facts, cond, cfg):
-    leo, group_on, wanted, svc = facts
+    leo, group_on, wanted, svc, new_errors = facts
     members = []
     try:
         members = group_members(LEO)
@@ -1136,6 +1171,8 @@ def _hb_msg(facts, cond, cfg):
              "hour policy wanted-online: %s (hand-play group online: %d)" % (wanted, group_on)]
     if members:
         lines.append("Leo's current group members: %s" % ", ".join(members))
+    if BOTFB:
+        lines.append("Recent bot error whispers: %s" % "; ".join(BOTFB[-3:]))
     return "\n".join(lines)
 
 def _hb_exec_service(order):
@@ -1170,13 +1207,17 @@ def _hb_turn(facts, cond, cfg):
 
 def presence_loop(interval=30.0):
     cfg = _wd_conf()
-    state = {"prev_sig": None, "off_streak": 0}
+    state = {"prev_sig": None, "off_streak": 0, "last_err_seq": BOTFB_SEQ[0]}
     print("presence: heartbeat up - facts only, the LLM decides (policy hours "
           "%s-%s, group '%s')" % (cfg["ON_H"], cfg["OFF_H"], cfg["GROUP"]))
     last_hb = 0.0
     while True:
         try:
-            facts = _presence_facts(cfg)
+            leo, group_on, wanted, svc = _presence_facts(cfg)
+            new_errors = max(0, BOTFB_SEQ[0] - state["last_err_seq"])
+            if new_errors:
+                state["last_err_seq"] = BOTFB_SEQ[0]
+            facts = (leo, group_on, wanted, svc, new_errors)
             cond, changed = _hb_condition(facts, state)
             if cond and (changed or time.time() - last_hb >= HB_MIN_INTERVAL):
                 last_hb = time.time()
