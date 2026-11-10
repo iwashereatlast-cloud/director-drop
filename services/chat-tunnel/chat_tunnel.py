@@ -68,7 +68,7 @@ MASTER = os.environ.get("CHAT_TUNNEL_MASTER", "Leo")
 # the display wrapper (not a bare search) means noise can never false-match
 # a chat line embedded inside another message's text.
 LINE_RE = re.compile(
-    r"chat:display:\d+ - \[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
+    r"chat:display:\d+ - \[([A-Za-z]+)\] \[([a-z ]+)\]: (.*)")
 
 # master-issued server commands go out as '.playerbots ...' lines instead of
 # a /w (same split director.py's order_line() makes, minimal subset here)
@@ -338,10 +338,13 @@ def describe():
                 "notes": "passed through verbatim (server command)",
             },
         },
-        "listen_channels": ["whisper", "guild"],
-        "listen_note": "chat rides a loguru envelope in the log; only "
-                       "display lines are parsed. Send-side /s and /g are "
-                       "NOT advertised: unverified on this client.",
+        "listen_channels": ["whisper", "guild", "party", "raid", "say",
+                           "yell", "channel", "officer"],
+        "listen_note": "every display channel is parsed and recorded with "
+                       "its channel; ONLY whispers participate in "
+                       "correlation matching (commands and their replies "
+                       "are whispers). Send-side /s and /g are NOT "
+                       "advertised: unverified on this client.",
         "reply_matching": {
             "rule": "a reply binds to the OLDEST still-pending command to "
                     "the same bot within the window - sender + time window, "

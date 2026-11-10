@@ -236,6 +236,8 @@ def s_ordered(t):
     cid1 = t.send("Gau", "who")
     cid2 = t.send("Gau", "wts")
     t.reply("Gau", "answer to who")
+    t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
+                 " headless.world.chat.chat:display:124 - [Mog] [party]: loot roll")
     t.reply("Gau", "answer to wts")
     t.sync("answer to wts")
     r1 = t.wait_for(lambda: t.get_reply(cid1)["reply"], 5, "first reply")
@@ -244,6 +246,11 @@ def s_ordered(t):
     check(r2["matched_correlation_id"] == cid2, "reply 2 bound to wrong command")
     check(r1["command"] == "answer to who" and r2["command"] == "answer to wts",
           "replies bound out of order (oldest-pending-first violated)")
+    ev = t.call("get_recent_events", {"limit": 10})["result"]["events"]
+    party = [e for e in ev if e.get("channel") == "party"]
+    check(party != [], "party chat is recorded with its channel")
+    check(all(e["matched_correlation_id"] is None for e in party),
+          "party chat never participates in matching")
 
 
 def s_retention(t):
@@ -317,8 +324,8 @@ def s_describe(t):
           "grammar: master command example")
     check("verify" in g["tools"] and "describe" in g["tools"],
           "grammar: tool list includes the new tools")
-    check(g["listen_channels"] == ["whisper", "guild"],
-          "grammar: listen channels")
+    check("whisper" in g["listen_channels"] and "party" in g["listen_channels"],
+          "grammar: listen channels include whisper + party")
 
 
 def s_verify(t):

@@ -78,9 +78,15 @@ def main():
     a = ap.parse_args()
     bots = [b.strip() for b in a.bots.split(",") if b.strip()]
 
-    health = call(a.port, "stats")
-    if not health["ok"]:
-        print("service not reachable: %r" % health)
+    health = None
+    for _ in range(10):          # restart race: the service needs a moment
+        try:
+            health = call(a.port, "stats")
+            break
+        except OSError:
+            time.sleep(1)
+    if not health or not health["ok"]:
+        print("service not reachable on port %d after 10s" % a.port)
         return 2
     cfg = health["result"]
     wait = a.wait if a.wait is not None else max(30.0, 2 * 30.0)
