@@ -107,6 +107,57 @@ def main():
         check("quest: status codes 1/3/6 present",
               {q[k][2] for k in q} == {"1", "3", "6"}, q)
 
+        r = handle(adapter, {"tool": "get_equipped_gear", "params": {"toon": "Ayla"}})
+        check("gear envelope", envelope_ok(r, "get_equipped_gear"))
+        gear = {row[1]: row for row in r["rows"]}
+        check("gear: Ayla has chest/feet/mainhand with names",
+              set(gear) == {"chest", "feet", "mainhand"}
+              and gear["chest"][2] == "Linen Robe" and gear["mainhand"][2] == "Worn Shortsword", gear)
+        check("gear: slot ids and item levels present",
+              r["rows"][0][0] == "4" and gear["feet"][4] == "18", r["rows"])
+        r = handle(adapter, {"tool": "get_equipped_gear", "params": {"toon": "Cecil"}})
+        check("gear: unequipped toon -> 0 rows, still ok",
+              r.get("ok") is True and r["row_count"] == 0, r)
+
+        r = handle(adapter, {"tool": "get_leveling_progress", "params": {"account": "i_was_here"}})
+        check("leveling envelope", envelope_ok(r, "get_leveling_progress"))
+        prog = {row[0]: row for row in r["rows"]}
+        check("leveling: xp/hour derived (Ayla 4100 xp / 5400s)",
+              float(prog["Ayla"][7]) == 2733.0, prog.get("Ayla"))
+        check("leveling: session recency present (Cecil logged out days ago)",
+              prog["Cecil"][5] == "1730900000", prog.get("Cecil"))
+        r = handle(adapter, {"tool": "get_group_xp_penalty", "params": {"toon": "Ayla"}})
+        check("penalty: raid group size + raid bit",
+              r.get("ok") and r["rows"] == [["4", "2"]], r)
+        r = handle(adapter, {"tool": "get_group_xp_penalty", "params": {"toon": "Cecil"}})
+        check("penalty: ungrouped toon -> 0 rows",
+              r.get("ok") is True and r["row_count"] == 0, r)
+        r = handle(adapter, {"tool": "get_quest_difficulty", "params": {"toon": "Locke"}})
+        check("quest difficulty envelope", envelope_ok(r, "get_quest_difficulty"))
+        band = {row[0]: row[6] for row in r["rows"]}
+        check("quest difficulty: 153 red (+6), 25 gray (-6), 36 gray (-20)",
+              band.get("153") == "red" and band.get("25") == "gray"
+              and band.get("36") == "gray", band)
+        r = handle(adapter, {"tool": "get_skills", "params": {"toon": "Ayla"}})
+        check("skills envelope", envelope_ok(r, "get_skills"))
+        sk = {row[1]: row for row in r["rows"]}
+        check("skills: herb 150/150, mine 75/150, firstaid 40/75, riding 150",
+              sk.get("herb")[2:] == ["150", "150"] and sk.get("mine")[2:] == ["75", "150"]
+              and sk.get("firstaid")[2:] == ["40", "75"]
+              and sk.get("riding")[2:] == ["150", "150"], sk)
+        r = handle(adapter, {"tool": "get_mount_items", "params": {"toon": "Ayla"}})
+        check("mounts envelope", envelope_ok(r, "get_mount_items"))
+        check("mounts: Chestnut Mare Bridle found in backpack",
+              r["row_count"] == 1 and r["rows"][0][2] == "Chestnut Mare Bridle"
+              and r["rows"][0][0] == "0" and r["rows"][0][1] == "25", r)
+        r = handle(adapter, {"tool": "get_bag_space", "params": {"toon": "Ayla"}})
+        check("bag space: capacity 24 (16+8 pouch), used 3, free 21",
+              r.get("ok") and r["rows"] == [["24", "3", "21"]], r)
+        r = handle(adapter, {"tool": "get_wallets", "params": {"account": "i_was_here"}})
+        check("wallets envelope", envelope_ok(r, "get_wallets"))
+        check("wallets: richest first (Golbez 80000)",
+              r["rows"][0][0] == "Golbez" and r["rows"][0][3] == "80000", r["rows"][0])
+
         r = handle(adapter, {"tool": "get_guild_members", "params": {"guild": "Special FXc"}})
         check("guild envelope (name with a space accepted)", envelope_ok(r, "get_guild_members"))
         g = rows_by_key(r)
