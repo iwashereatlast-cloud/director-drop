@@ -40,7 +40,20 @@ arrays (same wire shape the mysql CLI produces); column order per tool below.
 | `get_account_links` | `account` (bare prefix) | which bot accounts are linked to a shell account (cross-account addaccount gate, A12) + creation times | whether any toon of those accounts is online/has AI | link rows only change via `.playerbots account link/unlink` — near-stable; staleness applies to the toons, not the rows |
 | `get_quest_log` | `toon` | quest log rows: quest id, title (needs `acore_world.quest_template` SELECT grant), status (1=COMPLETE 3=INCOMPLETE 5=FAILED 6=REWARDED), explored | live progress inside an incomplete quest; whether rpg accepts it (needs a POI, A8) | status rows flush with the character save; INCOMPLETE progress can lag by minutes |
 | `get_guild_members` | `guild` (exact, quote-free name) | one guild's members with rank, level, class, DB online | other guilds; guild bank; online-truth | membership/rank stable on change; online column is A5-stale |
-| `catalog` (meta) | — | the whole catalog as JSON (params, timeout, can, cannot, caveat per tool) | — | static, no DB query |
+### Redirects — names that deliberately do NOT go here
+
+Reaching for one of these does not return `unknown_tool`; it answers
+`{"ok": false, "code": "redirect", "redirect_to": ...}` with the owning
+service and the reason, so the caller learns the routing rule instead of
+guessing again (or falling back to a whisper-probe). They are also listed by
+the `catalog` meta-tool.
+
+| name | routed to | because |
+|---|---|---|
+| `get_current_position` | rtt-engine | live position is tick-time state; the DB only has the last flushed map/zone (`get_character`) |
+| `get_live_status` | rtt-engine | live HP/mana/combat never lives in the DB |
+| `get_bot_master` | rtt-engine | AI mastership is live session state (SetMaster at bot login); no DB row |
+| `is_bot_responding` | rtt-engine | session liveness is proven by a live probe with correlation, never by DB flags (A5) |
 
 Routing rule reminder (roadmap): anything this catalog answers must NEVER be
 learned by whisper-probing; tick-sensitive things (live position, "does this
@@ -72,9 +85,10 @@ python3 harness.py     # 30 checks: 30 pass, 0 fail
 
 Proves: every tool returns the expected fixture rows; every envelope carries
 `queried_at` + its caveat; unknown tools / SQL-injection-shaped params /
-missing params are refused; every catalog statement is a single SELECT; the
-fixture is byte-identical after queries (no writes); the per-query timeout
-fires (`code=timeout`); the unix-socket path works end-to-end at mode 0600.
+missing params are refused; out-of-scope names redirect with a route + reason;
+every catalog statement is a single SELECT; the fixture is byte-identical after
+queries (no writes); the per-query timeout fires (`code=timeout`); the
+unix-socket path works end-to-end at mode 0600.
 The fixture (`fixtures/fixture.sql`) is a miniature of the four DBs with the
 repo's roster lore — including deliberate staleness traps: Locke is
 DB-offline but still in Leo's raid rows (A3), and `i_was_here5th` is unlinked

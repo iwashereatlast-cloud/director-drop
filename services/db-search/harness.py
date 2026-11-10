@@ -107,14 +107,29 @@ def main():
         print("== 2. hard allowlist & param validation ==")
         r = handle(adapter, {"tool": "drop table characters"})
         check("unknown tool refused", r.get("ok") is False and r.get("code") == "unknown_tool", r)
+        check("unknown-tool error names the redirects",
+              "redirects" in str(r.get("error", "")), r)
         r = handle(adapter, {"tool": "get_character", "params": {"toon": "Leo' OR 1=1--"}})
         check("SQL-injection-shaped param refused", r.get("ok") is False and r.get("code") == "bad_param", r)
         r = handle(adapter, {"tool": "get_character"})
         check("missing required param refused", r.get("ok") is False and r.get("code") == "bad_param", r)
         r = handle(adapter, {"tool": "catalog"})
+        real = [row for row in r.get("rows", []) if "can" in row]
         check("catalog meta-tool lists every tool with can/cannot",
-              r.get("ok") and r["row_count"] == len(CATALOG)
-              and all("can" in row and "cannot" in row and "caveat" in row for row in r["rows"]), r)
+              r.get("ok") and r["row_count"] == len(CATALOG) + len(dbsearch.REDIRECTS)
+              and len(real) == len(CATALOG)
+              and all("cannot" in row and "caveat" in row for row in real), r)
+        check("catalog meta-tool lists the redirects with routes",
+              any(row.get("redirect_to") == "rtt-engine" for row in r["rows"]), r["rows"])
+        r = handle(adapter, {"tool": "get_current_position"})
+        check("redirect: live position -> rtt-engine with reason",
+              r.get("ok") is False and r.get("code") == "redirect"
+              and r.get("redirect_to") == "rtt-engine" and "flushed" in r.get("error", ""), r)
+        r = handle(adapter, {"tool": "get_bot_master"})
+        check("redirect: mastership -> rtt-engine", r.get("code") == "redirect"
+              and r.get("redirect_to") == "rtt-engine", r)
+        r = handle(adapter, {"tool": "get_current_position", "id": "z9"})
+        check("redirect: correlation id echoed", r.get("id") == "z9", r)
         r = handle(adapter, {"tool": "get_character", "params": {"toon": "Nope"}, "id": "abc"})
         check("empty result still ok + correlation id echoed",
               r.get("ok") is True and r.get("id") == "abc" and r["row_count"] == 0, r)
