@@ -308,7 +308,41 @@ def main():
               "rpg, grind" in director.run_queries(
                   [{"query": "strategies", "bot": "Ayla"}], all_bots))
 
-        print("== 8. presence facts (heartbeat hands, never decides) ==")
+        print("== 8. turn cap + hang indicators (live 2026-11-10 gap) ==")
+        import io
+        buf = io.StringIO()
+        stamped = director._StampedStdout(buf)
+        stamped.write("daemon: hello\n")
+        check("daemon log lines are timestamped",
+              "\n" in buf.getvalue() and "daemon: hello" in buf.getvalue()
+              and len(buf.getvalue().split(" ")[0]) == 10, buf.getvalue())
+
+        real_llm = director.llm
+        nudged = []
+
+        def slow_llm(messages):
+            time.sleep(1.2)          # a turn slower than the test threshold
+            return "aye"
+
+        director.STILL_WORKING = 0.5
+        director.llm = slow_llm
+        out = director.llm_retry([{"role": "user", "content": "x"}],
+                                 notify=lambda: nudged.append("nudge"))
+        check("slow turn returns its reply", out == "aye", out)
+        check("still-working nudge fired once mid-turn", nudged == ["nudge"], nudged)
+
+        def fast_llm(messages):
+            return "quick"
+
+        director.llm = fast_llm
+        nudged.clear()
+        out = director.llm_retry([{"role": "user", "content": "x"}],
+                                 notify=lambda: nudged.append("nudge"))
+        check("fast turn: no nudge", out == "quick" and nudged == [], (out, nudged))
+        director.llm = real_llm
+        director.STILL_WORKING = 45.0
+
+        print("== 9. presence facts (heartbeat hands, never decides) ==")
         director._svc_state = lambda: "active"
         cfg = director._wd_conf()
         cfg["GROUP"] = "Cecil Rydia"

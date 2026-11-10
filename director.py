@@ -85,9 +85,17 @@ CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
 # validate() rails are then the only safety net).
 DEBUG = os.environ.get("DIRECTOR_DEBUG", "") in ("1", "yes", "on")
 # ^ DIRECTOR_DEBUG=1 dumps raw LLM replies to daemon.log
-LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "240"))
-# ^ cap on the Ollama call; a cold/slow model or a queue of turns can otherwise
-#   stall the single-threaded loop for minutes
+LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "120"))
+# ^ cap on ONE Ollama call; a slow model or a queue of turns can otherwise stall
+#   the single-threaded loop for minutes (live 2026-11-10: a warm model still
+#   took ~5 min and returned empty - the master now gets a hard fail at 2 min
+#   instead of silence). The model is kept resident (DIRECTOR_KEEP_ALIVE=-1,
+#   A17) so 120s is generous for a warm turn.
+STILL_WORKING = float(os.environ.get("DIRECTOR_STILL_WORKING", "45"))
+# ^ if a whisper-triggered LLM turn is still running after this many seconds,
+#   whisper the master a heads-up so slow is never mistaken for a hang
+STILL_WORKING_MSG = os.environ.get("DIRECTOR_STILL_WORKING_MSG",
+                                   "still with you - the model is thinking...")
 _ACK_DEFAULT = ";".join([
     "one moment...", "stand by...", "aye...", "on it...", "give me a second...",
     "checking the ledgers...", "plotting a course...", "rallying the units...",
@@ -581,17 +589,48 @@ def llm(messages):
         return json.loads(r.read())["message"]["content"]
 
 
-def llm_retry(messages):
+def llm_retry(messages, notify=None):
     """llm() with a single retry on empty output - some models occasionally
-    return '' (seen live 2026-11-05); an empty reply must not look like silence."""
-    reply = llm(messages)
-    if not reply.strip():
-        print("daemon: empty LLM reply from %s - retrying once" % MODEL)
-        messages.append({"role": "user",
-                         "content": "Output ONLY the JSON object now. Nothing else."})
+    return '' (seen live 2026-11-05); an empty reply must not look like silence.
+    `notify` (daemon whisper turns only) fires once if the whole turn exceeds
+    STILL_WORKING seconds, so a slow model is never mistaken for a hang."""
+    done = threading.Event()
+    if notify and STILL_WORKING > 0:
+        def _nudge():
+            if not done.wait(STILL_WORKING):
+                try:
+                    notify()
+                except Exception as e:
+                    print("daemon: still-working nudge failed: %s" % e)
+        threading.Thread(target=_nudge, daemon=True).start()
+    try:
         reply = llm(messages)
-        messages.pop()
-    return reply
+        if not reply.strip():
+            print("daemon: empty LLM reply from %s - retrying once" % MODEL)
+            messages.append({"role": "user",
+                             "content": "Output ONLY the JSON object now. Nothing else."})
+            reply = llm(messages)
+            messages.pop()
+        return reply
+    finally:
+        done.set()
+
+
+class _StampedStdout:
+    """daemon.log lines carry no timestamps of their own - stamp every
+    non-empty write so a hung or slow turn is visible in the log timeline
+    (live 2026-11-10: grep for a wall-clock window matched nothing)."""
+
+    def __init__(self, out):
+        self._out = out
+
+    def write(self, s):
+        if s.strip():
+            s = time.strftime("%Y-%m-%d %H:%M:%S ") + s
+        return self._out.write(s)
+
+    def flush(self):
+        self._out.flush()
 
 
 def _extract_json(text):
@@ -1101,6 +1140,7 @@ def daemon():
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         sys.exit("another director.py daemon is already running (daemon.lock); not starting")
+    sys.stdout = _StampedStdout(sys.stdout)
     authed = masters()
     print("daemon: Leo is listening (facts: db-search on %s; sends/replies: "
           "chat-tunnel on %s). masters: %s"
@@ -1202,7 +1242,8 @@ def daemon():
                     if BOTFB:
                         roster_msg += "\nRecent bot error whispers: " + "; ".join(BOTFB[-5:])
                     conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
-                    reply = llm_retry(_with_fewshot(conv))
+                    reply = llm_retry(_with_fewshot(conv),
+                                      notify=lambda: say(sender, STILL_WORKING_MSG))
                     print("daemon: llm answered in %.1fs" % (time.time() - t0))
                     if DEBUG:
                         print("daemon: raw llm reply: %r" % reply[:800])
@@ -1223,7 +1264,8 @@ def daemon():
                                  "\nGive your final reply now, with orders if any. "
                                  "(Further queries this turn are ignored.)"})
                     try:
-                        reply = llm_retry(_with_fewshot(conv))
+                        reply = llm_retry(_with_fewshot(conv),
+                                          notify=lambda: say(sender, STILL_WORKING_MSG))
                         if DEBUG:
                             print("daemon: raw llm reply (post-queries): %r" % reply[:800])
                     except Exception as e:
