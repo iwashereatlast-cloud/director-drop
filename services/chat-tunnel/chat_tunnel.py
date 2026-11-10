@@ -13,7 +13,10 @@ Local-only JSON interface (127.0.0.1):
           -> {"ok": true, "result": {"correlation_id": "...", ...}}
       tools: send_command(bot, cmd)
              get_recent_events(limit, direction)
+             get_events_since(after_id, limit)      - cursor read (GUI feed)
+             wait_for_events(after_id, timeout, limit) - long-poll (GUI feed)
              get_reply(correlation_id)
+             stats()
   GET  /health
 
 Run:  python3 services/chat-tunnel/chat_tunnel.py
@@ -57,6 +60,14 @@ LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
 # master-issued server commands go out as '.playerbots ...' lines instead of
 # a /w (same split director.py's order_line() makes, minimal subset here)
 MASTER_CMDS = ("bot add", "bot remove", "bot" )
+
+# in-process counters for the stats tool (parse truth + health at a glance)
+STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_dropped": 0,
+         "replies_matched": 0, "replies_unmatched": 0,
+         "sends_ok": 0, "sends_failed": 0, "started_at": time.time()}
+
+# signaled after every event insert - the seam wait_for_events long-polls on
+NEW_EVENT = threading.Condition()
 
 
 def order_line(bot, cmd):
@@ -119,6 +130,7 @@ def send_command(bot, cmd):
         with open(FIFO, "w") as f:
             f.write(line + "\n")
     except OSError as e:
+        STATS["sends_failed"] += 1
         return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
     with db() as conn:
         conn.execute(
@@ -126,6 +138,9 @@ def send_command(bot, cmd):
             " correlation_id, raw_line, channel, status)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
             (now(), "sent", MASTER, bot, cmd, cid, line, None, "pending"))
+    STATS["sends_ok"] += 1
+    with NEW_EVENT:
+        NEW_EVENT.notify_all()
     return True, {"correlation_id": cid, "line": line, "bot": bot, "cmd": cmd}
 
 
@@ -163,16 +178,26 @@ def match_reply(sender, channel, text, raw_line, t):
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (t, "reply", sender, MASTER, text, cid, raw_line, channel,
              None, matched))
+    if matched:
+        STATS["replies_matched"] += 1
+    else:
+        STATS["replies_unmatched"] += 1
+    with NEW_EVENT:
+        NEW_EVENT.notify_all()
     return matched
 
 
 def handle_reply_line(raw_line, t):
+    STATS["lines_seen"] += 1
     m = LINE_RE.search(raw_line)
     if not m:
-        return None                      # garbled/foreign line: ignored, never matched
+        STATS["lines_dropped"] += 1
+        return None                  # garbled/foreign line: ignored, never matched
     sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
     if not text:
+        STATS["lines_dropped"] += 1
         return None
+    STATS["lines_parsed"] += 1
     return match_reply(sender, channel, text, raw_line.rstrip("\n"), t)
 
 
@@ -207,6 +232,57 @@ def get_recent_events(limit=50, direction=None):
         else:
             return False, "bad direction %r (want sent|reply)" % direction
         return True, {"events": [ev_json(r) for r in rows]}
+
+
+def get_events_since(after_id, limit=200):
+    """Cursor read: every event with id > after_id, ascending - the poll
+    pattern for a live GUI feed. `after_id` is the last id the reader saw;
+    the result carries the new cursor (`last_id`). Retention-purged rows are
+    simply gone (a GUI re-syncs from id 0 after a gap longer than retention)."""
+    after = int(after_id or 0)
+    limit = max(1, min(int(limit or 200), 1000))
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after, limit)).fetchall()
+        last = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()["m"] or 0
+    return True, {"events": [ev_json(r) for r in rows], "last_id": last}
+
+
+def wait_for_events(after_id, timeout=10, limit=200):
+    """Server-side long-poll: blocks until an event with id > after_id lands
+    (or `timeout` passes), then returns ascending - one request per batch of
+    new lines, no hot-polling. This is the real-time seam for the web GUI."""
+    after = int(after_id or 0)
+    timeout = max(0.0, min(float(timeout or 10), 25.0))
+    limit = max(1, min(int(limit or 200), 1000))
+    deadline = now() + timeout
+    while True:
+        ok, res = get_events_since(after, limit)
+        if not ok:
+            return False, res
+        if res["events"] or now() >= deadline:
+            return True, res
+        with NEW_EVENT:
+            NEW_EVENT.wait(max(0.05, deadline - now()))
+
+
+def stats():
+    """Parse truth + health in one call: in-process line counters plus the
+    DB's own status tally. `lines_dropped` growing while real whisper lines
+    exist in the log means LINE_RE is missing a live format (A14 FAIL)."""
+    out = dict(STATS)
+    out["uptime_sec"] = round(now() - STATS["started_at"], 1)
+    with db() as conn:
+        conn.row_factory = sqlite3.Row
+        tally = {r["status"] or "reply": r["n"] for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM events GROUP BY status")}
+        out["db_rows"] = sum(tally.values())
+        out["db_sent_pending"] = tally.get("pending", 0)
+        out["db_sent_replied"] = tally.get("replied", 0)
+        out["db_sent_timeout"] = tally.get("timeout", 0)
+        out["db_reply_rows"] = tally.get("reply", 0)
+    return True, out
 
 
 def ev_json(r):
@@ -298,6 +374,14 @@ class Handler(BaseHTTPRequestHandler):
                                              args.get("direction"))
             elif tool == "get_reply":
                 ok, res = get_reply(args.get("correlation_id"))
+            elif tool == "get_events_since":
+                ok, res = get_events_since(args.get("after_id"),
+                                           args.get("limit"))
+            elif tool == "wait_for_events":
+                ok, res = wait_for_events(args.get("after_id"),
+                                          args.get("timeout"), args.get("limit"))
+            elif tool == "stats":
+                ok, res = stats()
             else:
                 self.reply(404, {"ok": False, "error": "no such tool %r" % tool})
                 return
