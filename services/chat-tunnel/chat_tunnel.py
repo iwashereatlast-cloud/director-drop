@@ -167,6 +167,7 @@ def send_command(bot, cmd):
             " correlation_id, raw_line, channel, status)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
             (now(), "sent", MASTER, bot, cmd, cid, line, None, "pending"))
+    _maybe_purge()
     STATS["sends_ok"] += 1
     with NEW_EVENT:
         NEW_EVENT.notify_all()
@@ -207,6 +208,7 @@ def match_reply(sender, channel, text, raw_line, t):
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (t, "reply", sender, MASTER, text, cid, raw_line, channel,
              None, matched))
+    _maybe_purge()
     if matched:
         STATS["replies_matched"] += 1
     else:
@@ -299,6 +301,128 @@ def wait_for_events(after_id, timeout=10, limit=200):
             NEW_EVENT.wait(max(0.05, deadline - now()))
 
 
+def describe():
+    """The command grammar itself - the single source of truth for HOW to
+    talk through this tunnel. The LLM (or any client) fetches this once and
+    knows the interface; the daemon bakes it into its system prompt at
+    startup. Changes here propagate to every client on restart - no
+    hand-maintained prompt to drift from the enforcing code."""
+    return True, {
+        "interface": "chat-tunnel/1",
+        "purpose": "communication only: talk to bots, listen to bots, "
+                   "verify the conversation is not garbled in either "
+                   "direction, serve the event feed",
+        "send": {
+            "whisper": {
+                "line": "/w <bot> <command>",
+                "example": "/w Ayla nc ?",
+                "constraints": "bot name matches [A-Za-z]+; text max 300 "
+                               "chars, no newlines; sends are paced >= "
+                               "%ss apart (whisper throttle)" % PACE,
+            },
+            "master_command": {
+                "line": ".playerbots <subcommand> <bot>",
+                "example": ".playerbots bot add Gau",
+                "notes": "server-side bot management from Leo's session "
+                         "(bot add / bot remove / bot addaccount)",
+            },
+            "raw_dot": {
+                "line": "<anything starting with .>",
+                "notes": "passed through verbatim (server command)",
+            },
+        },
+        "listen_channels": ["whisper", "guild"],
+        "listen_note": "chat rides a loguru envelope in the log; only "
+                       "display lines are parsed. Send-side /s and /g are "
+                       "NOT advertised: unverified on this client.",
+        "reply_matching": {
+            "rule": "a reply binds to the OLDEST still-pending command to "
+                    "the same bot within the window - sender + time window, "
+                    "never 'next line seen'",
+            "window_sec": WINDOW,
+        },
+        "tools": ["send_command", "get_recent_events", "get_events_since",
+                  "wait_for_events", "get_reply", "verify", "describe",
+                  "stats"],
+    }
+
+
+# --- delivery verification: tunnel events vs the server's own chat log ---
+# The server records every whisper into acore_auth.logs (CONFIRMED live
+# 2026-11-10, roadmap). This is the communication-only DB function that
+# lives here: compare what WE sent/parsed against what the SERVER saw, and
+# report garbles. Read-only, same MySQL identity the rest of the stack uses.
+MYCNF = os.environ.get("CHAT_TUNNEL_MYCNF",
+                       os.path.expanduser("~/.my.cnf-director"))
+LOGDB_FIXTURE = os.environ.get("CHAT_TUNNEL_LOGDB_FIXTURE", "")
+
+
+def _logdb_rows(t_lo, t_hi):
+    """[(unixtime, string)] whisper rows from acore_auth.logs in the window.
+    A fixture file (JSON list) replaces the DB - the proof harness runs the
+    same code path without a worldserver."""
+    if LOGDB_FIXTURE:
+        try:
+            with open(LOGDB_FIXTURE) as f:
+                rows = json.load(f)
+            return [(int(r[0]), r[1]) for r in rows
+                    if t_lo <= int(r[0]) <= t_hi]
+        except (OSError, ValueError) as e:
+            return []
+    env = dict(os.environ)
+    env.pop("MYSQL_PWD", None)
+    out = subprocess.run(
+        ["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e",
+         "SELECT time, string FROM acore_auth.logs "
+         "WHERE type='chat.whisper' AND time BETWEEN %d AND %d" % (t_lo, t_hi)],
+        capture_output=True, text=True, env=env, timeout=10)
+    if out.returncode != 0:
+        raise RuntimeError("acore_auth.logs query failed: %s"
+                           % out.stderr.strip()[:200])
+    rows = []
+    for ln in out.stdout.splitlines():
+        parts = ln.split("\t", 1)
+        if len(parts) == 2 and parts[0].strip().isdigit():
+            rows.append((int(parts[0]), parts[1]))
+    return rows
+
+
+def _verify_side(ev, direction):
+    """Compare one tunnel event against the server's chat log.
+    Verdict: delivered (logged, text identical) | garbled (logged, text
+    differs) | not_found (nothing logged in the window) | no_event."""
+    if not ev:
+        return {"verdict": "no_event"}
+    t = int(ev["ts"])
+    rows = _logdb_rows(t - 3, t + 30)
+    if direction == "sent":
+        needle = "Player %s whisper %s: %s" % (MASTER, ev["target"], ev["command"])
+    else:
+        needle = "Player %s whisper %s: %s" % (ev["sender"], MASTER, ev["command"])
+    for _, s in rows:
+        if s == needle:
+            return {"verdict": "delivered", "db_line": s}
+        # same speakers, different text = garbled in transit
+        head = needle.split(":")[0]
+        if s.startswith(head + ":"):
+            return {"verdict": "garbled", "db_line": s, "expected": needle}
+    return {"verdict": "not_found"}
+
+
+def verify(correlation_id):
+    """Both-direction garble check for one command: what the tunnel sent
+    vs what the server logged, and what the tunnel parsed vs what the
+    server logged. Purely on-demand - this tool never runs itself."""
+    cid = str(correlation_id or "").strip()
+    got = get_reply(cid)
+    if not got[0]:
+        return got
+    sent_ev, reply_ev = got[1]["sent"], got[1]["reply"]
+    return True, {"correlation_id": cid,
+                  "sent": _verify_side(sent_ev, "sent"),
+                  "reply": _verify_side(reply_ev, "reply")}
+
+
 def stats():
     """Parse truth + health in one call: in-process line counters plus the
     DB's own status tally. `lines_noise` (DEBUG etc.) growing is normal;
@@ -328,20 +452,29 @@ def ev_json(r):
     }
 
 
-def purge_loop():
-    while True:
-        time.sleep(PURGE_EVERY)
-        t = now()
-        try:
-            with closing(db()) as conn, conn:
-                sweep_timeouts(conn, t)
-                conn.execute("DELETE FROM events WHERE ts < ?", (t - RETENTION,))
-                conn.execute(
-                    "DELETE FROM events WHERE id NOT IN"
-                    " (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
-                    (MAX_ROWS,))
-        except sqlite3.Error as e:
-            print("purge error: %s" % e, file=sys.stderr)
+_PURGE = {"n": 0, "last": 0.0}
+
+
+def _maybe_purge():
+    """Retention, folded into the write path: the service has NO timer
+    thread - housekeeping runs inline on writes (every 50 inserts or
+    PURGE_EVERY seconds since the last sweep, whichever comes first)."""
+    _PURGE["n"] += 1
+    t = now()
+    if _PURGE["n"] < 50 and t - _PURGE["last"] < PURGE_EVERY:
+        return
+    _PURGE["n"] = 0
+    _PURGE["last"] = t
+    try:
+        with closing(db()) as conn, conn:
+            sweep_timeouts(conn, t)
+            conn.execute("DELETE FROM events WHERE ts < ?", (t - RETENTION,))
+            conn.execute(
+                "DELETE FROM events WHERE id NOT IN"
+                " (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+                (MAX_ROWS,))
+    except sqlite3.Error as e:
+        print("purge error: %s" % e, file=sys.stderr)
 
 
 def tail_loop():
@@ -380,7 +513,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/health":
+        if self.path == "/grammar":
+            ok, res = describe()
+            self.reply(200, {"ok": True, "result": res})
+        elif self.path == "/health":
             self.reply(200, {"ok": True, "service": "chat-tunnel",
                              "log": LOG, "fifo": FIFO, "db": DB,
                              "window": WINDOW, "retention": RETENTION})
@@ -413,6 +549,10 @@ class Handler(BaseHTTPRequestHandler):
             elif tool == "wait_for_events":
                 ok, res = wait_for_events(args.get("after_id"),
                                           args.get("timeout"), args.get("limit"))
+            elif tool == "describe":
+                ok, res = describe()
+            elif tool == "verify":
+                ok, res = verify(args.get("correlation_id"))
             elif tool == "stats":
                 ok, res = stats()
             else:
@@ -436,7 +576,6 @@ def main():
                  % (DB, lock_path))
     init_db()
     threading.Thread(target=tail_loop, daemon=True).start()
-    threading.Thread(target=purge_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print("chat-tunnel: 127.0.0.1:%d tailing %s -> %s (window=%ss"
           " retention=%ss)" % (PORT, LOG, DB, WINDOW, RETENTION))
