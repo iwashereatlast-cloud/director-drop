@@ -1,6 +1,10 @@
 [Unit]
 Description=Leo director daemon (LLM brain)
-After=network-online.target
+# the brain never starts before its hands: db-search (facts) and
+# chat-tunnel (sends/replies) come up first, and a restart of the
+# master restarts them too (they carry PartOf=leo-director.service)
+Requires=db-search.service chat-tunnel.service
+After=network-online.target db-search.service chat-tunnel.service
 
 [Service]
 WorkingDirectory=%h/downloads/director-drop

@@ -1,6 +1,9 @@
 [Unit]
 Description=chat-tunnel: single owner of /tmp/leo.log (tail -> SQLite, correlated sends)
 After=network-online.target
+# restart with the stack: `systemctl --user restart leo-director`
+# pulls this service too (the code it serves ships in the same repo)
+PartOf=leo-director.service
 
 [Service]
 WorkingDirectory=%h/downloads/director-drop
