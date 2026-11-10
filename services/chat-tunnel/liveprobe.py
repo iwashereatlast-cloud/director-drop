@@ -142,14 +142,24 @@ def main():
             verdict = "PENDING"         # still open at deadline (wait too short)
         if verdict != "OK":
             bad += 1
-        rows.append((bot, cid, status, reply, lat, verdict))
+        # the server's own record: what we sent / what we parsed must match
+        # what the world actually saw (both directions, no garbles)
+        try:
+            v = call(a.port, "verify", {"correlation_id": cid})["result"]
+            dbv = "S:%s R:%s" % (v["sent"]["verdict"], v["reply"]["verdict"])
+            if v["sent"]["verdict"] == "garbled" or v["reply"]["verdict"] == "garbled":
+                bad += 1
+        except Exception as e:
+            dbv = "db:unavailable (%s)" % str(e)[:30]
+        rows.append((bot, cid, status, reply, lat, verdict, dbv))
 
-    print("%-10s %-13s %-8s %-42s %8s  %s" %
-          ("bot", "cid", "status", "reply", "latency", "verdict"))
-    for bot, cid, status, reply, lat, verdict in rows:
+    print("%-10s %-13s %-8s %-42s %8s  %-24s %s" %
+          ("bot", "cid", "status", "reply", "latency", "db-verify", "verdict"))
+    for bot, cid, status, reply, lat, verdict, dbv in rows:
         txt = (reply["command"][:40] if reply else "-")
-        print("%-10s %-13s %-8s %-42s %8s  %s" %
-              (bot, cid, status, txt, "%.1fs" % lat if lat else "-", verdict))
+        print("%-10s %-13s %-8s %-42s %8s  %-24s %s" %
+              (bot, cid, status, txt,
+               "%.1fs" % lat if lat else "-", dbv, verdict))
 
     lat_ok = [r[4] for r in rows if r[4]]
     print()
