@@ -144,9 +144,18 @@ def main():
             bad += 1
         # the server's own record: what we sent / what we parsed must match
         # what the world actually saw (both directions, no garbles)
+        # the server's chat logger is async - a fresh row can lag the reply
+        # by a moment, so retry a not_found verdict a few times before
+        # believing it
+        dbv = "db:unavailable"
         try:
-            v = call(a.port, "verify", {"correlation_id": cid})["result"]
-            dbv = "S:%s R:%s" % (v["sent"]["verdict"], v["reply"]["verdict"])
+            for _ in range(4):
+                v = call(a.port, "verify", {"correlation_id": cid})["result"]
+                dbv = "S:%s R:%s" % (v["sent"]["verdict"], v["reply"]["verdict"])
+                if v["sent"]["verdict"] != "not_found" \
+                        and v["reply"]["verdict"] != "not_found":
+                    break
+                time.sleep(2)
             if v["sent"]["verdict"] == "garbled" or v["reply"]["verdict"] == "garbled":
                 bad += 1
         except Exception as e:

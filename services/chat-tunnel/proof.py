@@ -341,6 +341,14 @@ def s_verify(t):
           "verify: garbled send is CAUGHT, not assumed fine")
     check(v["sent"].get("expected") == "Player Leo whisper Ayla: nc ?",
           "verify: garble report carries the expected line")
+    # regression (live false positive): another whisper between the SAME
+    # pair sits in the window - the exact match must win, not the neighbor
+    t.set_logdb([[int(sent_ev["ts"]), "Player Leo whisper Ayla: nc ?? GARBLED"],
+                 [int(sent_ev["ts"]), "Player Leo whisper Ayla: nc ?"],
+                 [int(ev["ts"]), "Player Ayla whisper Leo: Strategies: -new rpg"]])
+    v = t.call("verify", {"correlation_id": cid})["result"]
+    check(v["sent"]["verdict"] == "delivered",
+          "verify: exact match beats a same-speaker neighbor (no false garble)")
     # not_found: nothing logged in the window
     t.set_logdb([])
     v = t.call("verify", {"correlation_id": cid})["result"]
