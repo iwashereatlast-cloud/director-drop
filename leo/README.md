@@ -1,12 +1,26 @@
 # Leo presence control (systemd user units)
 
-Leo's headless world session becomes a managed service with a watchdog:
+Leo's headless world session is a managed service. Since the single-brain
+rebuild (2026-11-10), ONLY THE LLM decides anything about game state -
+including Leo's own presence. The daemon's presence thread is a hand:
+it gathers facts every ~30s and, when something needs attention (Leo went
+offline, a reboot left him down during online hours, a zombie session),
+it sends the LLM a PRESENCE HEARTBEAT - the facts, the operator's standing
+policy, and the recipe (ritual accounts/bots, current group members). The
+LLM replies with orders, which execute through the same validated pipeline
+as human orders (whisper/master cmds) plus a strict service order
+({"service":"leo","cmd":"start|stop|restart"}). Every heartbeat and every
+order lands in daemon.log + audit.log. The watchdog timer is INFO-ONLY:
+it journals state changes and alarms but never acts. If the daemon is down,
+Leo stays down BY DESIGN - and the watchdog journal is how you see that:
 
 - log in:  systemctl --user start leo
 - log out: systemctl --user stop leo
-- watchdog poll (every 2 min): starts Leo when wanted, stops him when not,
-  zombie-kills a hung session (2 consecutive offline readings), and - default
-  on - queues the bot-start ritual right after Leo logs in.
+- presence heartbeat (every ~30s when attention is needed): facts -> LLM
+  decides -> orders execute (validated). State changes fire immediately;
+  standing alarms re-notify at most every 5 min.
+- watchdog info tick (every 2 min): journals only. `journalctl --user -u
+  leo-watchdog.service` reads it back.
 
 Wanted-online = server-local hour in [ON_H, OFF_H) (default 08-22), OR any
 toon in GROUP online (default: the G1 manual-leveling five). Outside both,
@@ -25,7 +39,8 @@ off-hours.
 4. sudo loginctl enable-linger iwashere      # user units survive boot without a login
 5. systemctl --user enable --now leo-watchdog.timer
 
-Do NOT enable leo.service itself - the watchdog owns when Leo runs.
+Do NOT enable leo.service itself - the daemon's presence manager owns when
+Leo runs (same policy, same knobs below - the daemon reads the same conf).
 
 ## Knobs (optional): create $HOME/.leo-watchdog.conf
 
@@ -48,7 +63,7 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
 ## Receipts
 
 - systemctl --user status leo
-- journalctl --user -n 20 -u leo-watchdog.service     # watchdog decisions
+- journalctl --user -n 20 -u leo-watchdog.service     # watchdog INFO (state changes + alarms)
 - python3 director.py census                          # roster online states
 - tail -n 20 daemon.log                               # director banner
 

@@ -32,20 +32,26 @@ Shared rules for all four conversations:
 
 Contracts live here so a change is visible to every conversation:
 
-- **Single-brain rule (all, PROPOSED 2026-11-10, operator's take):** the LLM
-  (director daemon) is the ONLY decision-maker about game state — which bots
-  exist, who is in what group, what gets whispered and when. Everything else
-  is hands: services may execute, report, and restart broken things
-  (reflexes: presence policy, zombie-kill, watchdog restarts, purge sweeps)
-  but must never issue game-state commands on their own initiative. Named
-  offender: the leo watchdog's auto-ritual + post-ritual group clear — it
-  re-adds bots the LLM may have deliberately removed (#38/#39 remaster
-  ping-pong) and dissolves groups the LLM may have assembled. Target state:
-  watchdog keeps reflexes only; ritual + clear become LLM-invocable tools the
-  daemon runs at Leo-login (and can choose not to). First catch: the
-  acore_auth.logs transcript showed a 10-bot `leave` batch (watchdog clear)
-  — the chat-log audit trail is the instrument that detects brain-fights.
-  Not yet implemented; nothing depends on it until blessed.
+- **Single-brain rule (all, IMPLEMENTED for presence 2026-11-10, operator's
+  take):** the LLM is the ONLY decision-maker about game state — which bots
+  exist, who is in what group, what gets whispered and when, AND Leo's own
+  presence. Everything else is hands: they may gather facts, execute orders,
+  and journal — never decide. Implemented: the leo watchdog is INFO-ONLY
+  (journals state changes + alarms, never acts; if the daemon is down the
+  body is down BY DESIGN and the watchdog journal says so). The daemon's
+  presence thread gathers facts every ~30s and, when attention is needed
+  (state change fires immediately; standing alarms re-notify at most every
+  5 min), sends the LLM a PRESENCE HEARTBEAT: facts + the operator's standing
+  policy + the ritual recipe + current group members. The LLM's orders flow
+  through the SAME validated pipeline as human orders, plus a strict service
+  order ({"service":"leo","cmd":"start|stop|restart"}). `bot addaccount` joined
+  the LLM's master-cmd vocabulary so the ritual is expressible as orders.
+  The old watchdog auto-ritual/group-clear (which re-added bots the LLM may
+  have removed — the #38/#39 remaster ping-pong — and dissolved LLM-assembled
+  groups) is gone. First catch: the acore_auth.logs transcript showed a
+  10-bot `leave` batch (watchdog clear) — the chat-log audit trail is the
+  instrument that detects brain-fights. Verified by tests/test_presence.py
+  (heartbeat conditions + service-order allowlist, 12/12).
 - **Event schema (chat-tunnel owns):** a tunnel event is
   `{id, ts, direction (sent|reply), sender, target, command, correlation_id, raw_line}`.
   `correlation_id` is unique per sent command; a reply is matched only within
