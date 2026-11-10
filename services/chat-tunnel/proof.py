@@ -14,6 +14,8 @@ it over its local-only JSON interface. Scenarios:
   5 ordered      - two commands to the SAME bot: each reply binds to its own
                    command, oldest-pending first
   6 retention    - old events are purged on the retention sweep (DB bounded)
+  7 cursor       - get_events_since: ascending, gapless, empty at the head
+  8 longpoll     - wait_for_events: wakes on a new line, sits out its timeout
 
 Run:  python3 services/chat-tunnel/proof.py   (exit 0 = all scenarios PASS)
 """
@@ -250,6 +252,47 @@ def s_retention(t):
         r.stop()
 
 
+def s_cursor(t):
+    ok0 = t.call("get_events_since", {"after_id": 0})["result"]["last_id"]
+    cid = t.send("Ayla", "nc ?")
+    t.reply("Ayla", "Strategies: -follow")
+    t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "reply stored")
+    r = t.call("get_events_since", {"after_id": ok0})["result"]
+    ids = [e["id"] for e in r["events"]]
+    check(len(ids) == 2, "cursor returned %d events, want 2" % len(ids))
+    check(ids == sorted(ids), "cursor events not ascending")
+    check(r["events"][0]["direction"] == "sent"
+          and r["events"][1]["direction"] == "reply",
+          "cursor order wrong: %r" % r["events"])
+    check(r["last_id"] == ids[-1], "last_id cursor wrong")
+    # an empty cursor read must return zero events, not a replay
+    empty = t.call("get_events_since", {"after_id": r["last_id"]})["result"]
+    check(empty["events"] == [], "after last_id the cursor must be empty")
+
+
+def s_longpoll(t):
+    import threading
+    last = t.call("get_events_since", {"after_id": 0})["result"]["last_id"]
+    # a reply lands 0.6s into the poll: the call must return promptly with it
+    timer = threading.Timer(0.6, lambda: t.reply("Ayla", "live feed line"))
+    timer.start()
+    t0 = time.time()
+    r = t.call("wait_for_events", {"after_id": last, "timeout": 5})["result"]
+    took = time.time() - t0
+    timer.join()
+    check(len(r["events"]) == 1
+          and r["events"][0]["command"] == "live feed line",
+          "long-poll returned wrong batch: %r" % r["events"])
+    check(took < 3.0, "long-poll woke late (%.1fs)" % took)
+    # nothing lands: the poll must sit out its timeout and return empty
+    last = r["last_id"]
+    t0 = time.time()
+    r = t.call("wait_for_events", {"after_id": last, "timeout": 1.0})["result"]
+    took = time.time() - t0
+    check(r["events"] == [], "idle long-poll must return empty")
+    check(0.8 <= took <= 3.0, "idle long-poll returned in %.1fs, want ~1s" % took)
+
+
 SCENARIOS = [
     ("basic - reply binds to its own correlation_id", s_basic),
     ("interleaved - per-bot binding, out-of-order replies", s_interleaved),
@@ -257,6 +300,8 @@ SCENARIOS = [
     ("late - past-window reply never falsely binds", s_late),
     ("ordered - same-bot replies bind oldest-pending-first", s_ordered),
     ("retention - purge keeps the DB bounded", s_retention),
+    ("cursor - get_events_since reads ascending from a cursor", s_cursor),
+    ("longpoll - wait_for_events returns new lines promptly", s_longpoll),
 ]
 
 

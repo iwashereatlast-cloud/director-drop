@@ -38,11 +38,27 @@ correlation_id, raw_line}` plus service columns `channel`, `status`
 |---|---|---|
 | `send_command` | `bot`, `cmd` | `{correlation_id, line, bot, cmd}` |
 | `get_recent_events` | `limit` (<=1000), `direction` (`sent`\|`reply`) | `{events: [...]}` |
+| `get_events_since` | `after_id`, `limit` | `{events: [...], last_id}` — cursor read |
+| `wait_for_events` | `after_id`, `timeout` (<=25), `limit` | long-poll; blocks until new events or timeout |
 | `get_reply` | `correlation_id` | `{sent: {...}, reply: {...}\|null}` |
+| `stats` | — | line counters + DB status tally (parse truth) |
 
 `GET /health` returns the running config. Errors come back as
 `{"ok": false, "error": "..."}`. If the FIFO write fails (no reader — Leo's
 shell down), `send_command` returns `ok: false` and nothing is recorded.
+
+## Real-time reading (the web-GUI seam)
+
+Service 4 (web-gui) gets a live "what Leo sees" feed with one connection,
+no hot-polling, using the event id as a monotonic cursor:
+
+1. `get_events_since(after_id=0)` — initial backlog, remember `last_id`
+2. `wait_for_events(after_id=last_id, timeout=25)` — blocks server-side;
+   returns the next batch ascending (or empty on timeout), then repeat
+
+Events are ascending and gapless per cursor; retention-purged rows are
+gone (a GUI that was away longer than the retention re-syncs from 0).
+`stats()` gives parse health and pending counts for a status widget.
 
 Master commands (`bot add`, `bot remove`) go out as `.playerbots ...` lines,
 anything starting with `.` goes out verbatim, everything else as `/w <bot> <cmd>`
@@ -70,6 +86,37 @@ the JSON interface. 6 scenarios: basic binding, interleaved out-of-order
 replies, the `fixtures/replay-corrupt.log.txt` garbled corpus, a late
 past-window reply, ordered same-bot replies, and the retention purge.
 Exit 0 = all PASS.
+
+## Live acceptance (serverpc, leo online)
+
+`liveprobe.py` is the self-contained live battery — it talks only to the
+service's JSON interface (no botcmd, no daemon):
+
+```
+python3 services/chat-tunnel/liveprobe.py --bots Ayla,Locke --rounds 2
+```
+
+It tabulates every probe as OK / WRONG-SENDER / SILENT / PENDING, prints the
+`stats` parse truth (dropped-line count vs the raw log = the A14 check), and
+an evidence-based `CHAT_TUNNEL_WINDOW` figure from measured reply latencies.
+Exit 0 = every probe OK.
+
+### When we call it stable
+
+1. **Parse truth:** a soak with bots active where `stats().lines_dropped`
+   stays 0 while real whisper lines exist in the log (A14 PASS, pasted).
+2. **Correlation:** liveprobe green (all OK) on at least 3 runs, including
+   one run with a known-offline bot (its probe must come back SILENT/
+   timeout, never falsely replied).
+3. **Send path:** `send_command` succeeds with leo up and returns `ok: false`
+   with leo stopped — no silent loss either way.
+4. **Bounded growth:** after a full retention period, `db_rows` matches
+   what retention predicts and the DB file size is stable.
+5. **Real-time seam:** a `wait_for_events` loop runs for the soak duration
+   without a missed or duplicated event (cursor never rewinds).
+
+All five green across a multi-hour soak = stable; the roadmap row flips to
+verified with the pasted evidence.
 
 ## Deploy
 
