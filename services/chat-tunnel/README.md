@@ -80,6 +80,16 @@ chat_log hook never sees). The tunnel's own parse of the reply remains the
 binding truth for matching; the DB check is corroboration where the mod lets
 it exist.
 
+**Allowlist (operator policy):** the tunnel talks to and listens to ONLY
+roster toons — guild members (source of truth; add an RNDBOT to the guild and
+it is covered on the next roster refresh) plus bot-account toons. `CHAT_TUNNEL_ALLOW`
+(default `guild:Special FXc`, or a comma-separated name list) resolves the roster
+lazily every `CHAT_TUNNEL_ALLOW_TTL` seconds (default 300 — no timer thread) via the
+read-only MySQL identity, and FAILS OPEN: a roster lookup error keeps the last known
+set, so a DB hiccup can never lock the tunnel. Non-roster: sends refused
+(`ok: false`), listened chatter dropped and tallied in `stats` (`lines_filtered`,
+`sends_refused`, `allowlist_size`).
+
 `GET /grammar` serves the same grammar JSON to the web GUI. `verify` uses
 `CHAT_TUNNEL_MYCNF` (default `~/.my.cnf-director`, read-only) and accepts a
 `CHAT_TUNNEL_LOGDB_FIXTURE` JSON fixture so the proof harness runs the same

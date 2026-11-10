@@ -67,7 +67,8 @@ class Tunnel:
                    CHAT_TUNNEL_RETENTION=str(retention),
                    CHAT_TUNNEL_PURGE_EVERY=str(PURGE_EVERY),
                    CHAT_TUNNEL_PACE=str(pace),
-                   CHAT_TUNNEL_LOGDB_FIXTURE=self.logdb)
+                   CHAT_TUNNEL_LOGDB_FIXTURE=self.logdb,
+                   CHAT_TUNNEL_ALLOW="Ayla,Locke,Gau,Mog")
         self.proc = subprocess.Popen([sys.executable, SERVICE], env=env,
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
@@ -369,6 +370,29 @@ def s_verify(t):
           "verify: reply verdict on empty log")
 
 
+def s_allowlist(t):
+    # send to a non-roster toon is REFUSED
+    r = t.call("send_command", {"bot": "Zuljin", "cmd": "nc ?"})
+    check(r["ok"] is False and "allowlist" in r["error"],
+          "send to a non-roster toon is refused with the allowlist reason")
+    # a reply from a non-roster sender is dropped, never matched
+    s0 = t.call("stats", {})["result"]["lines_filtered"]
+    cid = t.send("Ayla", "nc ?")
+    t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
+                 " headless.world.chat.chat:display:124 - [Rando] [whisper]: noise line")
+    t.reply("Ayla", "Strategies: -follow")
+    t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "roster reply stored")
+    s1 = t.call("stats", {})["result"]["lines_filtered"]
+    check(s1 > s0, "non-roster sender counted as filtered")
+    ev = t.call("get_recent_events", {"limit": 50})["result"]["events"]
+    check(all(e["sender"] != "Rando" for e in ev),
+          "non-roster sender never lands in events")
+    # roster bots still work end to end
+    r = t.get_reply(cid)
+    check(r["sent"]["status"] == "replied" and r["reply"]["sender"] == "Ayla",
+          "roster bot unaffected by the allowlist")
+
+
 SCENARIOS = [
     ("basic - reply binds to its own correlation_id", s_basic),
     ("interleaved - per-bot binding, out-of-order replies", s_interleaved),
@@ -380,6 +404,7 @@ SCENARIOS = [
     ("longpoll - wait_for_events returns new lines promptly", s_longpoll),
     ("describe - the grammar exposes send shapes and tools", s_describe),
     ("verify - delivery + garble check against the chat log", s_verify),
+    ("allowlist - non-roster send refused, non-roster chatter dropped", s_allowlist),
 ]
 
 

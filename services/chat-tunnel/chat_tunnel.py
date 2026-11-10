@@ -79,7 +79,7 @@ MASTER_CMDS = ("bot add", "bot remove", "bot" )
 # expected and harmless. lines_garbled = lines that LOOK like display lines
 # but failed to parse - these are the A14 red flag.
 STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_noise": 0,
-         "lines_garbled": 0,
+         "lines_garbled": 0, "lines_filtered": 0, "sends_refused": 0,
          "replies_matched": 0, "replies_unmatched": 0,
          "sends_ok": 0, "sends_failed": 0, "started_at": time.time()}
 
@@ -141,6 +141,11 @@ def send_command(bot, cmd):
         return False, "bad bot name %r (want [A-Za-z]+)" % bot
     if not cmd or "\n" in cmd or "\r" in cmd or len(cmd) > 300:
         return False, "bad command %r" % cmd[:40]
+    allow = allowed_names()
+    if allow and bot.lower() not in allow:
+        STATS["sends_refused"] += 1
+        return False, ("bot %r is not in the allowlist (guild/bot-account "
+                       "roster) - refusing" % bot)
     line = order_line(bot, cmd)
     cid = new_cid()
     # nonblocking FIFO write: ENXIO when no reader (leo shell down) instead
@@ -237,6 +242,10 @@ def handle_reply_line(raw_line, t):
     sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
     if not text:
         STATS["lines_garbled"] += 1
+        return None
+    allow = allowed_names()
+    if allow and sender.lower() not in allow:
+        STATS["lines_filtered"] += 1   # outside the roster: dropped, never matched
         return None
     STATS["lines_parsed"] += 1
     return match_reply(sender, channel, text, raw_line.rstrip("\n"), t)
@@ -351,6 +360,12 @@ def describe():
                     "never 'next line seen'",
             "window_sec": WINDOW,
         },
+        "allowlist": {
+            "source": ALLOW_RAW,
+            "rule": "talk to and listen to ONLY roster toons (guild members "
+                    "plus bot-account toons); everything else is refused "
+                    "on send and dropped on listen",
+        },
         "tools": ["send_command", "get_recent_events", "get_events_since",
                   "wait_for_events", "get_reply", "verify", "describe",
                   "stats"],
@@ -365,6 +380,59 @@ def describe():
 MYCNF = os.environ.get("CHAT_TUNNEL_MYCNF",
                        os.path.expanduser("~/.my.cnf-director"))
 LOGDB_FIXTURE = os.environ.get("CHAT_TUNNEL_LOGDB_FIXTURE", "")
+
+# --- allowlist (operator policy, 2026-11-10): talk to and listen to ONLY
+# our toons - guild members (source of truth; RNDBOTs can be added to the
+# guild later) plus bot-account toons. Resolved lazily with a TTL - no timer
+# thread - and FAIL-OPEN: a roster lookup failure keeps the last known set
+# (or no filtering at startup), so a DB hiccup can never lock the tunnel.
+ALLOW_RAW = os.environ.get("CHAT_TUNNEL_ALLOW", "guild:Special FXc")
+ALLOW_TTL = float(os.environ.get("CHAT_TUNNEL_ALLOW_TTL", "300"))
+_allow_cache = {"names": None, "at": 0.0}
+
+
+def _mysql_col(sql):
+    env = dict(os.environ)
+    env.pop("MYSQL_PWD", None)
+    out = subprocess.run(
+        ["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", sql],
+        capture_output=True, text=True, env=env, timeout=10)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip()[:200])
+    return [l.strip() for l in out.stdout.splitlines() if l.strip()]
+
+
+def allowed_names():
+    """Lower-cased set of toons we may talk to / listen to, or None while
+    unresolved (fail-open). 'guild:<name>' resolves guild members + bot
+    accounts; a comma list is used verbatim (the proof harness runs this
+    path without a DB)."""
+    t = now()
+    if _allow_cache["names"] is not None and t - _allow_cache["at"] < ALLOW_TTL:
+        return _allow_cache["names"]
+    src = ALLOW_RAW.strip()
+    try:
+        if src.lower().startswith("guild:"):
+            guild = src.split(":", 1)[1].strip()
+            names = {n.lower() for n in _mysql_col(
+                "SELECT c.name FROM acore_characters.characters c "
+                "JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
+                "JOIN acore_characters.guild g ON g.guildid=gm.guildid "
+                "WHERE g.name='%s'" % guild)}
+            names |= {n.lower() for n in _mysql_col(
+                "SELECT c.name FROM acore_characters.characters c "
+                "JOIN acore_auth.account a ON a.id=c.account "
+                "WHERE a.username LIKE 'i_was_here%%'")}
+        else:
+            names = {n.strip().lower() for n in src.split(",") if n.strip()}
+        if names:
+            _allow_cache["names"] = names
+            _allow_cache["at"] = t
+            return names
+    except Exception as e:
+        print("allowlist: roster lookup failed, keeping last known set "
+              "(fail-open): %s" % e, file=sys.stderr)
+    return _allow_cache["names"]
 
 
 def _logdb_rows(t_lo, t_hi):
@@ -447,6 +515,8 @@ def stats():
     LINE_RE is missing a live format (A14 FAIL)."""
     out = dict(STATS)
     out["uptime_sec"] = round(now() - STATS["started_at"], 1)
+    allow = allowed_names()
+    out["allowlist_size"] = len(allow) if allow else 0
     with closing(db()) as conn, conn:
         conn.row_factory = sqlite3.Row
         tally = {r["status"] or "reply": r["n"] for r in conn.execute(
