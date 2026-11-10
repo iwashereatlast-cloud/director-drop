@@ -10,7 +10,6 @@ BOTCMD_FIFO="${BOTCMD_FIFO:-/tmp/leo.in}"
 BOTCMD_SHELL_LOG="${BOTCMD_SHELL_LOG:-/tmp/leo.log}"
 BOTCMD_DIRECTOR_LOG="$BOTCMD_REPO/daemon.log"
 BOTCMD_WATCHDOG_CONF="${BOTCMD_WATCHDOG_CONF:-$HOME/.leo-watchdog.conf}"
-BOTCMD_SOAP_CONF="${BOTCMD_SOAP_CONF:-$HOME/.soap-director}"
 BOTCMD_MYCNF="${BOTCMD_MYCNF:-$HOME/.my.cnf-director}"
 BOTCMD_ACCOUNT_LIKE="${BOTCMD_ACCOUNT_LIKE:-i_was_here%}"
 BOTCMD_MASTER_ACCOUNT="${BOTCMD_MASTER_ACCOUNT:-I_WAS_HERE1ST}"
@@ -142,31 +141,4 @@ _ini_set() {  # $1=file $2=key $3=value (empty removes) $4=separator (default "=
   local rc=$?
   rm -f "$tmp"
   return $rc
-}
-
-# POST one worldserver console command to the SOAP endpoint (shared by
-# system.sh _soap_run and anything else that needs it - the envelope/netrc/
-# curl boilerplate lives HERE once). Prints "HTTP_CODE" then the stripped
-# response text; prints just "000" on connection failure; rc 1 = gate not armed.
-_soap_post() {  # $1 = console command
-  local url user pass cmdxml envelope resp code body netrc rc
-  [ -s "$BOTCMD_SOAP_CONF" ] && [ "$(wc -l < "$BOTCMD_SOAP_CONF")" -ge 3 ] || return 1
-  url=$(sed -n '1p' "$BOTCMD_SOAP_CONF")
-  user=$(sed -n '2p' "$BOTCMD_SOAP_CONF")
-  pass=$(sed -n '3p' "$BOTCMD_SOAP_CONF")
-  cmdxml=$(printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g')
-  envelope='<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>'"$cmdxml"'</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>'
-  # credentials via a 0600 netrc file, never -u on the cmdline (visible in /proc)
-  netrc=$(mktemp) || return 1
-  (umask 077 && printf 'default login %s password %s\n' "$user" "$pass" > "$netrc")
-  resp=$(curl -s --max-time 10 --netrc --netrc-file "$netrc" \
-    -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: urn:AC' \
-    -d "$envelope" -w $'\n%{http_code}' "$url" 2>/dev/null)
-  rc=$?
-  rm -f "$netrc"
-  [ $rc -eq 0 ] || { echo "000"; return 0; }
-  code=$(printf '%s' "$resp" | tail -n 1)
-  body=$(printf '%s' "$resp" | sed '$d')
-  printf '%s\n' "$code"
-  printf '%s' "$body" | sed -e 's/<[^>]*>/ /g' | tr -s ' ' | sed 's/^ *//'
 }

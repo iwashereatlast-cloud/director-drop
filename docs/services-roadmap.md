@@ -42,6 +42,35 @@ Contracts live here so a change is visible to every conversation:
 - **Routing rule (all):** DB-answerable → db-search; tick-sensitive or
   non-polled → rtt-engine; never whisper-probe to learn something the DB
   already knows.
+- **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
+  (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
+  per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
+  error:{code, message, route_hint?}}`. Ops: `catalog`, `ping`, `pinfo`
+  (live position of an ONLINE bot via the 8888 command server). Refused:
+  DB-answerable names → `route_hint: "db-search"`; `kick` → `route_hint:
+  "chat-tunnel"` (accepted gap). `backend` is always `pbcmd` — callers must
+  not depend on it beyond display. Offline truth is db-search (logout
+  flushes final position to `characters`).
+
+## SOAP end-of-life decision (2026-11-09)
+
+SOAP is removed completely — even a single command riding on it is one more
+layer to break. Consequences, settled at tracker level:
+
+- rtt-engine's real-time backend is the stock mod-playerbots command server
+  (`Playerbots.CommandServerPort`, default 8888, read-only line protocol
+  `<verb>,<guid>\n`, answers live position/state/HP for ONLINE bots only).
+  No in-core command bus will be built.
+- `server_info` and generic `console` passthrough are deleted (nothing in
+  the stack consumes them).
+- `kick` is refused with `route_hint: "chat-tunnel"` — `.playerbots bot
+  remove` covers registered bots; force-kicking a non-bot plain session is
+  an accepted gap (DB logout flush covers offline truth).
+- Live position of an online bot is a nice-to-have query, never load-bearing;
+  offline truth is db-search (logout flushes final position to `characters`).
+- Legacy SOAP paths outside rtt-engine (director.py soap_command, the
+  location query's SOAP layer, lib/botcmd common.sh/system.sh/roster.sh,
+  `botcmd system arm/soap/cmd`) are deleted in the same removal pass.
 
 ## Order & gates
 
@@ -49,6 +78,7 @@ Contracts live here so a change is visible to every conversation:
    command under replay (including a late/garbled line fixture).
 2. db-search ships with the query catalog documented, each query proofed
    against a DB fixture.
-3. rtt-engine ships with the SOAP backend wrapped and a backend-swap seam
-   (interface unchanged).
+3. rtt-engine ships with the pbcmd backend (stock 8888 command server) and
+   the response envelope unchanged from the original `rtt-engine/1` shape —
+   callers must not notice the backend swap (harness asserts it).
 4. web-gui starts only after 1–3 answer JSON.

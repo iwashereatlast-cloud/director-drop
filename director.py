@@ -23,16 +23,15 @@ Leo's shell account never get auth, because their automatic "Using X"
 master-report whispers would be answered by the LLM and ping-pong with the bot
 AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
 require the word 'leo' in the line. Bot senders are additionally dropped by a
-DB account check + master-report line filter (no SOAP involved:
+DB account check + master-report line filter (no console credentials:
 '.playerbots inspect' does not exist in mod-playerbots @ e88cc40 and
-'.playerbots bot' requires an active session, so neither works from the SOAP
-console). RP chatter must never reach the LLM or the two layers talk.
+'.playerbots bot' requires an active session, so neither works without a
+live session). RP chatter must never reach the LLM or the two layers talk.
 Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
-import argparse, base64, fcntl, html, json, os, random, re, subprocess, sys, time, urllib.error, urllib.request
-from xml.sax.saxutils import escape as _xml_escape
+import argparse, fcntl, json, os, random, re, socket, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -73,13 +72,16 @@ MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"
 # ^ read via --defaults-file (NOT --defaults-extra-file): MySQL reads ~/.my.cnf
 # AFTER the extra file, so the full-power acore identity in ~/.my.cnf would
 # override the RO user. --defaults-file reads ONLY the RO file.
-SOAPCNF = os.path.expanduser(os.environ.get("DIRECTOR_SOAPCNF", "~/.soap-director"))
-# ^ 3-line side file (chmod 600) for the worldserver SOAP endpoint: url, user,
-# pass. The credentials are a real game account with gmlevel >= Administrator
-# (AzerothCore checks the account table over HTTP Basic - verified in
-# ACSOap.cpp; there is no SOAP user/password key in worldserver.conf). Missing
-# or short file = SOAP off: the location query falls back to the DB logout
-# position (stale, but the LLM is told so).
+CMDSRV_HOST = os.environ.get("DIRECTOR_CMDSERVER_HOST", "127.0.0.1")
+CMDSRV_PORT = int(os.environ.get("DIRECTOR_CMDSERVER_PORT", "8888"))
+# ^ the stock mod-playerbots command server (Playerbots.CommandServerPort):
+# read-only line protocol '<verb>,<guid>\n' (PlayerbotCommandServer.cpp),
+# answers live position/state/HP for ONLINE bots only. NO auth, binds
+# 0.0.0.0 - talk to 127.0.0.1 only and firewall the port from outside.
+# Port 0 disables the live layer (location falls back to the DB last-logout
+# position, marked as such). This is the same backend rtt-engine (service
+# 3) wraps; the old console-credential path is end-of-life
+# (docs/services-roadmap.md).
 CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
 # ^ daemon default: validated orders are HELD until the master whispers
 # 'go'/'skip'. DIRECTOR_CONFIRM=0 auto-executes immediately (not recommended:
@@ -170,7 +172,7 @@ MASTER_CMDS = ("bot add", "bot remove")
 
 # group-management server commands, same FIFO path but formatted '.group ...'
 # (cs_group.cpp). NOTE: '.group remove' is Console::No in AzerothCore, so it
-# CANNOT run via SOAP (SOAP queues console commands; only '.group list' and
+# CANNOT run from any remote/console path (only '.group list' and
 # '.group revive' are Console::Yes). It only works as an in-game command from
 # Leo's own session and needs that account to hold rbac_perm_command_group_remove
 # (gmlevel 3 / Administrator has every perm). Bot members do not need it:
@@ -184,7 +186,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live map/zone via SOAP .pinfo when configured - else the toon's last logged-out position, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE nc/co strategy read-back: the daemon runs 'botcmd states verify <bot>' - it whispers 'nc ?'/'co ?' to the bot and returns the BOT/CONF/NC(live)/CO(live)/VERDICT row). Use them instead of guessing numbers.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live position via the mod's command server when the bot is online - else the toon's last logged-out position from the DB, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE nc/co strategy read-back: the daemon runs 'botcmd states verify <bot>' - it whispers 'nc ?'/'co ?' to the bot and returns the BOT/CONF/NC(live)/CO(live)/VERDICT row). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
 - Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the CLI clears that auto-formed group after rituals). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
@@ -449,71 +451,61 @@ def group_members(name):
 
 
 # ---------------------------------------------------------------------------
-# SOAP (optional): live worldserver-console access for the location query.
-# One operation only: ns1:executeCommand over HTTP Basic auth with a game
-# account whose gmlevel is >= Administrator (AzerothCore checks the account
-# table itself - verified in ACSOap.cpp). The server needs SOAP.Enabled=1
-# (default bind 127.0.0.1:7878). Config file ~/.soap-director, 3 lines:
-#   http://127.0.0.1:7878/
-#   <game account name>
-#   <game account password>
+# Live position via the stock mod-playerbots command server (8888).
+# Read-only line protocol '<verb>,<guid>\n' (PlayerbotCommandServer.cpp),
+# answers ONLINE bots only. No auth, binds 0.0.0.0: we talk to
+# 127.0.0.1 only (CMDSRV_HOST) and the operator firewalls the port.
+# DIRECTOR_CMDSERVER_PORT=0 disables the live layer. This mirrors the
+# rtt-engine (service 3) backend; the old console path is end-of-life.
 # ---------------------------------------------------------------------------
 
-def _soap_cfg():
-    try:
-        with open(SOAPCNF) as f:
-            vals = [l.strip() for l in f.read().splitlines()][:3]
-    except OSError:
-        return None
-    if len(vals) < 3 or not all(vals):
-        return None
-    return vals[0], vals[1], vals[2]
+_GUID_CACHE = {}   # name.lower() -> (guid, fetched_at)
 
 
-def soap_command(cmd, timeout=10):
-    """Run one console command via SOAP; returns (ok, text). Never raises."""
-    cfg = _soap_cfg()
-    if not cfg:
-        return False, "SOAP not configured (" + SOAPCNF + " missing/incomplete)"
-    url, user, pw = cfg
-    env = ('<?xml version="1.0" encoding="utf-8"?>'
-           '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" '
-           'xmlns:ns1="urn:AC"><SOAP-ENV:Body>'
-           '<ns1:executeCommand><command>' + _xml_escape(cmd) + '</command></ns1:executeCommand>'
-           '</SOAP-ENV:Body></SOAP-ENV:Envelope>')
-    auth = base64.b64encode((user + ":" + pw).encode()).decode()
-    req = urllib.request.Request(url, data=env.encode("utf-8"), headers={
-        "Content-Type": "text/xml; charset=utf-8", "SOAPAction": "urn:AC",
-        "Authorization": "Basic " + auth})
+def _guid(name):
+    """Actual guid value for a toon name (read-only DB, cached 5 min)."""
+    key = name.lower()
+    hit = _GUID_CACHE.get(key)
+    now = time.monotonic()
+    if hit and now - hit[1] < 300:
+        return hit[0]
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return False, "HTTP %d (bad account/password or gmlevel below Administrator)" % e.code
+        row = _mysql("SELECT guid FROM acore_characters.characters "
+                     "WHERE name='%s'" % name.replace("'", "")).splitlines()
+        g = int(row[0]) if row and row[0].isdigit() else None
+    except Exception:
+        g = None
+    _GUID_CACHE[key] = (g, now)
+    return g
+
+
+def _cmdserver_position(name):
+    """Live position of an ONLINE bot via the command server; returns
+    (ok, text). ok False = server off/unreachable/bot not live."""
+    if CMDSRV_PORT <= 0:
+        return False, "command server disabled (DIRECTOR_CMDSERVER_PORT=0)"
+    g = _guid(name)
+    if not g:
+        return False, "no guid for %r" % name
+    try:
+        s = socket.create_connection((CMDSRV_HOST, CMDSRV_PORT), timeout=5)
     except Exception as e:
-        return False, type(e).__name__ + ": " + str(e)
-    if "<SOAP-ENV:Fault" in body:
-        m = re.search(r"<faultstring[^>]*>(.*?)</faultstring>", body, re.S)
-        return False, "server fault: " + html.unescape(m.group(1) if m else "?")
-    m = re.search(r"<[^>]*executeCommandResponse[^>]*>(.*)</[^>]*executeCommandResponse>", body, re.S)
-    if not m:
-        return False, "unexpected SOAP response: " + body[:120]
-    text = html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
-    return bool(text), text
-
-
-def _fmt_pinfo(raw):
-    """Keep the useful lines of '.pinfo' console output, drop the rest."""
-    keep = []
-    for line in raw.splitlines():
-        line = re.sub(r"\|c[0-9A-Fa-f]{8}|\|r", "", line).strip().strip("|").strip()
-        if not line:
-            continue
-        low = line.lower()
-        if any(k in low for k in ("map:", "zone:", "area:", "online", "login",
-                                   "guild:", "level:", "alive", "money:")):
-            keep.append(line)
-    return "; ".join(keep) if keep else raw[:200]
+        return False, "command server unreachable (%s)" % type(e).__name__
+    try:
+        s.settimeout(5)
+        s.sendall(("position,%d\n" % g).encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        text = buf.decode("utf-8", "replace").strip()
+        return bool(text), text
+    except Exception as e:
+        return False, type(e).__name__
+    finally:
+        s.close()
 
 
 # name -> (what it returns, sql with {n} = validated toon name and
@@ -582,11 +574,11 @@ def run_queries(qs, all_bots):
             continue
         note = ""
         if name == "location":
-            ok, txt = soap_command(".pinfo " + match)
+            ok, txt = _cmdserver_position(match)
             if ok:
-                lines.append("%s location (live .pinfo): %s" % (match, _fmt_pinfo(txt)))
+                lines.append("%s location (live, command server): %s" % (match, txt))
                 continue
-            note = "SOAP unavailable (%s); DB last-logout position: " % (txt or "empty .pinfo response")
+            note = "not live on the command server (%s); DB last-logout position: " % txt
         sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
         try:
             lines.append("%s %s: %s%s" % (match, name, note, info[2](_mysql(sql))))
@@ -744,7 +736,8 @@ def validate(order, bots):
         # whisper (LeaveGroupAction - works with SEC_PLAYER, no GM needed);
         # human members go out as '.group remove <name>' from Leo's session,
         # which needs Leo's account to hold rbac_perm_command_group_remove
-        # (Console::No command - SOAP cannot run it; see GROUP_CMDS note).
+        # (Console::No command - no remote path can run it; see the
+        # GROUP_CMDS note).
         if bot.lower() == LEO.lower():
             return "SKIP: cannot remove Leo from his own group"
         try:
@@ -987,10 +980,10 @@ def _sender_account(name):
 
 def _is_bot_sender(name):
     """True if the sender's ACCOUNT is a bot account or Leo's shell account.
-    Structural and DB-only - works with SOAP off. (The old SOAP
-    '.playerbots inspect' gate was removed: that subcommand does not exist
+    Structural and DB-only - no console credentials involved. (A console
+    '.playerbots' gate was never usable: that subcommand does not exist
     in mod-playerbots @ e88cc40, and '.playerbots bot ...' requires an
-    active session, so neither is usable from the SOAP console.)"""
+    active session.)"""
     acct = _sender_account(name)
     if not acct:
         return False  # DB down: the auth-list and line-filter gates still apply
@@ -1021,9 +1014,16 @@ def daemon():
     else:
         print("daemon: WARNING - orders execute IMMEDIATELY (DIRECTOR_CONFIRM=0); "
               "only the validate() rails apply.")
-    if not _soap_cfg():
-        print("daemon: note - SOAP not configured (%s): live .pinfo location queries fall "
-              "back to last-logout position. Bot-sender gating is DB-based and unaffected." % SOAPCNF)
+    if CMDSRV_PORT > 0:
+        try:
+            s = socket.create_connection((CMDSRV_HOST, CMDSRV_PORT), timeout=2)
+            s.close()
+            print("daemon: command server %s:%d reachable (live position queries on)."
+                  % (CMDSRV_HOST, CMDSRV_PORT))
+        except Exception:
+            print("daemon: note - command server %s:%d unreachable: live position "
+                  "queries fall back to the DB last-logout position."
+                  % (CMDSRV_HOST, CMDSRV_PORT))
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)

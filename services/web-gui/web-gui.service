@@ -1,0 +1,27 @@
+[Unit]
+Description=director-drop web-gui (read-only dashboard over chat-tunnel/db-search/rtt-engine)
+After=network.target chat-tunnel.service db-search.service rtt-engine.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/downloads/director-drop
+ExecStart=/usr/bin/python3 %h/downloads/director-drop/services/web-gui/web_gui.py serve
+# Loopback-only by default (recommended): reach the GUI from a laptop with
+#   ssh -N -L 8766:127.0.0.1:8766 <user>@<server>
+# To expose it on the LAN instead (deliberate choice, see README "LAN bind & login"):
+#   Environment=WEB_GUI_BIND=lan        # or a specific address, e.g. 192.168.88.2;
+#                                       # 'lan' auto-resolves the host's CURRENT address,
+#                                       # so moving the server needs no config edit.
+#                                       # The wildcard 0.0.0.0 is ALWAYS refused.
+#   Environment=WEB_GUI_USER=director
+#   Environment=WEB_GUI_PASS=change-me  # REQUIRED for a non-loopback bind: the
+#                                       # service refuses to start without it.
+#   Then firewall 8766 to the trusted segment. NOTE: no TLS - the login crosses
+#   the LAN in cleartext; the query browser executes real DB reads.
+Environment=WEBGUI_PORT=8766
+Environment=WEBGUI_CENSUS=i_was_here
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -155,7 +155,7 @@ _strategies_diff() {
 # verdict. 'rpg status' (no args) whispers back NewRpgInfo::ToString() ->
 # "Status: GO_GRIND / DO_QUEST / ... " - a TRANSIENT state that re-rolls on
 # IDLE by RpgStatusProbWeight (NewRpgAction.cpp:250-256), shown as info only.
-# ('.playerbots bot <name>' is Console::No - SOAP cannot run it.)
+# ('.playerbots bot <name>' is Console::No - no remote path can run it.)
 
 _states_conf_entries() {  # prints "name<TAB>value" per conf line
   [ -r "$BOTCMD_STATES_CONF" ] || return 1

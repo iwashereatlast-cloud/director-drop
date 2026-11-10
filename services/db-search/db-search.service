@@ -1,0 +1,13 @@
+[Unit]
+Description=Leo db-search service (read-only query catalog, service 2/4)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/downloads/director-drop
+ExecStart=/bin/bash -c 'cd %h/downloads/director-drop/services/db-search && exec python3 -u dbsearch.py serve >> dbsearch.log 2>&1'
+Environment=DBSEARCH_ADAPTER=mysql
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

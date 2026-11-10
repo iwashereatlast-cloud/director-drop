@@ -1,0 +1,27 @@
+# rtt-engine - systemctl --user unit (same install pattern as leo/).
+# Install once:
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf ~/downloads/director-drop/services/rtt-engine/rtt-engine.service \
+#       ~/.config/systemd/user/rtt-engine.service
+#   systemctl --user daemon-reload && systemctl --user enable --now rtt-engine
+#
+# Knobs (environment or ~/.config/systemd/user/rtt-engine.service.d/):
+#   RTT_SOCK=/tmp/rtt-engine.sock
+#   RTT_PBHOST=127.0.0.1   RTT_PBPORT=8888   (keep the host loopback-only:
+#     the mod's command server has NO auth and binds 0.0.0.0 - firewall
+#     port 8888 from the outside)
+#   RTT_MYCNF=~/.my.cnf-director   (read-only DB identity for name->GUID)
+#
+# Backend: the stock mod-playerbots command server (read-only line
+# protocol). No console credentials anywhere.
+[Unit]
+Description=rtt-engine: real-time/non-polled query service (mod-playerbots command server backend)
+After=network-online.target
+
+[Service]
+ExecStart=/bin/bash -c 'exec python3 -u %h/downloads/director-drop/services/rtt-engine/rtt_engine.py serve'
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
