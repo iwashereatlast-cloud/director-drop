@@ -30,10 +30,12 @@ Codes: `unknown_op`, `wrong_service` (with `route_hint`), `bad_params`,
 
 ### `pinfo` — live position of one bot
 - params: `name` (toon name)
-- REACH (A19, source-pinned): the command server's registry is the
+- REACH (A19/A23, source-pinned): the command server's registry is the
   RANDOM-bot pool — guild-invited RNDBOTs answer; master-owned playerbots
-  answer `invalid guid` (→ offline fallback, db-search is their position
-  source).
+  answer `invalid guid` (→ offline fallback). For playerbots, LIVE reads
+  route through chat-tunnel (`.playerbots inspect <bot> <query>` from
+  Leo's session — already in the module, zero changes); db-search is
+  their last-flushed fallback.
 - returns ONLINE: `{name, online: true, guid, map, position: [x, y, z],
   zone, reply}`
 - returns OFFLINE: `{name, online: false, caveat}` — never an error. The
