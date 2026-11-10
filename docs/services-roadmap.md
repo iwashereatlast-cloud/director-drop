@@ -82,3 +82,18 @@ layer to break. Consequences, settled at tracker level:
    the response envelope unchanged from the original `rtt-engine/1` shape —
    callers must not notice the backend swap (harness asserts it).
 4. web-gui starts only after 1–3 answer JSON.
+
+## Evidence protocol update (2026-11-09)
+
+`botcmd doctor` is RETIRED as the evidence protocol. It is a layer cake
+(one command that silently runs probes, whispers, greps) — the exact
+pattern this rebuild removes. Evidence now comes from the services
+directly, one thing per call:
+
+- bot behavior / replies: chat-tunnel `get_reply(correlation_id)`
+- DB facts: db-search (staleness-marked)
+- live position: rtt-engine `pinfo`
+
+No session should suggest running doctor again. The confirm-with column in
+`docs/assumptions.md` that still points at doctor is historical record,
+not guidance.
