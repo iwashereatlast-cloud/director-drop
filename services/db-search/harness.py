@@ -88,8 +88,11 @@ def main():
         r = handle(adapter, {"tool": "get_account_links", "params": {"account": "i_was_cmd"}})
         check("links envelope", envelope_ok(r, "get_account_links"))
         linked = {row[1] for row in r["rows"]}
-        check("links: all four ritual accounts linked (5th included, live 2026-11-10)",
-              linked == {"i_was_here2nd", "i_was_here3rd", "i_was_here4th", "i_was_here5th"}, linked)
+        check("links: all five accounts linked incl. master (live 2026-11-10)",
+              linked == {"i_was_here1st", "i_was_here2nd", "i_was_here3rd",
+                         "i_was_here4th", "i_was_here5th"}, linked)
+        check("links: both-direction rows deduped to one row per pair",
+              r["row_count"] == 5, r["rows"])
         check("links: account names resolved from IDs (no raw account_id in rows)",
               all(not row[0].isdigit() for row in r["rows"]), r["rows"])
         r = handle(adapter, {"tool": "get_account_links", "params": {"account": "i_was_here4th"}})
