@@ -168,14 +168,38 @@ def main():
         check("no log tailing", 'Popen(["tail"' not in src and '"-F"' not in src)
         check("no botcmd probe", '"states", "verify"' not in src and '"botcmd"' not in src)
 
-        print("== 1b. travel recipe follows the engine (source-verified, A24) ==")
+        print("== 1b. travel recipe follows the engine (go travel DEAD, dest query -> go x;y) ==")
         rules = director.ORDER_RULES
-        check("prompt: destinations are subzone/town names",
-              "SUBZONE" in rules and "Stranglethorn Vale\" matches NOTHING" in rules, rules[:0])
-        check("prompt: no level filter claimed on go travel",
-              "NO level filter" in rules)
-        check("prompt: Clearing travel target = not found, never report movement",
-              "Clearing travel target" in rules and "Traveling to" in rules)
+        check("prompt: go travel marked DEAD with the live 31/31 evidence",
+              "go travel <name>\" is DEAD" in rules and "31/31" in rules, rules[:0])
+        check("prompt: dest query is the travel path (coords from db-search)",
+              '"query\":\"dest\"' in rules and "go <x>;<y>" in rules)
+        check("prompt: never confirm movement from the order alone",
+              "never from the order alone" in rules)
+        err = director.validate({"bot": "Gau", "cmd": "go travel Booty Bay"}, {})
+        check("validate: go travel refused as a dead command",
+              "DEAD" in str(err) and "dest query" in str(err), err)
+        bots_c = director.census()
+        err = director.validate({"bot": "Gau", "cmd": "go 12.3;abc"}, bots_c)
+        check("validate: malformed go x;y coordinates refused",
+              "malformed" in str(err), err)
+        err = director.validate({"bot": "Gau", "cmd": "go -14420.0;480.0"}, bots_c)
+        check("validate: well-formed go x;y passes",
+              err is None, err)
+        err = director.validate({"bot": "Gau", "cmd": "go -14420.0;480.0;26.0"}, bots_c)
+        check("validate: go x;y;z (with z) passes",
+              err is None, err)
+        dig = director.run_queries(
+            [{"query": "dest", "bot": "Gau", "name": "Booty Bay"}],
+            director.census(online_only=False))
+        check("dest query returns the ready-made go x;y order",
+              "go -" in dig and "pathfinding" in dig
+              and "queried_at" in dig, dig)
+        dig = director.run_queries(
+            [{"query": "dest", "bot": "Gau", "name": "Nowhereville"}],
+            director.census(online_only=False))
+        check("dest query: unknown location says so",
+              "no known teleport location" in dig, dig)
 
         print("== 1c. zone->destination translation table (A25) ==")
         check("translation table covers 30+ zones",
@@ -392,6 +416,11 @@ def main():
         time.sleep(0.5)
         check("say() wrote /w Cecil via the tunnel",
               "/w Cecil aye, moving out" in fifo_lines, fifo_lines)
+        director.say("Cecil", "moving to Booty Bay. | executed: /w Golbez go travel Booty Bay")
+        check("say() strips the WoW escape char (pipes garble/drop the whisper)",
+              any("/w Cecil moving to Booty Bay. ; executed:" in l
+                  and "|" not in l.split(":", 1)[-1][:2] for l in fifo_lines[-2:]),
+              fifo_lines[-2:])
 
         print("== 6b. human whispers land as tunnel events (the daemon's input feed) ==")
         cursor = director.tunnel("get_events_since", after_id=0, limit=1000)["last_id"]
