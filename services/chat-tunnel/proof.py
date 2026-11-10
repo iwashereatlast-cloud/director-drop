@@ -393,6 +393,49 @@ def s_allowlist(t):
           "roster bot unaffected by the allowlist")
 
 
+def s_inspect(t):
+    # non-roster toon refused; bad query refused
+    r = t.call("inspect", {"bot": "Zuljin", "query": "position"})
+    check(r["ok"] is False and "allowlist" in r["error"],
+          "inspect: non-roster toon refused")
+    r = t.call("inspect", {"bot": "Ayla", "query": "teleport"})
+    check(r["ok"] is False and "bad query" in r["error"],
+          "inspect: bad query refused with the vocabulary")
+    # happy path: inspect command + [System] reply correlates
+    cid = t.call("inspect", {"bot": "Ayla", "query": "position"})["result"]["correlation_id"]
+    t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
+                 " headless.world.chat.chat:display:124 - [System]: Ayla: -8721.05 -2327.83 161.476 0 -0.455113 |Redridge Mountains|")
+    r = t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "inspect reply")
+    check(r["matched_correlation_id"] == cid and r["channel"] == "system",
+          "inspect: [System] reply bound to its command")
+    check(r["command"].startswith("-8721.05"), "inspect: reply text carried")
+    check(t.get_reply(cid)["sent"]["status"] == "replied", "inspect: sent replied")
+    # cross-channel isolation: a [System] line must NOT steal a whisper match
+    cid_w = t.send("Ayla", "nc ?")
+    t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
+                 " headless.world.chat.chat:display:124 - [System]: Ayla: ambient system line")
+    t.sync("ambient system line")   # ingested BEFORE the next inspect exists
+    check(t.get_reply(cid_w)["reply"] is None,
+          "inspect: [System] line did not steal the whisper match")
+    # ...and a whisper reply must not steal an inspect match
+    cid_i = t.call("inspect", {"bot": "Ayla", "query": "hp"})["result"]["correlation_id"]
+    t.reply("Ayla", "Strategies: -follow")   # answers the pending WHISPER
+    r = t.wait_for(lambda: t.get_reply(cid_w)["reply"], 5, "whisper reply")
+    check(r["matched_correlation_id"] == cid_w
+          and t.get_reply(cid_i)["reply"] is None,
+          "inspect: whisper reply did not steal the inspect match")
+    t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
+                 " headless.world.chat.chat:display:124 - [System]: Ayla: 4567/4567")
+    r = t.wait_for(lambda: t.get_reply(cid_i)["reply"], 5, "inspect hp reply")
+    check(r["matched_correlation_id"] == cid_i, "inspect: hp bound to its command")
+    # offline fallback: a timed-out inspect carries the db-search note
+    cid_t = t.call("inspect", {"bot": "Locke", "query": "state"})["result"]["correlation_id"]
+    t.wait_for(lambda: t.get_reply(cid_t)["sent"]["status"] == "timeout",
+               WINDOW + 5, "inspect timeout")
+    check("db-search" in t.get_reply(cid_t).get("note", "").lower(),
+          "inspect: timed-out read points to db-search as the offline truth")
+
+
 SCENARIOS = [
     ("basic - reply binds to its own correlation_id", s_basic),
     ("interleaved - per-bot binding, out-of-order replies", s_interleaved),
@@ -405,6 +448,7 @@ SCENARIOS = [
     ("describe - the grammar exposes send shapes and tools", s_describe),
     ("verify - delivery + garble check against the chat log", s_verify),
     ("allowlist - non-roster send refused, non-roster chatter dropped", s_allowlist),
+    ("inspect - [System] replies correlate, channels never cross-steal", s_inspect),
 ]
 
 

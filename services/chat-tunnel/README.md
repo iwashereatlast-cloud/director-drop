@@ -80,6 +80,21 @@ chat_log hook never sees). The tunnel's own parse of the reply remains the
 binding truth for matching; the DB check is corroboration where the mod lets
 it exist.
 
+**Live reads (absorbed from the retired rtt-engine, A23):** ALL live bot
+reads route through the tunnel. `inspect(bot, query)` sends
+`.playerbots inspect <bot> <query>` (the build's own GM command, zero module
+changes) and correlates the synchronous `[System]: <bot>: <reply>` line to
+the exact command — same sender+window discipline as whispers, separate
+channel, and the two never cross-steal: only pending *inspect* commands are
+eligible for system replies, only whisper replies match whisper commands.
+Queries: state, position, tpos, movement, target, hp, strategy, action,
+values, travel, budget. `.playerbots exec <bot> <command>` (state-changing
+sibling) goes through `send_command`'s raw-dot passthrough; its reply arrives
+as a normal whisper and correlates like any command. **Offline fallback:** a
+timed-out inspect carries `note: offline truth is db-search` — never guess.
+The 8888 command-server port is RETIRED (the operator may set
+`Playerbots.CommandServerPort=0` and drop the firewall exception).
+
 **Allowlist (operator policy):** the tunnel talks to and listens to ONLY
 roster toons — guild members (source of truth; add an RNDBOT to the guild and
 it is covered on the next roster refresh) plus bot-account toons. `CHAT_TUNNEL_ALLOW`
