@@ -30,8 +30,8 @@ def fresh():
     return {"prev_sig": None, "off_streak": 0}
 
 
-def cond(state, leo, wanted, svc):
-    return director._hb_condition((leo, 0, wanted, svc), state)
+def cond(state, leo, wanted, svc, errors=0):
+    return director._hb_condition((leo, 0, wanted, svc, errors), state)
 
 
 # 1. first tick: baseline only, never asks
@@ -70,7 +70,23 @@ s4 = fresh()
 cond(s4, leo=0, wanted=0, svc="inactive")
 check("off-hours steady: no heartbeat", cond(s4, leo=0, wanted=0, svc="inactive"), ("", False))
 
-# 7. service executor: strict allowlist, nothing else
+# 7. NEW bot errors fire an IMMEDIATE heartbeat (state change) - the LLM
+# decides what to do; the thread only reports the fact
+s5 = fresh()
+cond(s5, leo=1, wanted=1, svc="active")   # baseline
+check("no errors -> no heartbeat", cond(s5, leo=1, wanted=1, svc="active"), ("", False))
+c, changed = cond(s5, leo=1, wanted=1, svc="active", errors=2)
+check("new bot errors -> immediate heartbeat", (c != "", changed), (True, True))
+check("same errors again (none new) -> no heartbeat",
+      cond(s5, leo=1, wanted=1, svc="active"), ("", False))
+c, changed = cond(s5, leo=1, wanted=1, svc="active", errors=1)
+check("another new error -> immediate heartbeat again", (c != "", changed), (True, True))
+director.BOTFB.append("Ayla: Unknown spell")
+msg = director._hb_msg((1, 0, 1, "active", 2), "2 new bot error whisper(s) surfaced", CFG)
+check("heartbeat message carries the error whispers",
+      "Ayla: Unknown spell" in msg, True)
+
+# 8. service executor: strict allowlist, nothing else
 ran = []
 real_run = subprocess.run
 
