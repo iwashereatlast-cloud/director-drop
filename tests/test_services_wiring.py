@@ -177,6 +177,24 @@ def main():
         check("prompt: Clearing travel target = not found, never report movement",
               "Clearing travel target" in rules and "Traveling to" in rules)
 
+        print("== 1c. zone->destination translation table (A25) ==")
+        check("translation table covers 30+ zones",
+              len(director.ZONE_DESTINATIONS) >= 30,
+              len(director.ZONE_DESTINATIONS))
+        check("every zone has a destination + bracket",
+              all(isinstance(d, tuple) and len(d) == 2 and d[0] and d[1]
+                  for d in director.ZONE_DESTINATIONS.values()))
+        check("abbreviations resolve to canonical zones",
+              all(z in director.ZONE_DESTINATIONS
+                  for z in director.ZONE_ABBREVIATIONS.values()))
+        check("prompt renders the full table",
+              all(d[0] in director.ORDER_RULES
+                  for d in director.ZONE_DESTINATIONS.values()))
+        check("prompt renders the abbreviations",
+              "stv=Stranglethorn Vale" in director.ORDER_RULES)
+        check("prompt has the leveling-in-zone recipe",
+              "level in <zone>" in director.ORDER_RULES)
+
         print("== 2. db-search facts: census, masters, sender gates ==")
         online = director.census()
         check("census (online): Ayla, Gau, Golbez, Leo",
