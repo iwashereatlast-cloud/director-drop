@@ -31,7 +31,7 @@ Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
-import argparse, fcntl, json, os, random, re, socket, subprocess, sys, threading, time, urllib.request
+import argparse, fcntl, json, os, random, re, subprocess, sys, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -72,16 +72,10 @@ MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"
 # ^ read via --defaults-file (NOT --defaults-extra-file): MySQL reads ~/.my.cnf
 # AFTER the extra file, so the full-power acore identity in ~/.my.cnf would
 # override the RO user. --defaults-file reads ONLY the RO file.
-CMDSRV_HOST = os.environ.get("DIRECTOR_CMDSERVER_HOST", "127.0.0.1")
-CMDSRV_PORT = int(os.environ.get("DIRECTOR_CMDSERVER_PORT", "8888"))
-# ^ the stock mod-playerbots command server (Playerbots.CommandServerPort):
-# read-only line protocol '<verb>,<guid>\n' (PlayerbotCommandServer.cpp),
-# answers live position/state/HP for ONLINE bots only. NO auth, binds
-# 0.0.0.0 - talk to 127.0.0.1 only and firewall the port from outside.
-# Port 0 disables the live layer (location falls back to the DB last-logout
-# position, marked as such). This is the same backend rtt-engine (service
-# 3) wraps; the old console-credential path is end-of-life
-# (docs/services-roadmap.md).
+# Live reads RETIRED with rtt-engine (2026-11-10): the 8888 command server
+# served RANDOM bots only, and .playerbots inspect/exec (A23) covers every
+# online bot through the chat channel - see docs/services-roadmap.md.
+# The location query answers from the DB (last-logout position, marked).
 CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
 # ^ daemon default: validated orders are HELD until the master whispers
 # 'go'/'skip'. DIRECTOR_CONFIRM=0 auto-executes immediately (not recommended:
@@ -186,7 +180,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (live position via the mod's command server when the bot is online - else the toon's last logged-out position from the DB, marked as such), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE nc/co strategy read-back: the daemon runs 'botcmd states verify <bot>' - it whispers 'nc ?'/'co ?' to the bot and returns the BOT/CONF/NC(live)/CO(live)/VERDICT row). Use them instead of guessing numbers.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (the toon's last logged-out position from the DB, marked as such - live reads are chat-tunnel's job now), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE nc/co strategy read-back: the daemon runs 'botcmd states verify <bot>' - it whispers 'nc ?'/'co ?' to the bot and returns the BOT/CONF/NC(live)/CO(live)/VERDICT row). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
 - Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
 - Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the CLI clears that auto-formed group after rituals). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
@@ -450,64 +444,6 @@ def group_members(name):
     return [l.strip() for l in rows.splitlines() if l.strip()]
 
 
-# ---------------------------------------------------------------------------
-# Live position via the stock mod-playerbots command server (8888).
-# Read-only line protocol '<verb>,<guid>\n' (PlayerbotCommandServer.cpp),
-# answers ONLINE bots only. No auth, binds 0.0.0.0: we talk to
-# 127.0.0.1 only (CMDSRV_HOST) and the operator firewalls the port.
-# DIRECTOR_CMDSERVER_PORT=0 disables the live layer. This mirrors the
-# rtt-engine (service 3) backend; the old console path is end-of-life.
-# ---------------------------------------------------------------------------
-
-_GUID_CACHE = {}   # name.lower() -> (guid, fetched_at)
-
-
-def _guid(name):
-    """Actual guid value for a toon name (read-only DB, cached 5 min)."""
-    key = name.lower()
-    hit = _GUID_CACHE.get(key)
-    now = time.monotonic()
-    if hit and now - hit[1] < 300:
-        return hit[0]
-    try:
-        row = _mysql("SELECT guid FROM acore_characters.characters "
-                     "WHERE name='%s'" % name.replace("'", "")).splitlines()
-        g = int(row[0]) if row and row[0].isdigit() else None
-    except Exception:
-        g = None
-    _GUID_CACHE[key] = (g, now)
-    return g
-
-
-def _cmdserver_position(name):
-    """Live position of an ONLINE bot via the command server; returns
-    (ok, text). ok False = server off/unreachable/bot not live."""
-    if CMDSRV_PORT <= 0:
-        return False, "command server disabled (DIRECTOR_CMDSERVER_PORT=0)"
-    g = _guid(name)
-    if not g:
-        return False, "no guid for %r" % name
-    try:
-        s = socket.create_connection((CMDSRV_HOST, CMDSRV_PORT), timeout=5)
-    except Exception as e:
-        return False, "command server unreachable (%s)" % type(e).__name__
-    try:
-        s.settimeout(5)
-        s.sendall(("position,%d\n" % g).encode("utf-8"))
-        buf = b""
-        while b"\n" not in buf:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-        text = buf.decode("utf-8", "replace").strip()
-        return bool(text), text
-    except Exception as e:
-        return False, type(e).__name__
-    finally:
-        s.close()
-
-
 # name -> (what it returns, sql with {n} = validated toon name and
 #          {g} = guid-by-name subquery, result formatter)
 DB_QUERIES = {
@@ -574,11 +510,7 @@ def run_queries(qs, all_bots):
             continue
         note = ""
         if name == "location":
-            ok, txt = _cmdserver_position(match)
-            if ok:
-                lines.append("%s location (live, command server): %s" % (match, txt))
-                continue
-            note = "not live on the command server (%s); DB last-logout position: " % txt
+            note = "DB last-logout position (live reads retired with rtt-engine - chat-tunnel owns them now): "
         sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
         try:
             lines.append("%s %s: %s%s" % (match, name, note, info[2](_mysql(sql))))
@@ -1201,16 +1133,6 @@ def daemon():
     else:
         print("daemon: WARNING - orders execute IMMEDIATELY (DIRECTOR_CONFIRM=0); "
               "only the validate() rails apply.")
-    if CMDSRV_PORT > 0:
-        try:
-            s = socket.create_connection((CMDSRV_HOST, CMDSRV_PORT), timeout=2)
-            s.close()
-            print("daemon: command server %s:%d reachable (live position queries on)."
-                  % (CMDSRV_HOST, CMDSRV_PORT))
-        except Exception:
-            print("daemon: note - command server %s:%d unreachable: live position "
-                  "queries fall back to the DB last-logout position."
-                  % (CMDSRV_HOST, CMDSRV_PORT))
     print("whisper Leo, or say his name in guild chat. Ctrl-C to stop.")
     threading.Thread(target=presence_loop, daemon=True).start()
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the

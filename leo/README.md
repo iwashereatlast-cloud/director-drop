@@ -154,8 +154,9 @@ in any hand-written query (use single quotes around the whole -e argument).
   {"query":"raid","bot":"Leo"} (or any watched toon) to answer
   "who is in the raid / who leads it".
 - Live server-side view: the daemon's `raid` query answers from the
-  read-only DB; live bot position comes from the mod's command server
-  (8888) via rtt-engine (services/rtt-engine/).
+  read-only DB; live bot reads (position/state/HP) route through the
+  chat channel via `.playerbots inspect <bot> <query>` from Leo's session
+  (chat-tunnel owns the pipe; rtt-engine was retired 2026-11-10).
 
 Removing someone from the raid Leo leads:
 
