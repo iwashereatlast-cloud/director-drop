@@ -70,26 +70,28 @@ Contracts live here so a change is visible to every conversation:
   action, values, travel, budget; the reply lands as
   `[System]: <bot>: <reply>` in leo.log, same raw shape the 8888 port
   used. `.playerbots exec <bot> <command>` is the state-changing sibling
-  (replies go to the bot's master = Leo). ABSORPTION CHECKLIST for
-  chat-tunnel's owner: (1) send inspect/exec with correlation IDs and
-  match the `[System]` reply lines; (2) keep the watch-list gate
-  (guild 'Special FXc' + bot accounts — rtt-engine's structural rule
-  moves over); (3) keep the offline fallback semantics (no reply →
-  db-search is the offline truth, never a guess); (4) the 8888 port is
-  RETIRED — the operator may set Playerbots.CommandServerPort=0 and drop
-  the firewall exception (the stack no longer talks to it).
+  (replies go to the bot's master = Leo). ABSORPTION COMPLETE 2026-11-10
+  (chat-tunnel, PR pending): (1) `inspect(bot, query)` tool with correlation
+  IDs and `[System]` reply matching — only pending inspect commands are
+  eligible, so whisper/system channels never cross-steal; `exec` rides the
+  raw-dot passthrough and correlates as a whisper; (2) the watch-list gate =
+  the roster allowlist (guild 'Special FXc' + bot accounts); (3) a timed-out
+  inspect carries `note: offline truth is db-search` — never a guess;
+  (4) 8888 fully retired — liveprobe's rtt pre-flight removed, and liveprobe
+  gains `--inspect` (live-read battery through the inspect tool). Proof
+  harness 12/12 incl. cross-channel isolation + the offline-fallback case.
   CONSUMER NOTES (owners, not this pass): db-search should flip its
   `get_current_position`/`get_live_status`/`get_bot_master`/
   `is_bot_responding` redirects from rtt-engine to chat-tunnel; web-gui
   should drop its rtt panel (catalog/ping/pinfo buttons, `/api/overview`
-  rtt ping); chat-tunnel's optional `liveprobe.py --rtt-sock` pre-flight
-  degrades to a no-op on its own (arg defaults to None).
-- **Send-liveness cross-check (chat-tunnel → rtt-engine, PROPOSED
-  2026-11-10):** chat-tunnel's `liveprobe.py --rtt-sock` consumes the
-  existing `rtt-engine/1` `pinfo` op as a per-bot pre-flight: a server-side
-  online check on a path that bypasses the FIFO whisper transport. This
-  separates "reachable but not answering" from "offline" without a new
-  op. OPEN for rtt-engine's owner: a read-only chat verb on the command
+  rtt ping); chat-tunnel's liveprobe rtt pre-flight is REMOVED (absorbed
+  2026-11-10 — replaced by `--inspect`, the live-read battery).
+- **Send-liveness cross-check (OBSOLETE 2026-11-10 — rtt-engine retired;
+  superseded by the confirmed chat-log delivery receipts):** the proposed
+  `pinfo` pre-flight is gone with the service; `verify(correlation_id)`
+  already separates "delivered but silent" (S:delivered, no reply — bot
+  not answering) from "never sent" (S:not_found — transport down) against
+  the server's own chat record. The rtt-sock idea is dead. OPEN for rtt-engine's owner: a read-only chat verb on the command
   server (see recent incoming whispers per GUID) would give chat-tunnel a
   true delivery receipt — but it needs a mod-playerbots change (new verb
   in `PlayerbotCommandServer.cpp`), so it needs an assumptions-row +

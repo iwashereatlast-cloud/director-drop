@@ -70,6 +70,18 @@ MASTER = os.environ.get("CHAT_TUNNEL_MASTER", "Leo")
 LINE_RE = re.compile(
     r"chat:display:\d+ - \[([A-Za-z]+)\] \[([^]]+)\]: (.*)")
 
+# A23 (live-proven): .playerbots inspect answers synchronously as a
+# "[System]: <bot>: <reply>" display line in leo.log - the SAME raw shape the
+# retired 8888 port used. Ambient bot system messages ("inventory full")
+# use "[System]: <bot>|cff...:" - the letter-then-colon shape below only
+# matches the inspect reply form.
+SYSTEM_RE = re.compile(
+    r"chat:display:\d+ - \[System\]: ([A-Za-z]+): (.*)")
+
+# A23 vocabulary: the live-read queries the build already ships
+INSPECT_QUERIES = ("state", "position", "tpos", "movement", "target", "hp",
+                   "strategy", "action", "values", "travel", "budget")
+
 # master-issued server commands go out as '.playerbots ...' lines instead of
 # a /w (same split director.py's order_line() makes, minimal subset here)
 MASTER_CMDS = ("bot add", "bot remove", "bot" )
@@ -80,6 +92,7 @@ MASTER_CMDS = ("bot add", "bot remove", "bot" )
 # but failed to parse - these are the A14 red flag.
 STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_noise": 0,
          "lines_garbled": 0, "lines_filtered": 0, "sends_refused": 0,
+         "lines_system": 0,
          "replies_matched": 0, "replies_unmatched": 0,
          "sends_ok": 0, "sends_failed": 0, "started_at": time.time()}
 
@@ -147,11 +160,18 @@ def send_command(bot, cmd):
         return False, ("bot %r is not in the allowlist (guild/bot-account "
                        "roster) - refusing" % bot)
     line = order_line(bot, cmd)
-    cid = new_cid()
-    # nonblocking FIFO write: ENXIO when no reader (leo shell down) instead
-    # of blocking an HTTP worker forever on a hung shell; lines < PIPE_BUF
-    # are atomic on a FIFO, so a concurrent writer cannot interleave.
-    # Serialized + spaced by PACE: the client/server drops whisper bursts.
+    ok, err = _fifo_write_paced(line)
+    if not ok:
+        return False, err
+    cid = _record_sent(bot, line, cmd)
+    return True, {"correlation_id": cid, "line": line, "bot": bot, "cmd": cmd}
+
+
+def _fifo_write_paced(line):
+    """Nonblocking FIFO write: ENXIO when no reader (leo shell down) instead
+    of blocking an HTTP worker forever on a hung shell; lines < PIPE_BUF are
+    atomic on a FIFO, so a concurrent writer cannot interleave. Serialized
+    and spaced by PACE: the client/server drops whisper bursts."""
     with _send_lock:
         delay = _last_send[0] + PACE - now()
         if delay > 0:
@@ -164,19 +184,53 @@ def send_command(bot, cmd):
                 os.close(fd)
         except OSError as e:
             STATS["sends_failed"] += 1
-            return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
+            return False, ("FIFO write to %s failed (no reader? leo shell "
+                           "down?): %s" % (FIFO, e))
         _last_send[0] = now()
+    return True, None
+
+
+def _record_sent(bot, line, command):
+    cid = new_cid()
     with closing(db()) as conn, conn:
         conn.execute(
             "INSERT INTO events (ts, direction, sender, target, command,"
             " correlation_id, raw_line, channel, status)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
-            (now(), "sent", MASTER, bot, cmd, cid, line, None, "pending"))
+            (now(), "sent", MASTER, bot, command, cid, line, None, "pending"))
     _maybe_purge()
     STATS["sends_ok"] += 1
     with NEW_EVENT:
         NEW_EVENT.notify_all()
-    return True, {"correlation_id": cid, "line": line, "bot": bot, "cmd": cmd}
+    return cid
+
+
+def inspect(bot, query):
+    """A23 live read: .playerbots inspect <bot> <query> from Leo's session.
+    The reply lands as a "[System]: <bot>: <reply>" display line and is
+    correlated to THIS command (sender + window, oldest pending first) -
+    same discipline as whisper matching, separate channel. Only inspect
+    commands are eligible, so ambient [System] lines and whisper replies
+    can never steal the match."""
+    bot = str(bot or "").strip()
+    query = str(query or "").strip().lower()
+    if not re.fullmatch(r"[A-Za-z]+", bot):
+        return False, "bad bot name %r (want [A-Za-z]+)" % bot
+    if query not in INSPECT_QUERIES:
+        return False, ("bad query %r - the build ships: %s"
+                       % (query, ", ".join(INSPECT_QUERIES)))
+    allow = allowed_names()
+    if allow and bot.lower() not in allow:
+        STATS["sends_refused"] += 1
+        return False, ("bot %r is not in the allowlist (guild/bot-account "
+                       "roster) - refusing" % bot)
+    line = ".playerbots inspect %s %s" % (bot, query)
+    ok, err = _fifo_write_paced(line)
+    if not ok:
+        return False, err
+    cid = _record_sent(bot, line, "inspect %s" % query)
+    return True, {"correlation_id": cid, "line": line, "bot": bot,
+                  "query": query}
 
 
 def sweep_timeouts(conn, t):
@@ -223,11 +277,58 @@ def match_reply(sender, channel, text, raw_line, t):
     return matched
 
 
+def match_system_reply(sender, text, raw_line, t):
+    """Bind a [System]: <bot>: <reply> line to the pending INSPECT command
+    for that bot (sender + window, oldest first). Only inspect commands are
+    eligible - whisper pendings are never stolen by system lines."""
+    with closing(db()) as conn, conn:
+        sweep_timeouts(conn, t)
+        row = conn.execute(
+            "SELECT id, correlation_id FROM events"
+            " WHERE direction='sent' AND status='pending'"
+            " AND target = ? COLLATE NOCASE"
+            " AND raw_line LIKE '.playerbots inspect %'"
+            " AND ts >= ? ORDER BY ts ASC, id ASC LIMIT 1",
+            (sender, t - WINDOW)).fetchone()
+        if row:
+            matched = row["correlation_id"]
+            conn.execute("UPDATE events SET status='replied' WHERE id=?",
+                         (row["id"],))
+        else:
+            matched = None
+        cid = new_cid()
+        conn.execute(
+            "INSERT INTO events (ts, direction, sender, target, command,"
+            " correlation_id, raw_line, channel, status, matched_correlation_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (t, "reply", sender, MASTER, text, cid, raw_line, "system",
+             None, matched))
+    if matched:
+        STATS["replies_matched"] += 1
+    else:
+        STATS["replies_unmatched"] += 1
+    with NEW_EVENT:
+        NEW_EVENT.notify_all()
+    return matched
+
+
 def handle_reply_line(raw_line, t):
     STATS["lines_seen"] += 1
     if "chat:display:" not in raw_line:
         STATS["lines_noise"] += 1     # DEBUG/loguru noise: no chat in it at all
         return None
+    s = SYSTEM_RE.search(raw_line)
+    if s:
+        sender, text = s.group(1), s.group(2).strip()
+        if not text:
+            STATS["lines_noise"] += 1
+            return None
+        allow = allowed_names()
+        if allow and sender.lower() not in allow:
+            STATS["lines_filtered"] += 1
+            return None
+        STATS["lines_system"] += 1
+        return match_system_reply(sender, text, raw_line.rstrip("\n"), t)
     m = LINE_RE.search(raw_line)
     if not m:
         # a display line that is NOT chat-shaped. "[System]: <bot>|cff...:
@@ -263,7 +364,12 @@ def get_reply(correlation_id):
         reply = conn.execute(
             "SELECT * FROM events WHERE matched_correlation_id=?"
             " ORDER BY id ASC LIMIT 1", (cid,)).fetchone()
-        return True, {"sent": ev_json(sent), "reply": ev_json(reply) if reply else None}
+        out = {"sent": ev_json(sent), "reply": ev_json(reply) if reply else None}
+        if sent["status"] == "timeout" and (sent["command"] or "").startswith("inspect "):
+            out["note"] = ("no live reply within the window - the bot may be "
+                           "offline or AI-dead; OFFLINE TRUTH IS DB-SEARCH "
+                           "(last-logout position/state) - never guess")
+        return True, out
 
 
 def get_recent_events(limit=50, direction=None):
@@ -360,15 +466,26 @@ def describe():
                     "never 'next line seen'",
             "window_sec": WINDOW,
         },
+        "live_reads": {
+            "tool": "inspect(bot, query)",
+            "queries": list(INSPECT_QUERIES),
+            "reply_shape": "[System]: <bot>: <reply>, correlated to the "
+                           "inspect command (sender + window)",
+            "exec": ".playerbots exec <bot> <command> - send it via "
+                    "send_command (raw-dot passthrough); the reply arrives "
+                    "as a normal whisper and correlates like any command",
+            "offline_fallback": "no reply => db-search owns the offline "
+                                "truth (last-logout position/state)",
+        },
         "allowlist": {
             "source": ALLOW_RAW,
             "rule": "talk to and listen to ONLY roster toons (guild members "
                     "plus bot-account toons); everything else is refused "
                     "on send and dropped on listen",
         },
-        "tools": ["send_command", "get_recent_events", "get_events_since",
-                  "wait_for_events", "get_reply", "verify", "describe",
-                  "stats"],
+        "tools": ["send_command", "inspect", "get_recent_events",
+                  "get_events_since", "wait_for_events", "get_reply",
+                  "verify", "describe", "stats"],
     }
 
 
@@ -638,6 +755,8 @@ class Handler(BaseHTTPRequestHandler):
                                           args.get("timeout"), args.get("limit"))
             elif tool == "describe":
                 ok, res = describe()
+            elif tool == "inspect":
+                ok, res = inspect(args.get("bot"), args.get("query"))
             elif tool == "verify":
                 ok, res = verify(args.get("correlation_id"))
             elif tool == "stats":
