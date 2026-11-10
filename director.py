@@ -195,8 +195,8 @@ CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 # Zone -> engine destination translation table (the master speaks ZONE names,
 # the travel engine matches SUBZONE/town names - A24). Curated from the 3.3.5
 # AreaTable; every destination must be live-confirmed via the A25 batch probe
-# ("go travel <name>" must answer "Traveling to <name>", never "Clearing
-# travel target"); a FAIL row gets its mapping fixed, not shipped.
+# (live-probe recipe for a destination: order it, then read the bot's reply
+# or live position back - a FAIL row gets its mapping fixed, not shipped).
 ZONE_DESTINATIONS = {
     # zone (canonical + common abbreviations)      engine destination   bracket
     "Elwynn Forest":        ("Goldshire",           "1-10"),
@@ -297,7 +297,7 @@ Rules:
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
 - Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself. ONLY these exact spell names are ever allowed: Mooncloth (tailors), Transmute: Titanium (alchemists), Smelt Titansteel (miners) - the system checks the unit's professions and refuses everything else. Never invent spell names or spell ids.
-- NPC/mob travel: the destination matcher also searches the NPC, mob and boss catalogs, so "send Ayla to the trainer", "have Gau grind yetis" work the same way: cmd "go travel <npc or mob name>" (case-insensitive substring, nearest match wins - A24). Prefer the specific name you mean; say which match you sent them to.
+- NPC/mob travel is covered by the same dest query: "send Ayla to the trainer in Goldshire", "have Gau grind yetis" - attach {"query":"dest","bot":"<any>","name":"<npc/mob place name>"} and order the returned "go x;y" (the bot pathfinds to the exact spot). Prefer the specific name you mean; say which destination you sent them to.
 - Quest by name: to send a bot after a SPECIFIC quest the master names, attach query {"query":"quest","bot":"<name>"} FIRST - the results carry quest ids - then order cmd "rpg do quest <id>". NEVER invent quest ids; if the quest is not in the bot's log, say so.
 - Silent-bot procedure (A20): if a bot ignores orders or a probe times out, do not report it as fine. 1) attach query {"query":"strategies","bot":"<name>"} - a timeout means silent (offline truth is db-search). 2) If the roster shows it ONLINE and it stayed silent, it is a corpse or master-less: order {"bot":"<name>","cmd":"revive"}, wait, then re-probe. 3) Still silent: remaster - {"bot":"<name>","cmd":"bot remove"} then {"bot":"<name>","cmd":"bot add"}. Attach the orders in the same reply; never just describe them.
 - DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only through the DB service and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Each result carries a queried_at time and a staleness caveat - respect both, never present stale numbers as current. Queries: location (the toon's last-flushed map/zone from the DB, marked as such - live position is the tunnel's job), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE strategy read-back through the tunnel's inspect command - returns the bot's live strategy list, or a timeout note if it stays silent). Use them instead of guessing numbers.
@@ -312,14 +312,14 @@ Rules:
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
 - Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or a strategies query timed out (silent, master-less bot), CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; wrong strategies -> re-push the recipe cmd; silent bot -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
-- Zone travel: cmd "go travel <destination>" sends a unit toward a destination matched by NAME (case-insensitive substring, nearest match wins) against the travel system's catalogs (zones/areas, towns, NPCs, mobs, bosses - verified vs mod-playerbots @ 405f8119, GoAction.cpp + ChooseTravelTargetAction.cpp). Destination names that match are SUBZONE/area and town names, NOT parent zone names: "Stranglethorn Vale" matches NOTHING. There is NO level filter on this command. The bot's reply is the ONLY truth: "Traveling to <title>" = it is moving; "Clearing travel target" = the name matched nothing. NEVER tell the master a unit is moving unless the bot answered "Traveling to ..." - on "Clearing travel target", say the destination was not found and propose a different one.
+- Zone travel: "go travel <name>" is DEAD on this build (the engine's travel catalogs are never loaded - a live 31/31 probe got "Clearing travel target" for every destination, including its own example). To move a unit to a named destination, attach query {"query":"dest","bot":"<any>","name":"<destination>"} FIRST - the result carries exact coordinates and the ready-made order - then order cmd "go <x>;<y>" (whisper command; the bot walks there with pathfinding, no distance limit, no GM needed). Narrate it as "<bot> is walking to <destination>". Confirm movement only from evidence (a live query or the bot's own words), never from the order alone.
 - Destination translation: the master speaks in ZONE names and abbreviations ("send Golbez to Stranglethorn Vale", "go to stv", "level in Thousand Needles"); the engine wants the town/subzone name. Translate with this table (zone -> destination, level bracket):
 %(zones)s
   Common abbreviations: %(abbr)s. If the master names a zone not in the table, pick the best-known town in it and TELL them which destination you are sending the unit to. If the master names a town/area directly, use it as-is. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order.
 - Harbormaster travel (cross-continent): Leo is NOT a teleporter. Bots cross continents ONLY by boat/zeppelin, and ONLY along these real routes: Booty Bay->Ratchet, Menethil Harbor->Theramore, Menethil Harbor->Auberdine (boats, any faction); Gromgol Base Camp->Undercity, Gromgol Base Camp->Orgrimmar, Undercity->Orgrimmar (zeppelins, HORDE only - never send an Alliance bot there). To board, the unit must be at the departure harbor; order {"bot":"<name>","cmd":"boat <arrival harbor>"} ONLY when the unit is at the departure dock (check with query {"query":"live","bot":"<name>"}). Narrate trips as travel: "Gau is taking the boat from Menethil Harbor to Auberdine" - never mention teleporting. The system enforces the routes; a SKIP means the unit is not at the dock or the route is wrong for its faction.%(carriage)s
 - Farming mats: "have <bot> farm <mat>" (herbs/ore) = 1) check the unit can gather: query {"query":"skills","bot":"<name>"} - it needs herb (for plants) or mine (for ore); if it lacks the skill, SAY SO and suggest a unit that has it. 2) find the destination: query {"query":"mats","bot":"<any>","name":"<mat>"} - the answer ranks named teleport locations by nearby spawn density. 3) get the unit there (walk/rpg within the continent; harbormaster routes across continents). 4) start gathering: {"bot":"<name>","cmd":"nc +new rpg,+gather,-follow"} then {"bot":"<name>","cmd":"rpg status do gather"}. Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is the potential, not a guarantee of what is up right now.
-- Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = TWO orders for that bot: {"bot":"<name>","cmd":"go travel <the zone's table destination>"} then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
-- Broadcast: use "bot": "ALL" to apply one cmd to EVERY watched unit at once (never hand-play toons, never Leo) - e.g. {"bot":"ALL","cmd":"nc +new rpg,+grind,-follow"} or {"bot":"ALL","cmd":"go travel Barrens"}. The system expands it to one order per unit and validates each individually.
+- Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = attach {"query":"dest","bot":"<any>","name":"<the zone's table destination>"} then TWO orders for that bot: the returned {"bot":"<name>","cmd":"go <x>;<y>"} then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
+    {"role": "assistant", "content": "```json\n{\"reply\": \"On it - charting the route to the Barrens.\", \"queries\": [{\"query\": \"dest\", \"bot\": \"Golbez\", \"name\": \"Crossroads\"}], \"orders\": []}\n```"},
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
 - The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST),
         "zones": "\n".join("  %-22s -> %-20s (%s)" % (z, d[0], d[1])
@@ -354,11 +354,11 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
 # fenced JSON object - that is the contract ORDER_RULES describes.
 FEWSHOT = [
     {"role": "user", "content": "send Golbez to the Barrens to grind"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"go travel Barrens\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"go -443.0;-2594.0\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "make everyone quest in Westfall"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to Westfall, questing.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"go travel Westfall\"}, {\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+quest,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to Westfall, questing.\", \"queries\": [{\"query\": \"dest\", \"bot\": \"Leo\", \"name\": \"Sentinel Hill\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "kick Terra out of the raid"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Removing Terra from the group.\", \"orders\": [{\"bot\": \"Terra\", \"cmd\": \"group remove\"}]}\n```"},
     {"role": "user", "content": "autogear all the bots"},
@@ -670,6 +670,29 @@ def run_queries(qs, all_bots):
             except Exception as e:
                 lines.append("mat %r lookup failed: %s" % (mat, e))
             continue
+        if name == "dest":
+            place = str(q.get("name") or q.get("dest") or "").strip()
+            if not place:
+                lines.append("dest query needs a name: "
+                              "{\"query\":\"dest\",\"name\":\"<destination>\"}")
+                continue
+            try:
+                resp = dbsearch("get_game_tele", name=place)
+                if not resp["rows"]:
+                    lines.append("destination %r: no known teleport location "
+                                 "by that name" % place)
+                else:
+                    r = resp["rows"][0]
+                    lines.append("destination %r = %s on map %s: order "
+                                 "{\"bot\":\"<name>\",\"cmd\":\"go %s;%s\"} - "
+                                 "the bot walks there with pathfinding "
+                                 "(GoAction x;y branch, no distance limit) "
+                                 "[queried_at %s]"
+                                 % (place, r[0], r[1], r[2], r[3],
+                                    resp.get("queried_at")))
+            except Exception as e:
+                lines.append("destination %r lookup failed: %s" % (place, e))
+            continue
         if name == "live":
             pos = _live_position(match)
             if pos:
@@ -949,6 +972,14 @@ def validate(order, bots):
         return "SKIP: broadcast order was not expanded (internal error)"
     if any(low == f or low.startswith(f + " ") for f in FORBIDDEN):
         return "SKIP %s: FORBIDDEN command (purity rails - always refused): %r" % (bot, cmd)
+    if low == "go travel" or low.startswith("go travel "):
+        return ("SKIP %s: 'go travel' is DEAD on this build (the travel catalogs "
+                "never load - live 31/31 FAIL, A24); attach a dest query and "
+                "order 'go <x>;<y>' instead" % bot)
+    if low.startswith("go ") and ";" in cmd and not re.fullmatch(
+            r"go +-?\d+(?:\.\d+)?;-?\d+(?:\.\d+)?"
+            r"(?:;-?\d+(?:\.\d+)?)?", cmd.strip()):
+        return "SKIP %s: malformed 'go x;y' coordinates: %r" % (bot, cmd)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "
                 "online as a bot (DIRECTOR_HANDPLAY)" % bot)
@@ -1065,6 +1096,8 @@ def send_order(bot, cmd):
     if _turn_aborted():
         print("daemon: send dropped - turn was aborted: %r" % ((bot, cmd),))
         return {"line": "(aborted turn - not sent)"}
+    if not order_line(bot, cmd).startswith("."):
+        cmd = cmd.replace("|", ";")   # WoW escape char - same garble as say()
     res = tunnel("send_command", bot=bot,
                 cmd=(cmd if order_line(bot, cmd).startswith("/w")
                      else order_line(bot, cmd)))
@@ -1079,6 +1112,10 @@ def say(recipient, msg):
     msg = (msg or "").strip()
     if not msg:
         return
+    msg = msg.replace("|", ";")   # | is WoW's escape char (|c...|r): a raw
+    # pipe in an outgoing whisper garbles the line so the client drops it
+    # (live 2026-11-10: every short whisper delivered, both replies containing
+    # " | executed: " vanished - tunnel verdicts garbled/not_found)
     if _turn_aborted():
         print("daemon: whisper dropped - turn was aborted: %r" % ((recipient, msg[:80]),))
         return
