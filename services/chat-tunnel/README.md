@@ -1,5 +1,29 @@
 # chat-tunnel (service 1 of 4)
 
+**Scope contract (operator, 2026-11-10): this tool's job is JUST
+communication.** Five functions, nothing else:
+
+1. **Talk to the bots** — `send_command` (paced, correlation IDs)
+2. **Tell the LLM how to talk** — `describe` returns the command grammar
+   (send shapes, channels, constraints, matching rule); the daemon bakes it
+   into the LLM's system prompt at startup, so the grammar lives HERE, next
+   to the code that enforces it — no hand-maintained prompt to drift
+3. **Listen to the bots** — the tailer parsing the log into events
+4. **Verify the conversation is not garbled, both directions** —
+   `verify(correlation_id)` compares what the tunnel sent/parsed against
+   `acore_auth.logs` (the server's own record, read-only, same MySQL
+   identity as the stack): `delivered` / `garbled` (caught, with the
+   expected line) / `not_found`. The one DB function that lives here —
+   communication-only.
+5. **Serve the WEB GUI table in real time** — `get_events_since` /
+   `wait_for_events` (live-verified ~instant; well under the 10s budget)
+
+**It never initiates.** The single world-affecting path is the FIFO write
+inside `send_command`, reachable only from an explicit caller request. The
+ONE background thread is the log sensor; retention is folded into the write
+path — there is no timer thread. If the tunnel did something, a caller
+asked it to.
+
 Single owner of the Leo client chat log. Tails `/tmp/leo.log`, parses whisper
 traffic (A14, confirmed live: chat rides a loguru envelope —
 `... | MESSAGES | headless.world.chat.chat:display:124 - [Name] [whisper]: text` —
@@ -44,7 +68,14 @@ correlation_id, raw_line}` plus service columns `channel`, `status`
 | `get_events_since` | `after_id`, `limit` | `{events: [...], last_id}` — cursor read |
 | `wait_for_events` | `after_id`, `timeout` (<=25), `limit` | long-poll; blocks until new events or timeout |
 | `get_reply` | `correlation_id` | `{sent: {...}, reply: {...}\|null}` |
+| `verify` | `correlation_id` | both-direction garble check vs `acore_auth.logs`: `delivered` / `garbled` / `not_found` per side |
+| `describe` | — | the command grammar (send shapes, channels, constraints, tools) |
 | `stats` | — | line counters + DB status tally (parse truth) |
+
+`GET /grammar` serves the same grammar JSON to the web GUI. `verify` uses
+`CHAT_TUNNEL_MYCNF` (default `~/.my.cnf-director`, read-only) and accepts a
+`CHAT_TUNNEL_LOGDB_FIXTURE` JSON fixture so the proof harness runs the same
+code path without a worldserver.
 
 `GET /health` returns the running config. Errors come back as
 `{"ok": false, "error": "..."}`. If the FIFO write fails (no reader — Leo's
