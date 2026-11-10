@@ -173,9 +173,9 @@ CREATE TABLE acore_world.game_tele (
 INSERT INTO acore_world.game_tele VALUES
   (1, 'Goldshire',      0, -9446.0, 64.0, 56.0, 0),
   (2, 'Auberdine',      1, 6440.0, 126.0, 6.0, 0),
-  (3, 'Menethil Harbor',0, -3760.0, -868.0, 10.0, 0),
+  (3, 'MenethilHarbor',0, -3760.0, -868.0, 10.0, 0),
   (4, 'Theramore',      1, -4010.0, -4500.0, 10.0, 0),
-  (5, 'Booty Bay',      0, -14420.0, 480.0, 26.0, 0),
+  (5, 'BootyBay',      0, -14420.0, 480.0, 26.0, 0),
   (6, 'Ratchet',        1, -870.0, -3700.0, 10.0, 0),
   (7, 'Kharanos',       0, -5690.0, -510.0, 400.0, 0);
 
@@ -199,6 +199,6 @@ INSERT INTO acore_world.gameobject VALUES
 -- remaining harbormaster route harbors (zeppelin line; note: the game_tele
 -- spelling of Gromgol is apostrophe-free - params with quotes are refused)
 INSERT INTO acore_world.game_tele VALUES
-  (8, 'Gromgol Base Camp', 0, -12360.0, 220.0, 12.0, 0),
+  (8, 'GromgolBaseCamp', 0, -12360.0, 220.0, 12.0, 0),
   (9, 'Undercity', 0, 1595.0, 240.0, -50.0, 0),
   (10, 'Orgrimmar', 1, 1442.0, -4470.0, 12.0, 0);

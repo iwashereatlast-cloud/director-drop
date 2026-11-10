@@ -308,8 +308,11 @@ def main():
         print("== 4b. game_tele + mat spawn tools (harbormaster seam) ==")
         r = handle(adapter, {"tool": "get_game_tele", "params": {"name": "Menethil"}})
         check("tele envelope", envelope_ok(r, "get_game_tele"), json.dumps(r)[:200])
-        check("tele: partial name finds Menethil Harbor",
-              r.get("ok") and r["rows"] and r["rows"][0][0] == "Menethil Harbor", r)
+        check("tele: partial name finds MenethilHarbor (live names are concatenated)",
+              r.get("ok") and r["rows"] and r["rows"][0][0] == "MenethilHarbor", r)
+        r = handle(adapter, {"tool": "get_game_tele", "params": {"name": "Booty Bay"}})
+        check("tele: spaced query still matches the concatenated row",
+              r.get("ok") and r["rows"] and r["rows"][0][0] == "BootyBay", r)
         r = handle(adapter, {"tool": "get_game_tele", "params": {"name": "Nowhereville"}})
         check("tele: unknown name -> 0 rows, still ok",
               r.get("ok") and r["row_count"] == 0, r)
