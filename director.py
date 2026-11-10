@@ -150,7 +150,7 @@ WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "attackers", "target", "formation", "stance", "rti", "ready",
              "pull", "tank attack", "wait for attack time", "wipe", "rebuff",
              "warning", "q", "who", "rep", "aura", "spell", "los", "emblems",
-             "pvp stats", "calc", "qi", "cast")
+             "pvp stats", "calc", "qi", "cast", "boat", "carriage")
 
 # Hard purity rails - NEVER sendable as bot commands. validate() checks these
 # BEFORE the whitelist and regardless of CONFIRM / auto-execute: manual-play
@@ -239,6 +239,27 @@ ZONE_ABBREVIATIONS = {"stv": "Stranglethorn Vale", "wpl": "Western Plaguelands",
                       "tn": "Thousand Needles", "hillsbrad": "Hillsbrad Foothills",
                       "elwynn": "Elwynn Forest", "plaguelands": "Eastern Plaguelands"}
 
+# Harbormaster policy (operator-approved 2026-11-10): Leo is NOT a teleporter.
+# The GM '.tele name' power is only ever exercised as a BOAT/ZEPPELIN leg
+# between real shipping-route harbors, narrated as travel. Cross-continent
+# movement is impossible outside these pairs - validate() enforces it.
+TRAVEL_ROUTES = [
+    ("Booty Bay", "Ratchet", "boat", "neutral"),
+    ("Menethil Harbor", "Theramore", "boat", "neutral"),
+    ("Menethil Harbor", "Auberdine", "boat", "neutral"),
+    ("Gromgol Base Camp", "Undercity", "zeppelin", "horde"),
+    ("Gromgol Base Camp", "Orgrimmar", "zeppelin", "horde"),
+    ("Undercity", "Orgrimmar", "zeppelin", "horde"),
+]
+RACE_FACTION = {1: "alliance", 3: "alliance", 4: "alliance", 7: "alliance",
+                11: "alliance", 2: "horde", 5: "horde", 6: "horde", 8: "horde",
+                10: "horde"}
+CARRIAGE = os.environ.get("DIRECTOR_CARRIAGE", "0") in ("1", "yes", "on")
+# ^ when on, Leo may "send a carriage": teleport a bot to a ROUTE harbor
+#   (departure points only, still route-bounded). Default OFF: legs to the
+#   dock are walks.
+BOAT_DOCK_RADIUS = 500.0   # yards from the departure harbor's tele point
+
 MASTER_CMDS = ("bot add", "bot remove", "bot addaccount")
 
 # group-management server commands; chat-tunnel formats them as '.group ...'
@@ -276,13 +297,19 @@ Rules:
 - Destination translation: the master speaks in ZONE names and abbreviations ("send Golbez to Stranglethorn Vale", "go to stv", "level in Thousand Needles"); the engine wants the town/subzone name. Translate with this table (zone -> destination, level bracket):
 %(zones)s
   Common abbreviations: %(abbr)s. If the master names a zone not in the table, pick the best-known town in it and TELL them which destination you are sending the unit to. If the master names a town/area directly, use it as-is. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order.
+- Harbormaster travel (cross-continent): Leo is NOT a teleporter. Bots cross continents ONLY by boat/zeppelin, and ONLY along these real routes: Booty Bay->Ratchet, Menethil Harbor->Theramore, Menethil Harbor->Auberdine (boats, any faction); Gromgol Base Camp->Undercity, Gromgol Base Camp->Orgrimmar, Undercity->Orgrimmar (zeppelins, HORDE only - never send an Alliance bot there). To board, the unit must be at the departure harbor; order {"bot":"<name>","cmd":"boat <arrival harbor>"} ONLY when the unit is at the departure dock (check with query {"query":"live","bot":"<name>"}). Narrate trips as travel: "Gau is taking the boat from Menethil Harbor to Auberdine" - never mention teleporting. The system enforces the routes; a SKIP means the unit is not at the dock or the route is wrong for its faction.%(carriage)s
+- Farming mats: "have <bot> farm <mat>" (herbs/ore) = 1) check the unit can gather: query {"query":"skills","bot":"<name>"} - it needs herb (for plants) or mine (for ore); if it lacks the skill, SAY SO and suggest a unit that has it. 2) find the destination: query {"query":"mats","bot":"<any>","name":"<mat>"} - the answer ranks named teleport locations by nearby spawn density. 3) get the unit there (walk/rpg within the continent; harbormaster routes across continents). 4) start gathering: {"bot":"<name>","cmd":"nc +new rpg,+gather,-follow"} then {"bot":"<name>","cmd":"rpg status do gather"}. Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is the potential, not a guarantee of what is up right now.
 - Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = TWO orders for that bot: {"bot":"<name>","cmd":"go travel <the zone's table destination>"} then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
 - Broadcast: use "bot": "ALL" to apply one cmd to EVERY watched unit at once (never hand-play toons, never Leo) - e.g. {"bot":"ALL","cmd":"nc +new rpg,+grind,-follow"} or {"bot":"ALL","cmd":"go travel Barrens"}. The system expands it to one order per unit and validates each individually.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
 - The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST),
         "zones": "\n".join("  %-22s -> %-20s (%s)" % (z, d[0], d[1])
                            for z, d in sorted(ZONE_DESTINATIONS.items())),
-        "abbr": ", ".join("%s=%s" % (a, z) for a, z in sorted(ZONE_ABBREVIATIONS.items()))}
+        "abbr": ", ".join("%s=%s" % (a, z) for a, z in sorted(ZONE_ABBREVIATIONS.items())),
+        "carriage": (" Carriage is ENABLED (DIRECTOR_CARRIAGE=1): you may order "
+                     '{"bot":"<name>","cmd":"carriage <route harbor>"} to send a '
+                     "carriage (a swift trip) to a route harbor, and narrate it "
+                     "as such.") if CARRIAGE else ""}
 
 SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
           "The human gives marching orders as natural language, JSON, or pasted lists.\n" + ORDER_RULES + "\n"
@@ -606,6 +633,35 @@ def run_queries(qs, all_bots):
             lines.append(("%s strategies: %s" % (match, txt)) if ok
                          else ("%s strategies probe failed: %s" % (match, txt)))
             continue
+        if name == "mats":
+            mat = str(q.get("name") or q.get("mat") or "").strip()
+            if not mat:
+                lines.append("mats query needs a name: {\"query\":\"mats\",\"name\":\"<mat>\"}")
+                continue
+            try:
+                resp = dbsearch("get_mat_spawns", mat=mat)
+                if not resp["rows"]:
+                    lines.append("mat %r: no spawn sites found (gameobject name)" % mat)
+                else:
+                    tops = ", ".join("%s (%s spawns, map %s)" % (r[0], r[2], r[1])
+                                     for r in resp["rows"][:5])
+                    lines.append("mat %r - best teleport locations: %s (queried_at %s; "
+                                 "caveat: %s)" % (mat, tops, resp.get("queried_at"),
+                                                  resp.get("caveat")))
+            except Exception as e:
+                lines.append("mat %r lookup failed: %s" % (mat, e))
+            continue
+        if name == "live":
+            pos = _live_position(match)
+            if pos:
+                lines.append("%s live position: %.1f, %.1f, %.1f on map %d (%s) "
+                             "- chat-tunnel inspect, real-time"
+                             % (match, pos[0], pos[1], pos[2], pos[3],
+                                pos[4] or "zone unknown"))
+            else:
+                lines.append("%s live position: no reply within the window "
+                             "(silent/offline - offline truth is db-search)" % match)
+            continue
         info = QUERY_TOOLS.get(name)
         if not info:
             lines.append("query %r unknown (have: %s)"
@@ -619,6 +675,49 @@ def run_queries(qs, all_bots):
         except Exception as e:
             lines.append("%s %s failed: %s" % (match, name, e))
     return "\n".join(lines) if lines else "no valid queries"
+
+
+def _live_position(bot):
+    """Live position via chat-tunnel inspect (A23): returns
+    (x, y, z, map, zone) or None on timeout (offline truth is db-search)."""
+    try:
+        cid = tunnel("inspect", bot=bot, query="position")["correlation_id"]
+    except Exception:
+        return None
+    for _ in range(4):
+        time.sleep(2)
+        got = tunnel("get_reply", correlation_id=cid)
+        if got["reply"]:
+            m = re.match(r"([-\d.]+) ([-\d.]+) ([-\d.]+) (\d+) [-\d.]+ \|([^|]*)\|",
+                         got["reply"]["command"].strip())
+            if m:
+                return (float(m.group(1)), float(m.group(2)), float(m.group(3)),
+                        int(m.group(4)), m.group(5).strip())
+        if got["sent"]["status"] == "timeout":
+            return None
+    return None
+
+
+def _tele_coords(name):
+    """Coordinates of a game_tele location via db-search (exact name match),
+    or None. The only legal '.tele name' destinations come from that table."""
+    try:
+        rows = dbsearch("get_game_tele", name=name)["rows"]
+    except Exception:
+        return None
+    for r in rows:
+        if r[0].lower() == name.lower():
+            return (float(r[2]), float(r[3]), int(r[1]))   # x, y, map
+    return None
+
+
+def _bot_faction(bot):
+    """Faction of a toon from its race (db-search get_character), or None."""
+    try:
+        row = _char_row(bot)
+        return RACE_FACTION.get(int(row[3])) if row else None
+    except Exception:
+        return None
 
 
 def cast_jobs(bot):
@@ -780,6 +879,11 @@ def order_line(bot, cmd):
         return ".playerbots %s %s" % (cmd, bot)
     if is_group_cmd(cmd):
         return ".group remove %s" % bot
+    low = cmd.strip().lower()
+    if low == "boat" or low.startswith("boat "):
+        return ".tele name %s %s" % (bot, cmd.strip()[4:].strip())
+    if low == "carriage" or low.startswith("carriage "):
+        return ".tele name %s %s" % (bot, cmd.strip()[8:].strip())
     return "/w %s %s" % (bot, cmd)
 
 
@@ -830,6 +934,46 @@ def validate(order, bots):
             cmd, low = "leave", "leave"
         else:
             return None               # human member: '.group remove <name>' line
+    if low == "boat" or low.startswith("boat "):
+        dest = cmd.strip()[4:].strip()
+        routes = [r for r in TRAVEL_ROUTES if r[1].lower() == dest.lower()]
+        if not routes:
+            return ("SKIP %s: %r is not an arrival harbor of any route (routes: %s)"
+                    % (bot, dest, "; ".join("%s->%s" % (r[0], r[1]) for r in TRAVEL_ROUTES)))
+        if bot not in bots:
+            return "SKIP %s: not online (census)" % bot
+        faction = _bot_faction(bot)
+        usable = [r for r in routes if r[3] == "neutral" or r[3] == faction]
+        if not usable:
+            return ("SKIP %s: no %s route to %s (zeppelins are Horde infrastructure)"
+                    % (bot, faction or "unknown-faction", dest))
+        # the bot must actually be at a departure dock - live position check
+        pos = _live_position(bot)
+        if not pos:
+            return ("SKIP boat %s: could not read a live position (bot offline, "
+                    "AI-dead, or the tunnel timed out)" % bot)
+        for r in usable:
+            dock = _tele_coords(r[0])
+            if dock and dock[2] == pos[3]:
+                if (pos[0] - dock[0]) ** 2 + (pos[1] - dock[1]) ** 2 < BOAT_DOCK_RADIUS ** 2:
+                    order["_route"] = (r[0], r[1], r[2])
+                    return None
+        return ("SKIP boat %s: not at a departure harbor (needs to be within %d yd "
+                "of %s; live position says %s)"
+                % (bot, BOAT_DOCK_RADIUS, "/".join(r[0] for r in usable), pos[4] or pos[:3]))
+    if low == "carriage" or low.startswith("carriage "):
+        dest = cmd.strip()[8:].strip()
+        if not CARRIAGE:
+            return ("SKIP %s: carriage is disabled (DIRECTOR_CARRIAGE=0 - legs to "
+                    "the dock are walks)" % bot)
+        if dest.lower() not in [h.lower() for r in TRAVEL_ROUTES for h in (r[0], r[1])]:
+            return ("SKIP %s: %r is not a route harbor" % (bot, dest))
+        if bot not in bots:
+            return "SKIP %s: not online (census)" % bot
+        if _tele_coords(dest) is None:
+            return "SKIP %s: %r is not a real teleport location (db-search)" % (bot, dest)
+        order["_route"] = (dest, dest, "carriage")
+        return None
     if is_master_cmd(cmd):
         all_bots = census(online_only=False)
         if bot not in all_bots:
@@ -862,9 +1006,20 @@ def validate(order, bots):
 
 def send_order(bot, cmd):
     """The ONE send path: chat-tunnel send_command (paced, correlated, allowed
-    roster only). Returns the tunnel's result; raises on refusal."""
-    res = tunnel("send_command", bot=bot, cmd=cmd)
-    _audit("SENT", res["line"])
+    roster only). Returns the tunnel's result; raises on refusal.
+    Boat/carriage orders ride the raw-dot passthrough as a GM '.tele name';
+    the audit trail records them as what they ARE (a boat/zeppelin leg or a
+    carriage), never as a generic send."""
+    low = cmd.strip().lower()
+    mark = "SENT"
+    if low.startswith("boat "):
+        mark = "BOAT"
+    elif low.startswith("carriage "):
+        mark = "CARRIAGE"
+    res = tunnel("send_command", bot=bot,
+                cmd=(cmd if order_line(bot, cmd).startswith("/w")
+                     else order_line(bot, cmd)))
+    _audit(mark, res["line"])
     return res
 
 

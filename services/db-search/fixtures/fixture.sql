@@ -196,3 +196,9 @@ INSERT INTO acore_world.gameobject VALUES
   (3, 1619, 0, -9450.0, 100.0, 56.0),
   (4, 1618, 0, -5700.0, -480.0, 400.0),
   (5, 1731, 0, -5650.0, -530.0, 400.0);
+-- remaining harbormaster route harbors (zeppelin line; note: the game_tele
+-- spelling of Gromgol is apostrophe-free - params with quotes are refused)
+INSERT INTO acore_world.game_tele VALUES
+  (8, 'Gromgol Base Camp', 0, -12360.0, 220.0, 12.0, 0),
+  (9, 'Undercity', 0, 1595.0, 240.0, -50.0, 0),
+  (10, 'Orgrimmar', 1, 1442.0, -4470.0, 12.0, 0);
