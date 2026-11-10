@@ -64,7 +64,7 @@ arrays (same wire shape the mysql CLI produces); column order per tool below.
 | `get_skills` | `toon` | skills with names — professions (firstaid, riding, bs, lw, alchemy, herb, cook, mine, tailor, enchant, fish, skin, jewel, eng, scribe), weapons (swords, axes, maces, 2H swords/maces/axes, daggers, staves, polearms, bows, crossbows, guns, thrown, unarmed, fist), armor (cloth, leather, mail, plate, shield), defense, dual wield — + value/max (SkillLine mapping per the 3.3.5 DBC dumps) | live skill-ups; unmapped ids (show as `skill<id>`) | skill values flush with the character save |
 | `get_bag_space` | `toon` | one row: capacity (16 + equipped bags' ContainerSlots), used, free (needs `acore_world.item_template` grant) | what the items ARE (count only); bank space | inventory flushes with the save; without the grant capacity falls back to 16 |
 | `get_mount_items` | `toon` | mount ITEMS carried (bag/slot, name, quality, required level) | mounts LEARNED as spells (names are DBC-only, not in the world DB); riding skill → `get_skills` (id 148) | inventory flushes with the save; class 15/subclass 5 mount mapping is the 3.3.5 standard, not yet live-verified |
-| `get_talents` | `toon` | learned talents as (spell id, specMask) rows — talent count + spec spread | talent NAMES/trees — DBC-only on this build (no `acore_world.talent`, confirmed live); named lists via the bot's live `talents` whisper (rtt-engine) | talents flush with the character save; rows are raw spell ids |
+| `get_talents` | `toon` | learned talents as (spell id, specMask) rows — talent count + spec spread | talent NAMES/trees — DBC-only on this build (no `acore_world.talent`, confirmed live); named lists via the bot's live `talents` whisper through chat-tunnel | talents flush with the character save; rows are raw spell ids |
 | `get_wallets` | `account` (bare prefix) | money (copper) per toon, richest first | COD mail; guild bank; pending sales | money flushes with the character save |
 ### Redirects — names that deliberately do NOT go here
 
@@ -74,16 +74,24 @@ service and the reason, so the caller learns the routing rule instead of
 guessing again (or falling back to a whisper-probe). They are also listed by
 the `catalog` meta-tool.
 
-| name | routed to | because |
-|---|---|---|
-| `get_current_position` | rtt-engine | live position is tick-time state; the DB only has the last flushed map/zone (`get_character`) |
-| `get_live_status` | rtt-engine | live HP/mana/combat never lives in the DB |
-| `get_bot_master` | rtt-engine | AI mastership is live session state (SetMaster at bot login); no DB row |
-| `is_bot_responding` | rtt-engine | session liveness is proven by a live probe with correlation, never by DB flags (A5) |
+| name | routed to | because | db fallback on inspect timeout |
+|---|---|---|---|
+| `get_current_position` | chat-tunnel `inspect(bot, "position")` | live position is tick-time state; the DB only has the last flushed map/zone | `get_character` (LAST-FLUSHED map/zone - say so, never present as live) |
+| `get_live_status` | chat-tunnel `inspect(bot, "hp"/"state"/"movement"/"target"/"action")` | live HP/combat state never lives in the DB | `get_character` (online flag is A5 - a hint, not truth) |
+| `get_bot_master` | chat-tunnel whisper path (mastership-proving probe with correlation) | AI mastership is live session state (SetMaster at bot login); no DB row | none - report unknown rather than guess |
+| `is_bot_responding` | chat-tunnel send + `get_reply`/`verify` | session liveness is proven by a live probe with correlation, never by DB flags (A5) | `get_online_census` (hint only - a DB-offline bot may still answer) |
+
+Redirects are **route hints** to the LLM (single-brain: db-search suggests,
+never executes), each carrying the chat-tunnel interface
+(`POST http://127.0.0.1:8765/`, `inspect` -> `correlation_id` -> `get_reply`).
+On an inspect **timeout** the offline truth is this catalog's `db_fallback` -
+use it and its caveat, never guess. A21: a missing transcript row is not
+proof of anything. (rtt-engine retired 2026-11-10; live reads route through
+chat-tunnel via `.playerbots inspect`, A23.)
 
 Routing rule reminder (roadmap): anything this catalog answers must NEVER be
 learned by whisper-probing; tick-sensitive things (live position, "does this
-bot answer right now") belong to service 3 (rtt-engine).
+bot answer right now") belong to chat-tunnel's live-read path (`.playerbots inspect`, A23; rtt-engine retired).
 
 ## Run
 
