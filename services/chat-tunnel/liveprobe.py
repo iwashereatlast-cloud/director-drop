@@ -120,9 +120,10 @@ def main():
              s["replies_matched"], s["replies_unmatched"], s["db_rows"],
              s["db_sent_pending"], s["db_sent_replied"], s["db_sent_timeout"]))
     if lat_ok:
+        want = max(30.0, max(lat_ok) * 1.5)
         print("observed reply latency: max %.1fs  -  evidence-based window: "
-              "at least %.0fs (set CHAT_TUNNEL_WINDOW accordingly)"
-              % (max(lat_ok), max(lat_ok) * 1.5))
+              "%.0fs (set CHAT_TUNNEL_WINDOW accordingly)"
+              % (max(lat_ok), want))
     print("parse truth: %s"
           % ("OK - no display line was garbled (noise lines are expected)"
              if s["lines_garbled"] == 0
