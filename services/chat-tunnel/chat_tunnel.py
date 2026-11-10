@@ -68,7 +68,7 @@ MASTER = os.environ.get("CHAT_TUNNEL_MASTER", "Leo")
 # the display wrapper (not a bare search) means noise can never false-match
 # a chat line embedded inside another message's text.
 LINE_RE = re.compile(
-    r"chat:display:\d+ - \[([A-Za-z]+)\] \[([a-z ]+)\]: (.*)")
+    r"chat:display:\d+ - \[([A-Za-z]+)\] \[([^]]+)\]: (.*)")
 
 # master-issued server commands go out as '.playerbots ...' lines instead of
 # a /w (same split director.py's order_line() makes, minimal subset here)

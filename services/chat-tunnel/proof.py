@@ -238,6 +238,8 @@ def s_ordered(t):
     t.reply("Gau", "answer to who")
     t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
                  " headless.world.chat.chat:display:124 - [Mog] [party]: loot roll")
+    t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
+                 " headless.world.chat.chat:display:124 - [Mog] [1. General - Stormwind City]: anyone selling?")
     t.reply("Gau", "answer to wts")
     t.sync("answer to wts")
     r1 = t.wait_for(lambda: t.get_reply(cid1)["reply"], 5, "first reply")
@@ -249,8 +251,11 @@ def s_ordered(t):
     ev = t.call("get_recent_events", {"limit": 10})["result"]["events"]
     party = [e for e in ev if e.get("channel") == "party"]
     check(party != [], "party chat is recorded with its channel")
-    check(all(e["matched_correlation_id"] is None for e in party),
-          "party chat never participates in matching")
+    gen = [e for e in ev if e.get("channel") == "1. General - Stormwind City"]
+    check(gen != [], "numbered custom channel recorded (label kept verbatim)")
+    check(all(e["matched_correlation_id"] is None for e in ev
+              if e.get("channel") in ("party", "1. General - Stormwind City")),
+          "non-whisper channels never participate in matching")
 
 
 def s_retention(t):
