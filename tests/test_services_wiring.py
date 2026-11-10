@@ -168,6 +168,15 @@ def main():
         check("no log tailing", 'Popen(["tail"' not in src and '"-F"' not in src)
         check("no botcmd probe", '"states", "verify"' not in src and '"botcmd"' not in src)
 
+        print("== 1b. travel recipe follows the engine (source-verified, A24) ==")
+        rules = director.ORDER_RULES
+        check("prompt: destinations are subzone/town names",
+              "SUBZONE" in rules and "Stranglethorn Vale\" matches NOTHING" in rules, rules[:0])
+        check("prompt: no level filter claimed on go travel",
+              "NO level filter" in rules)
+        check("prompt: Clearing travel target = not found, never report movement",
+              "Clearing travel target" in rules and "Traveling to" in rules)
+
         print("== 2. db-search facts: census, masters, sender gates ==")
         online = director.census()
         check("census (online): Ayla, Gau, Golbez, Leo",
