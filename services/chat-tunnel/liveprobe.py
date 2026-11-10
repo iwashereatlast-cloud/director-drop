@@ -57,11 +57,11 @@ def main():
     wait = a.wait if a.wait is not None else max(30.0, 2 * 30.0)
     print("chat-tunnel liveprobe: %d round(s) of %r to %s (per-probe wait %.0fs)"
           % (a.rounds, a.cmd, ",".join(bots), wait))
-    print("uptime %.0fs  lines seen/parsed/dropped: %d/%d/%d  "
+    print("uptime %.0fs  lines seen/parsed/noise/garbled: %d/%d/%d/%d  "
           "replies matched/unmatched: %d/%d"
           % (cfg["uptime_sec"], cfg["lines_seen"], cfg["lines_parsed"],
-             cfg["lines_dropped"], cfg["replies_matched"],
-             cfg["replies_unmatched"]))
+             cfg["lines_noise"], cfg["lines_garbled"],
+             cfg["replies_matched"], cfg["replies_unmatched"]))
     print()
 
     probes = []                       # (bot, cid, sent_at)
@@ -112,10 +112,11 @@ def main():
     lat_ok = [r[4] for r in rows if r[4]]
     print()
     s = call(a.port, "stats")["result"]
-    print("after probe: lines seen/parsed/dropped: %d/%d/%d  "
+    print("after probe: lines seen/parsed/noise/garbled: %d/%d/%d/%d  "
           "replies matched/unmatched: %d/%d  db rows: %d "
           "(pending %d / replied %d / timeout %d)"
-          % (s["lines_seen"], s["lines_parsed"], s["lines_dropped"],
+          % (s["lines_seen"], s["lines_parsed"], s["lines_noise"],
+             s["lines_garbled"],
              s["replies_matched"], s["replies_unmatched"], s["db_rows"],
              s["db_sent_pending"], s["db_sent_replied"], s["db_sent_timeout"]))
     if lat_ok:
@@ -123,9 +124,10 @@ def main():
               "at least %.0fs (set CHAT_TUNNEL_WINDOW accordingly)"
               % (max(lat_ok), max(lat_ok) * 1.5))
     print("parse truth: %s"
-          % ("OK - no live line was dropped" if s["lines_dropped"] == 0
-             else "CHECK - %d dropped line(s); compare against the raw log (A14)"
-                  % s["lines_dropped"]))
+          % ("OK - no display line was garbled (noise lines are expected)"
+             if s["lines_garbled"] == 0
+             else "CHECK - %d garbled display line(s); compare against the raw log (A14)"
+                  % s["lines_garbled"]))
     print("%d/%d probes OK" % (len(rows) - bad, len(rows)))
     return 1 if bad else 0
 

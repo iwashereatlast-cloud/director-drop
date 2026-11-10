@@ -53,16 +53,25 @@ PURGE_EVERY = float(os.environ.get("CHAT_TUNNEL_PURGE_EVERY", "60"))
 MAX_ROWS = int(os.environ.get("CHAT_TUNNEL_MAX_ROWS", "100000"))
 MASTER = os.environ.get("CHAT_TUNNEL_MASTER", "Leo")
 
-# A14 (docs/assumptions.md): the headless client logs chat as
-# "[Name] [whisper]: text" - same shape director.py's LINE_RE parses.
-LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
+# A14 (docs/assumptions.md) CONFIRMED live 2026-11-09: the headless client
+# wraps every chat line in a loguru envelope, e.g.
+#   2026-11-09 19:26:21.153 | MESSAGES | headless.world.chat.chat:display:124 - [Marle] [whisper]: Selling ...
+# interleaved with DEBUG add_message lines that carry no chat. Anchoring to
+# the display wrapper (not a bare search) means noise can never false-match
+# a chat line embedded inside another message's text.
+LINE_RE = re.compile(
+    r"chat:display:\d+ - \[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
 
 # master-issued server commands go out as '.playerbots ...' lines instead of
 # a /w (same split director.py's order_line() makes, minimal subset here)
 MASTER_CMDS = ("bot add", "bot remove", "bot" )
 
-# in-process counters for the stats tool (parse truth + health at a glance)
-STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_dropped": 0,
+# in-process counters for the stats tool (parse truth + health at a glance).
+# lines_noise = log lines with no chat display wrapper at all (DEBUG etc.) -
+# expected and harmless. lines_garbled = lines that LOOK like display lines
+# but failed to parse - these are the A14 red flag.
+STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_noise": 0,
+         "lines_garbled": 0,
          "replies_matched": 0, "replies_unmatched": 0,
          "sends_ok": 0, "sends_failed": 0, "started_at": time.time()}
 
@@ -189,13 +198,16 @@ def match_reply(sender, channel, text, raw_line, t):
 
 def handle_reply_line(raw_line, t):
     STATS["lines_seen"] += 1
+    if "chat:display:" not in raw_line:
+        STATS["lines_noise"] += 1     # DEBUG/loguru noise: no chat in it at all
+        return None
     m = LINE_RE.search(raw_line)
     if not m:
-        STATS["lines_dropped"] += 1
+        STATS["lines_garbled"] += 1
         return None                  # garbled/foreign line: ignored, never matched
     sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
     if not text:
-        STATS["lines_dropped"] += 1
+        STATS["lines_garbled"] += 1
         return None
     STATS["lines_parsed"] += 1
     return match_reply(sender, channel, text, raw_line.rstrip("\n"), t)
@@ -269,8 +281,9 @@ def wait_for_events(after_id, timeout=10, limit=200):
 
 def stats():
     """Parse truth + health in one call: in-process line counters plus the
-    DB's own status tally. `lines_dropped` growing while real whisper lines
-    exist in the log means LINE_RE is missing a live format (A14 FAIL)."""
+    DB's own status tally. `lines_noise` (DEBUG etc.) growing is normal;
+    `lines_garbled` growing while real whisper lines exist in the log means
+    LINE_RE is missing a live format (A14 FAIL)."""
     out = dict(STATS)
     out["uptime_sec"] = round(now() - STATS["started_at"], 1)
     with db() as conn:
