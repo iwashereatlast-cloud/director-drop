@@ -1,44 +1,54 @@
 #!/usr/bin/env python3
 """director - LLM <-> altbot command interface for Chazbot (I_WAS_CMD / Leo shell).
 
-Transport: writes chat lines to the Leo shell FIFO (/tmp/leo.in) as /w <bot> <cmd>.
-Eyes: read-only SQL census (auth_socket RO account via ~/.my.cnf-director) + human
-tails /tmp/leo.log. LLM: local Ollama (off the world thread). Stdlib only.
+Hands (this process is the brain's body, never a fact source): ALL DB facts
+come from the db-search service (unix socket, typed read-only tools, every
+result carries queried_at + a staleness caveat); ALL sends, replies and
+live/session facts come from the chat-tunnel service (local-only HTTP on
+127.0.0.1:8765). The LLM never sees free-form SQL and this file never touches
+MySQL, the Leo FIFO, /tmp/leo.log, or any game port directly. LLM: local
+Ollama (off the world thread). Stdlib only.
 
 Modes:
   python3 director.py chat            interactive terminal LLM REPL; dry-run first, 'go' sends
   python3 director.py daemon         in-game interface: whisper Leo (or say 'Leo' in guild) and
                                      the LLM answers as the general and directs bots (confirm via 'go')
   python3 director.py run orders.json [--go]   execute a JSON marching-orders file
-  python3 director.py census         print live online-bot roster (read-only)
-  python3 director.py group [toon]    print the group/raid a toon is in (read-only; default Leo)
+  python3 director.py census         print live online-bot roster (via db-search)
+  python3 director.py group [toon]    print the group/raid a toon is in (via db-search; default Leo)
 
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
 
 Daemon auth: ONLY the toons in DIRECTOR_HUMANS (default the G1 five) on the
 master account (default i_was_here1st, rotatable via 'botcmd master') PLUS
-members of the watched
-guild (DIRECTOR_GUILD) on non-bot, non-shell accounts - bot-account toons and
-Leo's shell account never get auth, because their automatic "Using X"
-master-report whispers would be answered by the LLM and ping-pong with the bot
-AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild chat triggers
-require the word 'leo' in the line. Bot senders are additionally dropped by a
-DB account check + master-report line filter (no console credentials:
-'.playerbots inspect' does not exist in mod-playerbots @ e88cc40 and
-'.playerbots bot' requires an active session, so neither works without a
-live session). RP chatter must never reach the LLM or the two layers talk.
+members of the watched guild (DIRECTOR_GUILD) on non-bot, non-shell accounts
+- bot-account toons and Leo's shell account never get auth, because their
+automatic "Using X" master-report whispers would be answered by the LLM and
+ping-pong with the bot AI. Override with DIRECTOR_MASTERS=Cecil,Golbez. Guild
+chat triggers require the word 'leo' in the line. Bot senders are additionally
+dropped by an account check (db-search) + master-report line filter. RP chatter
+must never reach the LLM or the two layers talk. NOTE: chat-tunnel only
+records lines from roster toons (its allowlist), so a master who is neither a
+guild member nor on a watched account is invisible to the daemon - roster
+membership is the listen gate.
 Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
-import argparse, fcntl, json, os, random, re, subprocess, sys, threading, time, urllib.request
+import argparse, fcntl, json, os, random, re, socket, subprocess, sys, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 MODEL = os.environ.get("DIRECTOR_MODEL", "gemma4:12b")
-FIFO = os.environ.get("LEO_FIFO", "/tmp/leo.in")
-LOG = os.environ.get("DIRECTOR_LOG", "/tmp/leo.log")
-AUDIT = os.path.join(HERE, "audit.log")
+DBSEARCH_SOCK = os.environ.get("DIRECTOR_DBSEARCH_SOCK", "/tmp/db-search.sock")
+# ^ db-search service (roadmap row 2): typed read-only DB tools, one JSON line
+#   per request on a local unix socket. The ONLY source of DB facts here.
+TUNNEL_URL = os.environ.get("DIRECTOR_TUNNEL_URL", "http://127.0.0.1:8765/")
+# ^ chat-tunnel service (roadmap row 1): owns /tmp/leo.log and /tmp/leo.in.
+#   The ONLY path for sends, replies and live reads here.
+SVC_TIMEOUT = float(os.environ.get("DIRECTOR_SVC_TIMEOUT", "30"))
+# ^ cap on one service call (db-search caps its own queries at 10s; the
+#   tunnel's wait_for_events long-poll blocks up to 25s and gets extra slack)
 ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "i_was_here%")
 WATCH_GUILD = os.environ.get("DIRECTOR_GUILD", "Special FXc")
 # ^ the ONE guild whose members Leo watches (census unions them with the bot
@@ -55,8 +65,8 @@ HANDPLAY = set(n.strip().lower() for n in os.environ.get(
 #   SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';
 HUMANS = set(n.strip().lower() for n in os.environ.get(
     "DIRECTOR_HUMANS", "Cecil,Rydia,Shadow,Vivi,Aeris,Aerith").split(",") if n.strip())
-# ^ toons on the MASTER account that may TALK to Leo (sender auth). Default =
-# the G1 five. 'botcmd master set <ACCOUNT>' rewrites this together with
+# ^ toons on the MASTER account that may TALK to Leo (sender auth). Default = the
+# G1 five. 'botcmd master set <ACCOUNT>' rewrites this together with
 # DIRECTOR_MASTER_ACCOUNT when you rotate which account you hand-play on, so a
 # bot that shares the master account is still NOT authed (not in HUMANS).
 MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
@@ -65,26 +75,13 @@ LEO = os.environ.get("DIRECTOR_LEO", "Leo")
 # ^ Leo's own toon (the headless shell character) - used for group/raid lookups
 #   ("who is in MY raid / who leads it") and for the group-remove target rail.
 # ^ Leo's own headless-shell account: never a master, never a valid sender -
-# the shell must not talk to its own brain.
-MYCNF = os.path.expanduser(os.environ.get("DIRECTOR_MYCNF", "~/.my.cnf-director"))
-# ^ read-only MySQL identity (auth_socket user, SELECT-only grants). The
-# write-capable ~/.my.cnf must NEVER be the default: this process is LLM-driven.
-# ^ read via --defaults-file (NOT --defaults-extra-file): MySQL reads ~/.my.cnf
-# AFTER the extra file, so the full-power acore identity in ~/.my.cnf would
-# override the RO user. --defaults-file reads ONLY the RO file.
-# Live reads RETIRED with rtt-engine (2026-11-10): the 8888 command server
-# served RANDOM bots only, and .playerbots inspect/exec (A23) covers every
-# online bot through the chat channel - see docs/services-roadmap.md.
-# The location query answers from the DB (last-logout position, marked).
+#   the shell must not talk to its own brain.
 CONFIRM = os.environ.get("DIRECTOR_CONFIRM", "1") not in ("0", "no", "off")
 # ^ daemon default: validated orders are HELD until the master whispers
 # 'go'/'skip'. DIRECTOR_CONFIRM=0 auto-executes immediately (not recommended:
 # validate() rails are then the only safety net).
 DEBUG = os.environ.get("DIRECTOR_DEBUG", "") in ("1", "yes", "on")
-# ^ DIRECTOR_DEBUG=1 dumps unmatched leo.log lines to daemon.log (log-format drift)
-MYSQL_TIMEOUT = float(os.environ.get("DIRECTOR_MYSQL_TIMEOUT", "20"))
-# ^ hard cap on every mysql subprocess call - the daemon loop is single-threaded,
-#   so a hung DB connection would otherwise freeze ALL whisper handling silently
+# ^ DIRECTOR_DEBUG=1 dumps raw LLM replies to daemon.log
 LLM_TIMEOUT = float(os.environ.get("DIRECTOR_LLM_TIMEOUT", "240"))
 # ^ cap on the Ollama call; a cold/slow model or a queue of turns can otherwise
 #   stall the single-threaded loop for minutes
@@ -103,7 +100,8 @@ ACK_RAW = os.environ.get("DIRECTOR_ACK", _ACK_DEFAULT)
 #   Set DIRECTOR_ACK= (empty) to disable the ack entirely.
 ACKS = [a.strip() for a in ACK_RAW.split(";") if a.strip()] if ACK_RAW.strip() else []
 
-# profession skill ids -> short codes for the roster (character_skills.skill)
+# profession skill ids -> short codes (character_skills.skill, via db-search
+# get_skills) - used to gate "cast <spell>" orders per profession
 SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
           185: "cook", 186: "mine", 197: "tailor", 333: "enchant", 356: "fish",
           393: "skin", 755: "jewel", 762: "eng", 773: "scribe"}
@@ -127,9 +125,9 @@ SKILLS = {129: "firstaid", 164: "bs", 165: "lw", 171: "alchemy", 182: "herb",
 # grouped splits kill XP across all members in reward range
 # (KillRewarder.cpp:264-274; xp_in_group_rate 1.4 total for >=5 members in the
 # open world, Formulas.h:119-150 -> ~1.4/17 per bot in a 17-man raid). Group
-# control is CLI-side (botcmd raid clear / roster ritual auto-clear) plus
-# validate()'s membership-checked "group remove" - the LLM may only SHRINK a
-# group ("leave"), never grow one.
+# control is the LLM's "leave"/"group remove" orders plus validate()'s
+# membership-checked group-remove rail - the LLM may only SHRINK a group
+# ("leave"), never grow one.
 WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "mail", "lfg", "roll", "stats",
              "rpg", "follow", "stay", "attack", "release",
@@ -153,18 +151,20 @@ FORBIDDEN = ("autogear", "maintenance", "equip upgrade", "reset botai",
 
 # "cast" is whitelist-gated PER SPELL, not open-ended: the server matches the
 # spell name EXACTLY (case-insensitive, full length) against the bot's own
-# spellbook, so names must be exact. Keyed by roster job code (see SKILLS).
-# The bot whispers back "Unknown spell"/"Cannot cast"/"Cast failed" on bad
-# casts, so errors are audible in leo.log - extend this dict from receipts.
+# spellbook, so names must be exact. Keyed by profession code (see SKILLS);
+# validate() checks the target's DB skills (db-search get_skills) before
+# allowing the cast. The bot whispers back "Unknown spell"/"Cannot cast"/
+# "Cast failed" on bad casts, so errors are audible via chat-tunnel - extend
+# this dict from receipts.
 CAST_SPELLS = {"tailor": ("Mooncloth",),
-               "alchemy": ("Transmute: Titanium",),
-               "mine": ("Smelt Titansteel",)}
+              "alchemy": ("Transmute: Titanium",),
+              "mine": ("Smelt Titansteel",)}
 CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 
-# master-issued server commands (Leo runs them himself via the shell, not /w to a bot)
+# master-issued server commands (Leo runs them himself, not /w to a bot)
 MASTER_CMDS = ("bot add", "bot remove", "bot addaccount")
 
-# group-management server commands, same FIFO path but formatted '.group ...'
+# group-management server commands; chat-tunnel formats them as '.group ...'
 # (cs_group.cpp). NOTE: '.group remove' is Console::No in AzerothCore, so it
 # CANNOT run from any remote/console path (only '.group list' and
 # '.group revive' are Console::Yes). It only works as an in-game command from
@@ -176,22 +176,22 @@ GROUP_CMDS = ("group remove",)
 ORDER_RULES = """Reply with ONE JSON object as the LAST thing in your reply, inside a single ```json code fence (short prose before the fence is fine, nothing after it):
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Rules:
-- Only name bots from the live roster (the CLI validates against a live SQL census and skips others).
+- Only name bots from the live roster (the system validates it against the live roster from the DB service and skips others).
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
-- Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself (e.g. Mooncloth). ONLY the spell names listed in that unit's roster casts field are allowed - never invent spell names or spell ids.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Queries: location (the toon's last logged-out position from the DB, marked as such - live reads are chat-tunnel's job now), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE nc/co strategy read-back: the daemon runs 'botcmd states verify <bot>' - it whispers 'nc ?'/'co ?' to the bot and returns the BOT/CONF/NC(live)/CO(live)/VERDICT row). Use them instead of guessing numbers.
+- Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself. ONLY these exact spell names are ever allowed: Mooncloth (tailors), Transmute: Titanium (alchemists), Smelt Titansteel (miners) - the system checks the unit's professions and refuses everything else. Never invent spell names or spell ids.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only through the DB service and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Each result carries a queried_at time and a staleness caveat - respect both, never present stale numbers as current. Queries: location (the toon's last-flushed map/zone from the DB, marked as such - live position is the tunnel's job), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE strategy read-back through the tunnel's inspect command - returns the bot's live strategy list, or a timeout note if it stays silent). Use them instead of guessing numbers.
 - Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
-- Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the server only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
-- Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the CLI clears that auto-formed group after rituals). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
+- Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the system only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
+- Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the brain clears that auto-formed group with leave orders). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
 - Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
   * Questing: cmd "nc +new rpg,+quest,-follow" - the 'new rpg' + 'quest' nc strategies drive questing from the bot's own quest log. Do NOT also send "rpg status do quest": it only lands when a quest with a POI is already in the log, otherwise the bot just whispers back "No quest available; use 'do quest <id>'" (NewRpgAction.cpp:183-215). To force a SPECIFIC quest by id: cmd "rpg do quest <id>" (separate command, NewRpgAction.cpp:227-244).
   * Grinding mobs: cmd "nc +new rpg,+grind,-follow" (optionally then cmd "rpg status go grind").
-  * Gathering mats: cmd "nc +new rpg,+gather,-follow" then cmd "rpg status do gather". ONLY for bots whose roster jobs include herb or mine - the server refuses others (no skinning in gather mode).
+  * Gathering mats: cmd "nc +new rpg,+gather,-follow" then cmd "rpg status do gather". ONLY for units whose skills query shows herb or mine - the server refuses others (no skinning in gather mode).
   * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
-- Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or the verdict shows MISMATCH / NO REPLY, CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; strategy MISMATCH -> re-push the recipe cmd; NO REPLY (silent bot, master-less) -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
+- Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or a strategies query timed out (silent, master-less bot), CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; wrong strategies -> re-push the recipe cmd; silent bot -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
 - Zone travel: cmd "go travel <zone name>" walks a unit to a named zone (matched by name, case-insensitive; the engine level-filters destinations, and rpg grind/quest/gather scans units near the unit's position - send it to the zone FIRST, then the rpg order). Vanilla level brackets: 1-10 Elwynn/Dun Morogh/Teldrassil/Mulgore; 10-20 Westfall/Loch Modan/Darkshore/Barrens; 20-30 Redridge/Wetlands/Duskwood/Ashenvale/Silverpine/Hillsbrad; 30-40 Desolace/Arathi/Alterac/STV/Badlands/Dustwallow/Thousand Needles; 40-50 Tanaris/Feralas/Hinterlands/Swamp of Sorrows/Azshara; 50-60 WPL/EPL/Burning Steppes/Silithus/Winterspring/Un'Goro/Felwood.
 - Broadcast: use "bot": "ALL" to apply one cmd to EVERY watched unit at once (never hand-play toons, never Leo) - e.g. {"bot":"ALL","cmd":"nc +new rpg,+grind,-follow"} or {"bot":"ALL","cmd":"go travel Barrens"}. The system expands it to one order per unit and validates each individually.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
@@ -209,8 +209,7 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
            "Answer status questions from that roster. If a toon is listed, you know them: report their level or ONLINE/OFFLINE status plainly. "
            "If a toon is NOT listed at all, say you do not know that name. "
            "Only toons marked ONLINE can take direct orders, but OFFLINE units can be brought online with a 'bot add' order. "
-           "The roster lists each unit's professions as jobs - match gathering orders to units with herb or mine. "
-           "A unit's roster casts field lists the exact spell names you may order that unit to cast (cmd \"cast <spell name>\"). "
+           "Attach a skills query to see a unit's professions - match gathering orders to units with herb or mine. "
            "When reporting counts, count the roster entries carefully; if unsure, list names instead of numbers. "
            "When he gives marching orders for the bots, " + ORDER_RULES + "\n"
            "If you cannot do what is asked, say 'I can't do that' plus a one-line reason - never bluff. "
@@ -240,32 +239,75 @@ def _with_fewshot(conv):
     return [conv[0]] + FEWSHOT + conv[1:]
 
 
+# ---------------------------------------------------------------------------
+# Service clients - the ONLY paths to the world's facts and to the game's
+# chat. One thing per call, no fallbacks: if a service is down, the call
+# fails loudly and the caller decides (docs/services-roadmap.md rows 1-2).
+# ---------------------------------------------------------------------------
+
+def dbsearch(tool, **params):
+    """One typed read-only DB tool call on the db-search unix socket.
+    Returns the full envelope (ok, queried_at, caveat, rows); raises on
+    any refusal. The LLM never writes SQL and neither does this file."""
+    req = json.dumps({"tool": tool, "params": params}).encode()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(SVC_TIMEOUT)
+        s.connect(DBSEARCH_SOCK)
+        s.sendall(req + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    resp = json.loads(buf)
+    if not resp.get("ok"):
+        raise RuntimeError("db-search %s refused: %s" %
+                           (tool, resp.get("error") or resp.get("code")))
+    return resp
+
+
+def tunnel(tool, http_timeout=None, **args):
+    """One chat-tunnel tool call over local-only HTTP. Returns the result
+    object; raises on any refusal. `http_timeout` overrides the client cap
+    (the wait_for_events long-poll blocks server-side up to 25s)."""
+    body = json.dumps({"tool": tool, "args": args}).encode()
+    req = urllib.request.Request(TUNNEL_URL, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=http_timeout or SVC_TIMEOUT) as r:
+        resp = json.loads(r.read())
+    if not resp.get("ok"):
+        raise RuntimeError("chat-tunnel %s refused: %s" % (tool, resp.get("error")))
+    return resp["result"]
+
+
+def _audit(mark, line):
+    with open(AUDIT, "a") as f:
+        f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + mark + " " + line + "\n")
+
+
 def census(online_only=True):
-    # Watch list: every toon on the bot accounts PLUS every member of the
-    # ONE named guild (WATCH_GUILD, default "Special FXc") -> adding an alt
-    # to THAT guild is enough for Leo to watch it; all other guilds on the
-    # server are ignored. masters() is widened by the guild too: HUMAN members
-    # (non-bot accounts, e.g. Banksie) may talk to Leo; bot-account toons
-    # never can (see masters()).
-    q = ("SELECT c.name, a.username, c.level, c.map, c.online, gm.guildid, "
-         "(SELECT GROUP_CONCAT(cs.skill) FROM acore_characters.character_skills cs "
-         "WHERE cs.guid=c.guid) "
-         "FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account "
-         "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-         "WHERE (a.username LIKE '" + ACCOUNT_LIKE + "' OR gm.guildid IN ("
-         "SELECT guildid FROM acore_characters.guild WHERE name='" + WATCH_GUILD + "'))"
-         + (" AND c.online=1" if online_only else "") +
-         " ORDER BY a.username, c.name;")
+    # Watch list (same rule as ever): every toon on the bot accounts PLUS every
+    # member of the ONE named guild (WATCH_GUILD) -> adding an alt to THAT guild
+    # is enough for Leo to watch it; all other guilds are ignored. Both halves
+    # now come from db-search typed tools; the guild half needs the toon's
+    # account (for the sender/bot gates), resolved via get_character and cached.
     bots = {}
-    for line in _mysql(q).splitlines():
-        name, acct, level, mapid, online, guildid, skills = line.split("\t")
-        jobs = ""
-        if skills and skills != "NULL":
-            jobs = "+".join(SKILLS.get(int(s), "s" + s)
-                            for s in skills.split(",") if s.strip())
+    for row in dbsearch("get_online_census",
+                        account_like=ACCOUNT_LIKE.rstrip("%"))["rows"]:
+        name, acct, level, cls, mapid, zone, online, guildid = row
         bots[name] = {"account": acct, "level": int(level), "map": int(mapid),
-                      "online": int(online) == 1, "jobs": jobs,
-                      "guildid": int(guildid) if guildid != "NULL" else 0}
+                      "online": online == "1",
+                      "guildid": int(guildid) if guildid.isdigit() else 0}
+    for row in dbsearch("get_guild_members", guild=WATCH_GUILD)["rows"]:
+        name, rank, level, cls, online = row
+        if name in bots:
+            continue
+        bots[name] = {"account": _sender_account(name) or "?",
+                      "level": int(level), "map": 0,
+                      "online": online == "1", "guildid": 1}
+    if online_only:
+        return {n: b for n, b in bots.items() if b["online"]}
     return bots
 
 
@@ -278,127 +320,48 @@ def masters():
     # authed will whisper Leo its master-reports and get LLM replies ->
     # chatter loop (seen live 2026-11-05: Golbez bot chatter was answered).
     # PLUS every member of the watched guild on a non-bot, non-shell account
-    # (guild-recruited humans, e.g. Banksie). Bot-account toons and Leo's shell
-    # account are deliberately NOT masters.
-    hp = [n for n in HUMANS if re.fullmatch(r"[A-Za-z]+", n)]
-    hp_in = ",".join("'%s'" % n for n in hp) or "'__none__'"
-    q = ("SELECT DISTINCT c.name FROM acore_characters.characters c "
-         "JOIN acore_auth.account a ON a.id=c.account "
-         "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-         "WHERE (a.username LIKE '" + MASTER_ACCOUNT + "%' AND LOWER(c.name) IN (" + hp_in + ")) "
-         "OR (gm.guildid IN (SELECT guildid FROM acore_characters.guild "
-         "WHERE name='" + WATCH_GUILD + "') "
-         "AND a.username NOT LIKE '" + ACCOUNT_LIKE + "' "
-         "AND a.username NOT LIKE '" + SHELL_ACCOUNT + "%');")
-    return set(l.strip().lower() for l in _mysql(q).splitlines() if l.strip())
+    # (guild-recruited humans, e.g. Banksie). Bot-account toons and Leo's
+    # shell account are deliberately NOT masters.
+    out = set()
+    rostered = set()   # every toon on the bot accounts or the shell account
+    for prefix in (ACCOUNT_LIKE, SHELL_ACCOUNT):
+        for row in dbsearch("get_online_census",
+                            account_like=prefix.rstrip("%"))["rows"]:
+            rostered.add(row[0].lower())
+    for row in dbsearch("get_online_census",
+                        account_like=MASTER_ACCOUNT.rstrip("%"))["rows"]:
+        if row[0].lower() in HUMANS:
+            out.add(row[0].lower())
+    for row in dbsearch("get_guild_members", guild=WATCH_GUILD)["rows"]:
+        n = row[0].lower()
+        if n not in rostered:
+            out.add(n)
+    return out
 
 
-# ---------------------------------------------------------------------------
-# Read-only DB fact lookups: the LLM only ever picks a NAME from this menu,
-# it never writes SQL. The toon name interpolated into each query is
-# validated against the census first (real DB names, letters only), so no
-# other text can enter the SQL string. Everything runs under the
-# SELECT-only identity. "quest" and "bags" also read acore_world
-# (quest_template, item_template); until those two grants exist those two
-# queries fail audibly instead of hanging:
-#   GRANT SELECT ON acore_world.quest_template TO 'iwashere'@'localhost';
-#   GRANT SELECT ON acore_world.item_template TO 'iwashere'@'localhost';
-# ---------------------------------------------------------------------------
-
-def _mysql(sql):
-    env = dict(os.environ)
-    env.pop("MYSQL_PWD", None)  # let the defaults file supply credentials
-    try:
-        out = subprocess.run(["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e", sql],
-                             capture_output=True, text=True, env=env, timeout=MYSQL_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("mysql timed out after %ss - DB hung?" % MYSQL_TIMEOUT)
-    if out.returncode != 0:
-        raise RuntimeError(out.stderr.strip()[:200])
-    return out.stdout.strip()
+def _char_row(toon):
+    """One get_character envelope row for a toon, or None if unknown."""
+    rows = dbsearch("get_character", toon=toon)["rows"]
+    return rows[0] if rows else None
 
 
-def _guid_sub(name):
-    return "(SELECT guid FROM acore_characters.characters WHERE name='%s')" % name
-
-
-def _fmt_money(raw):
-    c = int(raw or 0)
-    return "%dg %ds %dc" % (c // 10000, (c % 10000) // 100, c % 100)
-
-
-def _fmt_location(raw):
-    if not raw:
-        return "not found"
-    mapid, zone, x, y, online = raw.split("\t")
-    return "map %s zone %s at (%s, %s), %s" % (mapid, zone, x, y,
-                                               "ONLINE" if online == "1" else "OFFLINE")
-
-
-def _fmt_quest(raw):
-    if not raw:
-        return "no active quests"
-    labels = {1: "ready to turn in", 3: "in progress"}
-    out = []
-    for line in raw.splitlines():
-        title, status = line.rsplit("\t", 1)
-        out.append("%s (%s)" % (title, labels.get(int(status), "status %s" % status)))
-    return "; ".join(out)
-
-
-def _fmt_skills(raw):
-    if not raw:
-        return "no skills"
-    out = []
-    for line in raw.splitlines():
-        skill, value, cap = line.split("\t")
-        out.append("%s %s/%s" % (SKILLS.get(int(skill), "s" + skill), value, cap))
-    return ", ".join(out)
-
-
-def _fmt_bags(raw):
-    if not raw:
-        return "not found"
-    free = int(raw)
-    state = " - BAGS FULL" if free <= 0 else (" - nearly full" if free <= 10 else "")
-    return "%d free bag slots%s" % (free, state)
-
-
-def _fmt_played(raw):
-    if not raw:
-        return "not found"
-    level, xp, total, lvltime, logout, online = raw.split("\t")
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(logout))) if int(logout) else "never"
-    return ("level %s, played %.1fh, last logout %s, %s"
-            % (level, int(total) / 3600.0, when,
-               "ONLINE" if online == "1" else "OFFLINE"))
+def _char_online(toon):
+    row = _char_row(toon)
+    if not row:
+        raise RuntimeError("toon %r not found" % toon)
+    return row[10] == "1"    # name, account, level, race, class, map, zone, money, totaltime, online
 
 
 CLASSES = {1: "Warrior", 2: "Paladin", 3: "Hunter", 4: "Rogue", 5: "Priest",
            6: "Death Knight", 7: "Shaman", 8: "Mage", 9: "Warlock", 11: "Druid"}
 
-# `groups` is a RESERVED word in MySQL 8 - always backtick-quote it. The rows
-# are written live by the worldserver on group create / member add / member
-# remove / leader change / raid convert (Group.cpp: CHAR_INS_GROUP,
-# CHAR_DEL_GROUP_MEMBER, CHAR_UPD_GROUP_LEADER, CHAR_UPD_GROUP_TYPE), so this
-# read-only view matches the in-memory group for normal parties/raids (BG
-# groups are not persisted). groupType bit 0x02 = raid (Group.h enum GroupType).
-GROUP_SQL = (
-    "SELECT g.groupType, g.difficulty, g.raidDifficulty, lc.name, "
-    "c.name, c.level, c.class, c.online, gm2.subgroup, gm2.memberFlags "
-    "FROM acore_characters.group_member gm "
-    "JOIN acore_characters.`groups` g ON g.guid = gm.guid "
-    "JOIN acore_characters.characters lc ON lc.guid = g.leaderGuid "
-    "JOIN acore_characters.group_member gm2 ON gm2.guid = g.guid "
-    "JOIN acore_characters.characters c ON c.guid = gm2.memberGuid "
-    "WHERE gm.memberGuid = {g} "
-    "ORDER BY gm2.subgroup, c.name")
 
-
-def _fmt_group(raw):
-    if not raw:
+def _fmt_group_rows(rows):
+    """Format get_group_membership rows (groupType, difficulty, raidDifficulty,
+    leader, member, level, class, online, subgroup, memberFlags) - the same
+    view the old local SQL produced, now via db-search."""
+    if not rows:
         return "not in any group"
-    rows = [l.split("\t") for l in raw.splitlines()]
     gtype, diff, raiddiff, leader = int(rows[0][0]), rows[0][1], rows[0][2], rows[0][3]
     if gtype & 0x02:
         kind = "raid"
@@ -427,63 +390,116 @@ def _fmt_group(raw):
 
 
 def group_text(name):
-    """Formatted group/raid view of a toon via the read-only DB."""
+    """Formatted group/raid view of a toon via db-search."""
     if not re.fullmatch(r"[A-Za-z]+", name):
         return "bad toon name %r" % name
-    return _fmt_group(_mysql(GROUP_SQL.replace("{g}", _guid_sub(name))))
+    return _fmt_group_rows(dbsearch("get_group_membership", toon=name)["rows"])
 
 
 def group_members(name):
     """Member names of the group `name` is in ([] if none). Name is validated."""
     if not re.fullmatch(r"[A-Za-z]+", name):
         return []
-    rows = _mysql("SELECT c.name FROM acore_characters.group_member gm "
-                  "JOIN acore_characters.group_member gm2 ON gm2.guid = gm.guid "
-                  "JOIN acore_characters.characters c ON c.guid = gm2.memberGuid "
-                  "WHERE gm.memberGuid = " + _guid_sub(name))
-    return [l.strip() for l in rows.splitlines() if l.strip()]
+    return [r[4] for r in dbsearch("get_group_membership", toon=name)["rows"]]
 
 
-# name -> (what it returns, sql with {n} = validated toon name and
-#          {g} = guid-by-name subquery, result formatter)
-DB_QUERIES = {
-    "location": ("map, zone, coordinates, online flag",
-                 "SELECT map, zone, position_x, position_y, online "
-                 "FROM acore_characters.characters WHERE name='{n}'", _fmt_location),
+# LLM-facing query menu: name -> (what it returns, how it is answered).
+# DB-answerable names run ONE db-search tool; "strategies" is the live read
+# and goes through chat-tunnel's inspect (A23). The digest always carries
+# queried_at + the staleness caveat (the roadmap's staleness contract).
+QUERY_TOOLS = {
+    "location": ("last-flushed map/zone from the DB (live position is the tunnel's job)",
+                 lambda toon: dbsearch("get_character", toon=toon)),
     "quest": ("active quests (in progress / ready to turn in)",
-              "SELECT qt.LogTitle, cqs.status FROM acore_characters.character_queststatus cqs "
-              "JOIN acore_world.quest_template qt ON qt.ID=cqs.quest "
-              "WHERE cqs.guid={g} AND cqs.status IN (1,3) "
-              "ORDER BY cqs.status LIMIT 10", _fmt_quest),
-    "money": ("gold on hand",
-              "SELECT money FROM acore_characters.characters WHERE name='{n}'", _fmt_money),
+              lambda toon: dbsearch("get_quest_log", toon=toon)),
+    "money": ("gold on hand (last-flushed)",
+              lambda toon: dbsearch("get_character", toon=toon)),
     "skills": ("profession levels",
-               "SELECT skill, value, max FROM acore_characters.character_skills "
-               "WHERE guid={g} ORDER BY skill", _fmt_skills),
+               lambda toon: dbsearch("get_skills", toon=toon)),
     "bags": ("free bag slots",
-             # capacity = 16 backpack slots + ContainerSlots of EQUIPPED bags
-             # (bag=255, slots 19-22; slot<4 at bag=255 is equipment, not bags).
-             # used = items in the backpack (bag=0, slots 23-38) + inside bags.
-             "SELECT 16 + (SELECT IFNULL(SUM(it.ContainerSlots), 0) "
-             "FROM acore_characters.character_inventory ci "
-             "JOIN acore_characters.item_instance ii ON ii.guid=ci.item "
-             "JOIN acore_world.item_template it ON it.entry=ii.itemEntry "
-             "WHERE ci.guid={g} AND ci.bag=255 AND ci.slot BETWEEN 19 AND 22) "
-             "- (SELECT COUNT(*) FROM acore_characters.character_inventory "
-             "WHERE guid={g} AND ((bag=0 AND slot BETWEEN 23 AND 38) OR bag IN "
-             "(SELECT item FROM acore_characters.character_inventory "
-             "WHERE guid={g} AND bag=255 AND slot BETWEEN 19 AND 22)))", _fmt_bags),
+             lambda toon: dbsearch("get_bag_space", toon=toon)),
     "played": ("playtime and last logout",
-                "SELECT level, xp, totaltime, leveltime, logout_time, online "
-                "FROM acore_characters.characters WHERE name='{n}'", _fmt_played),
-    "raid": ("the group/raid a toon is in: party/raid + difficulty, leader, "
-             "members (level/class/online/subgroup/role flags)",
-             GROUP_SQL, _fmt_group),
+               lambda toon: dbsearch("get_leveling_progress",
+                                     account=_char_row(toon)[1])),
+    "raid": ("the group/raid a toon is in: party/raid + difficulty, leader, members",
+             lambda toon: dbsearch("get_group_membership", toon=toon)),
 }
 
 
+def _fmt_rows(tool, toon, resp):
+    """Human/LLM-readable digest of one db-search envelope."""
+    rows = resp["rows"]
+    if tool == "location":
+        if not rows:
+            return "not found"
+        _, _, level, _, _, mapid, zone, money, _, online = rows[0]
+        return ("last-flushed map %s zone %s (DB value - live position is the "
+                "tunnel's job), %s" % (mapid, zone,
+                                       "ONLINE" if online == "1" else "OFFLINE"))
+    if tool == "quest":
+        if not rows:
+            return "no quest log rows"
+        labels = {1: "ready to turn in", 3: "in progress", 5: "failed", 6: "rewarded"}
+        out = []
+        for q, title, status, explored in rows:
+            out.append("%s (%s)" % (title or "quest %s" % q,
+                                    labels.get(int(status), "status %s" % status)))
+        return "; ".join(out)
+    if tool == "money":
+        if not rows:
+            return "not found"
+        c = int(rows[0][7] or 0)
+        return "%dg %ds %dc" % (c // 10000, (c % 10000) // 100, c % 100)
+    if tool == "skills":
+        if not rows:
+            return "no skills"
+        return ", ".join("%s %s/%s" % (n, v, m) for _, n, v, m in rows)
+    if tool == "bags":
+        if not rows:
+            return "not found"
+        capacity, used, free = rows[0]
+        return ("%s free bag slots (capacity %s, used %s)%s"
+                % (free, capacity, used,
+                   " - BAGS FULL" if int(free) <= 0 else
+                   (" - nearly full" if int(free) <= 10 else "")))
+    if tool == "played":
+        for r in rows:
+            if r[0].lower() == toon.lower():
+                when = (time.strftime("%Y-%m-%d %H:%M", time.localtime(int(r[5])))
+                        if int(r[5] or 0) else "never")
+                return ("level %s, played %.1fh, last logout %s, %s"
+                        % (r[1], int(r[4] or 0) / 3600.0, when,
+                           "ONLINE" if r[6] == "1" else "OFFLINE"))
+        return "not found"
+    if tool == "raid":
+        return _fmt_group_rows(rows)
+    return "; ".join(" ".join(r) for r in rows) or "no rows"
+
+
+def _probe_strategies(bot):
+    """Live strategy read-back through chat-tunnel (A23): inspect(bot,
+    "strategy") sends '.playerbots inspect <bot> strategy' and the reply is
+    correlated to exactly that command. Returns (ok, text)."""
+    if not re.fullmatch(r"[A-Za-z]+", bot):
+        return False, "bad name %r" % bot
+    try:
+        cid = tunnel("inspect", bot=bot, query="strategy")["correlation_id"]
+    except Exception as e:
+        return False, str(e)
+    for _ in range(6):
+        time.sleep(2)
+        got = tunnel("get_reply", correlation_id=cid)
+        if got["reply"]:
+            return True, got["reply"]["command"]
+        if got["sent"]["status"] == "timeout":
+            return False, ("no reply within the window (silent/offline - "
+                           "offline truth is db-search)")
+    return False, "no reply yet within 12s"
+
+
 def run_queries(qs, all_bots):
-    """Run up to 3 named lookups; return a human-readable digest (never raise)."""
+    """Run up to 3 named lookups; return a digest (never raise). DB facts via
+    db-search (with queried_at + caveat), live reads via chat-tunnel."""
     lines = []
     for q in qs[:3]:
         if not isinstance(q, dict):
@@ -491,38 +507,44 @@ def run_queries(qs, all_bots):
             continue
         name = str(q.get("query", "")).strip().lower()
         bot = str(q.get("bot", "")).strip()
-        if name == "strategies":
-            match = next((n for n in all_bots if n.lower() == bot.lower()), None)
-            if not match or not re.fullmatch(r"[A-Za-z]+", match):
-                lines.append("query strategies: %r not in census" % bot)
-                continue
-            ok, txt = _probe_strategies(match)
-            lines.append(("%s strategies verdict: %s" % (match, txt)) if ok
-                         else ("%s strategies probe failed: %s" % (match, txt)))
-            continue
-        info = DB_QUERIES.get(name)
-        if not info:
-            lines.append("query %r unknown (have: %s)" % (name, ", ".join(sorted(DB_QUERIES))))
-            continue
         match = next((n for n in all_bots if n.lower() == bot.lower()), None)
         if not match or not re.fullmatch(r"[A-Za-z]+", match):
-            lines.append("query %s: %r not in census" % (name, bot))
+            lines.append("query %s: %r not in census" % (name or "?", bot))
             continue
-        note = ""
-        if name == "location":
-            note = "DB last-logout position (live reads retired with rtt-engine - chat-tunnel owns them now): "
-        sql = info[1].replace("{g}", _guid_sub(match)).replace("{n}", match)
+        if name == "strategies":
+            ok, txt = _probe_strategies(match)
+            lines.append(("%s strategies: %s" % (match, txt)) if ok
+                         else ("%s strategies probe failed: %s" % (match, txt)))
+            continue
+        info = QUERY_TOOLS.get(name)
+        if not info:
+            lines.append("query %r unknown (have: %s)"
+                         % (name, ", ".join(sorted(QUERY_TOOLS) + ["strategies"])))
+            continue
         try:
-            lines.append("%s %s: %s%s" % (match, name, note, info[2](_mysql(sql))))
+            resp = info[1](match)
+            lines.append("%s %s: %s (queried_at %s; caveat: %s)"
+                         % (match, name, _fmt_rows(name, match, resp),
+                            resp.get("queried_at"), resp.get("caveat")))
         except Exception as e:
             lines.append("%s %s failed: %s" % (match, name, e))
     return "\n".join(lines) if lines else "no valid queries"
 
 
+def cast_jobs(bot):
+    """Profession codes of a toon from its DB skills (db-search get_skills)."""
+    jobs = []
+    for r in dbsearch("get_skills", toon=bot)["rows"]:
+        code = SKILLS.get(int(r[0]))
+        if code:
+            jobs.append(code)
+    return jobs
+
+
 def cast_list(name, jobs):
     """Exact spell names Leo may tell this toon to cast (overrides + by job)."""
     spells = list(CAST_OVERRIDES.get(name, ()))
-    for j in (jobs or "").split("+"):
+    for j in (jobs or []):
         spells.extend(CAST_SPELLS.get(j, ()))
     return spells
 
@@ -532,14 +554,9 @@ def roster_text(bots):
         return "NONE on the bot accounts"
     parts = []
     for n, b in bots.items():
-        p = "%s(acc %s, lvl %s, map %s" % (n, b["account"].lower(), b["level"], b["map"])
-        if b.get("jobs"):
-            p += ", jobs " + b["jobs"]
-        casts = cast_list(n, b.get("jobs"))
-        if casts:
-            p += ", casts " + "+".join(casts)
-        p += ") " + ("ONLINE" if b["online"] else "OFFLINE")
-        parts.append(p)
+        parts.append("%s(acc %s, lvl %s, map %s) %s"
+                     % (n, b["account"].lower(), b["level"], b["map"],
+                        "ONLINE" if b["online"] else "OFFLINE"))
     return "; ".join(parts)
 
 
@@ -635,7 +652,8 @@ def is_group_cmd(cmd):
 
 
 def order_line(bot, cmd):
-    """FIFO line for an order: master cmds go to the server, others are /w to the bot."""
+    """Display/audit form of an order (the tunnel applies the same split when
+    it actually sends: master cmds go to the server, others are /w to the bot)."""
     if is_master_cmd(cmd):
         return ".playerbots %s %s" % (cmd, bot)
     if is_group_cmd(cmd):
@@ -663,11 +681,11 @@ def validate(order, bots):
         return ("SKIP %s: hand-play toon, never commanded or brought "
                 "online as a bot (DIRECTOR_HANDPLAY)" % bot)
     if low == "group remove":
-        # may only ever hit a CURRENT member of Leo's own group (live DB check),
-        # never Leo himself. Bot members are rewritten to the plain "leave"
-        # whisper (LeaveGroupAction - works with SEC_PLAYER, no GM needed);
-        # human members go out as '.group remove <name>' from Leo's session,
-        # which needs Leo's account to hold rbac_perm_command_group_remove
+        # may only ever hit a CURRENT member of Leo's own group (live DB check
+        # via db-search), never Leo himself. Bot members are rewritten to the
+        # plain "leave" whisper (LeaveGroupAction - works with SEC_PLAYER, no
+        # GM needed); human members go out as '.group remove <name>' from Leo's
+        # session, which needs Leo's account to hold rbac_perm_command_group_remove
         # (Console::No command - no remote path can run it; see the
         # GROUP_CMDS note).
         if bot.lower() == LEO.lower():
@@ -709,7 +727,10 @@ def validate(order, bots):
             return "SKIP %s: cast needs a spell name" % bot
         m = re.match(r"^(.+?)\s+(\d+)$", rest)  # optional trailing repeat count
         spell = rest.strip().lower()
-        allowed = [s.lower() for s in cast_list(bot, bots[bot].get("jobs"))]
+        try:
+            allowed = [s.lower() for s in cast_list(bot, cast_jobs(bot))]
+        except Exception as e:
+            return "SKIP %s: cast refused (skills lookup failed: %s)" % (bot, e)
         if spell not in allowed and m:
             spell = m.group(1).strip().lower()
         if spell not in allowed:
@@ -717,26 +738,23 @@ def validate(order, bots):
     return None
 
 
-def send_line(line, pace):
-    r = subprocess.run(["timeout", "3", "bash", "-c",
-                    'printf "%s\\n" "$1" > ' + FIFO, "_", line])
-    if r.returncode != 0:
-        # e.g. FIFO has no reader (leo shell down) - the message is LOST in-game
-        print("send_line FAILED rc=%d - not written to %s (no reader? leo shell down?): %r"
-              % (r.returncode, FIFO, line[:80]))
-    with open(AUDIT, "a") as f:
-        f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "SENT " + line + "\n")
-    if pace:
-        time.sleep(pace)
+def send_order(bot, cmd):
+    """The ONE send path: chat-tunnel send_command (paced, correlated, allowed
+    roster only). Returns the tunnel's result; raises on refusal."""
+    res = tunnel("send_command", bot=bot, cmd=cmd)
+    _audit("SENT", res["line"])
+    return res
 
 
-def say(recipient, msg, guild=False):
+def say(recipient, msg):
+    """Whisper a toon through the tunnel (chunked to 200 chars). Guild answers
+    ride the same whisper path: the tunnel's send contract is /w only
+    (send-side /g is unverified on this client)."""
     msg = (msg or "").strip()
     if not msg:
         return
     for i in range(0, len(msg), 200):
-        chunk = msg[i:i + 200]
-        send_line(("/g " if guild else "/w %s " % recipient) + chunk, 0.5)
+        send_order(recipient, msg[i:i + 200])
 
 
 def _llm_fail_say(sender, e, channel):
@@ -744,9 +762,9 @@ def _llm_fail_say(sender, e, channel):
     One place, so both daemon call sites stay identical."""
     if "timed out" in str(e).lower():
         say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
-            % (MODEL, LLM_TIMEOUT), guild=(channel == "guild"))
+            % (MODEL, LLM_TIMEOUT))
     else:
-        say(sender, "llm error: %s" % e, guild=(channel == "guild"))
+        say(sender, "llm error: %s" % e)
 
 
 def expand_orders(orders, all_bots):
@@ -786,8 +804,13 @@ def execute(orders, bots, pace, dry):
         print("(dry-run: nothing sent; type 'go' to execute, 'skip' to discard)")
         return plan
     for o in plan:
-        send_line(order_line(o["bot"], o["cmd"]), pace)
-        print("  sent: " + order_line(o["bot"], o["cmd"]))
+        try:
+            res = send_order(o["bot"], o["cmd"])
+            print("  sent: " + res["line"])
+        except Exception as e:
+            print("  send FAILED for %s: %s" % (o["bot"], e))
+        if pace:
+            time.sleep(pace)
     return plan
 
 
@@ -835,8 +858,6 @@ def repl():
             execute(pending, census(), 2.0, dry=True)
 
 
-LINE_RE = re.compile(r"\[([A-Za-z]+)\] \[(whisper|guild)\]: (.*)")
-
 # confirm/discard words, used only in DIRECTOR_CONFIRM=1 mode (only matter while a plan is pending)
 GO_WORDS = ("go", "do it", "confirm", "confirmed", "execute", "approved", "approve",
             "yes", "sure", "affirmative", "send it", "make it so")
@@ -867,32 +888,11 @@ def _note_bot_error(sender, text):
     del BOTFB[:-10]
 
 
-def _probe_strategies(bot):
-    """Read back a bot's LIVE strategies: runs 'bin/botcmd states verify <bot>'
-    (Leo whispers 'nc ?'/'co ?' and the tool tabulates BOT/CONF/NC(live)/CO(live)/
-    VERDICT from the replies alone). Returns (ok, text-row-or-error)."""
-    if not re.fullmatch(r"[A-Za-z]+", bot):
-        return False, "bad name %r" % bot
-    try:
-        r = subprocess.run(["bash", os.path.join(HERE, "bin", "botcmd"), "states", "verify", bot],
-                           capture_output=True, text=True, timeout=90)
-        row = ""
-        for ln in (r.stdout + r.stderr).splitlines():
-            if ln.lower().startswith(bot.lower() + " "):
-                row = ln
-                break
-        if row:
-            return True, row
-        return False, "no row for %s in verify output (rc=%d)" % (bot, r.returncode)
-    except Exception as e:
-        return False, str(e)
-
 _sender_acct_cache = {}  # name -> (checked_at, account name or None)
 
-
 def _sender_account(name):
-    """Account of a toon via the read-only DB (cached 5 min); None on error.
-    LINE_RE only yields [A-Za-z]+ names, re-validated here before SQL."""
+    """Account of a toon via db-search get_character (cached 5 min); None on
+    error. Event senders are [A-Za-z]+ names, re-validated here."""
     if not re.fullmatch(r"[A-Za-z]+", name):
         return None
     now = time.time()
@@ -901,9 +901,8 @@ def _sender_account(name):
     if hit and now - hit[0] < 300:
         return hit[1]
     try:
-        acct = _mysql("SELECT a.username FROM acore_characters.characters c "
-                      "JOIN acore_auth.account a ON a.id=c.account "
-                      "WHERE c.name='%s'" % name).strip() or None
+        row = _char_row(name)
+        acct = row[1] if row else None
     except Exception:
         acct = None
     _sender_acct_cache[key] = (now, acct)
@@ -912,10 +911,7 @@ def _sender_account(name):
 
 def _is_bot_sender(name):
     """True if the sender's ACCOUNT is a bot account or Leo's shell account.
-    Structural and DB-only - no console credentials involved. (A console
-    '.playerbots' gate was never usable: that subcommand does not exist
-    in mod-playerbots @ e88cc40, and '.playerbots bot ...' requires an
-    active session.)"""
+    Structural and DB-only (via db-search)."""
     acct = _sender_account(name)
     if not acct:
         return False  # DB down: the auth-list and line-filter gates still apply
@@ -940,7 +936,6 @@ def _is_bot_sender(name):
 WATCHDOG_CONF = os.environ.get("DIRECTOR_WATCHDOG_CONF",
                                os.path.expanduser("~/.leo-watchdog.conf"))
 
-
 def _wd_conf():
     cfg = {"ON_H": "8", "OFF_H": "22",
            "GROUP": "Cecil Rydia Shadow Vivi Aeris Aerith",
@@ -959,19 +954,16 @@ def _wd_conf():
         pass
     return cfg
 
-
 def _svc_state():
     r = subprocess.run(["systemctl", "--user", "is-active", "leo"],
-                        capture_output=True, text=True)
+                       capture_output=True, text=True)
     return r.stdout.strip()
-
 
 def _presence_facts(cfg):
     """One read of the world: (leo_online, group_online, wanted, svc).
     A DB hiccup reads as leo_online=1/wanted=1 - never alarm on a blind DB."""
     try:
-        v = _mysql("SELECT online FROM acore_characters.characters WHERE name='%s'" % LEO)
-        leo = int(v) if v.strip() in ("0", "1") else 1
+        leo = 1 if _char_online(LEO) else 0
     except Exception:
         leo = 1
     group_on = 0
@@ -979,15 +971,13 @@ def _presence_facts(cfg):
         if not re.fullmatch(r"[A-Za-z]+", n):
             continue
         try:
-            c = _mysql("SELECT COUNT(*) FROM acore_characters.characters "
-                       "WHERE name='%s' AND online=1" % n)
-            group_on += int(c) if c.strip().isdigit() else 0
+            if _char_online(n):
+                group_on += 1
         except Exception:
             pass
     hour = time.localtime().tm_hour
     wanted = 1 if (int(cfg["ON_H"]) <= hour < int(cfg["OFF_H"])) or group_on else 0
     return leo, group_on, wanted, _svc_state()
-
 
 def _hb_condition(facts, state):
     """What (if anything) needs the LLM's attention this tick.
@@ -1015,10 +1005,8 @@ def _hb_condition(facts, state):
                     "(zombie candidate)", False)
     return "", False
 
-
 HB_MIN_INTERVAL = 300.0   # a standing alarm re-notifies at most every 5 min
 HB_CONV = []              # heartbeat conversation (system prompt added lazily)
-
 
 def _hb_system(cfg):
     return (
@@ -1041,17 +1029,11 @@ def _hb_system(cfg):
            " ".join(str(cfg["RITUAL_ACCOUNTS"]).split()),
            " ".join(str(cfg["RITUAL_BOTS"]).split())))
 
-
 def _hb_msg(facts, cond, cfg):
     leo, group_on, wanted, svc = facts
     members = []
     try:
-        members = _mysql(
-            "SELECT c.name FROM acore_characters.characters lc "
-            "JOIN acore_characters.group_member gm ON gm.memberGuid=lc.guid "
-            "JOIN acore_characters.group_member gm2 ON gm2.guid=gm.guid "
-            "JOIN acore_characters.characters c ON c.guid=gm2.memberGuid "
-            "WHERE lc.name='%s' ORDER BY c.name" % LEO).split()
+        members = group_members(LEO)
     except Exception:
         pass
     lines = ["PRESENCE HEARTBEAT - attention needed: %s" % cond,
@@ -1062,7 +1044,6 @@ def _hb_msg(facts, cond, cfg):
         lines.append("Leo's current group members: %s" % ", ".join(members))
     return "\n".join(lines)
 
-
 def _hb_exec_service(order):
     svc = str(order.get("service", ""))
     cmd = str(order.get("cmd", ""))
@@ -1072,7 +1053,6 @@ def _hb_exec_service(order):
     with open(AUDIT, "a") as f:
         f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "HB SERVICE %s %s\n" % (cmd, svc))
     return "service %s %s executed" % (cmd, svc)
-
 
 def _hb_turn(facts, cond, cfg):
     global HB_CONV
@@ -1094,7 +1074,6 @@ def _hb_turn(facts, cond, cfg):
         sent = execute(bot_orders, census(), 1.0, dry=False)
         print("presence heartbeat: executed %d bot order(s)" % (len(sent) if sent else 0))
 
-
 def presence_loop(interval=30.0):
     cfg = _wd_conf()
     state = {"prev_sig": None, "off_streak": 0}
@@ -1112,7 +1091,6 @@ def presence_loop(interval=30.0):
             print("presence: poll error: %s" % e)
         time.sleep(interval)
 
-
 def daemon():
     # single-instance guard: a second daemon would double-answer every whisper
     lock_fd = os.open(os.path.join(HERE, "daemon.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
@@ -1120,14 +1098,10 @@ def daemon():
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         sys.exit("another director.py daemon is already running (daemon.lock); not starting")
-    others = subprocess.run(["pgrep", "-f", "director.py daemon"],
-                            capture_output=True, text=True).stdout.split()
-    if others:
-        print("daemon: WARNING - pgrep also sees 'director.py daemon' pid(s) %s; if one is "
-              "stale, kill it - two daemons double-answer whispers (removing daemon.lock does "
-              "NOT release the old flock)" % ",".join(others))
     authed = masters()
-    print("daemon: Leo is listening. masters: %s" % ",".join(sorted(authed)))
+    print("daemon: Leo is listening (facts: db-search on %s; sends/replies: "
+          "chat-tunnel on %s). masters: %s"
+          % (DBSEARCH_SOCK, TUNNEL_URL, ", ".join(sorted(authed))))
     if CONFIRM:
         print("daemon: orders are HELD until you whisper 'go' (DIRECTOR_CONFIRM=0 = auto-execute).")
     else:
@@ -1138,21 +1112,31 @@ def daemon():
     pending = {}       # sender -> [order dicts]  (raw {"bot","cmd"} dicts so the
                        # confirm path can re-validate against a FRESH census)
     convs = {}         # sender -> [messages]
-    proc = subprocess.Popen(["tail", "-n", "0", "-F", LOG],
-                            stdout=subprocess.PIPE, bufsize=1, text=True)
+    # chat-tunnel owns /tmp/leo.log; the daemon consumes its event feed with
+    # the event id as a monotonic cursor. Start at the current tail (the old
+    # `tail -n 0` semantics): skip the backlog, then long-poll for new lines.
     try:
-        while True:
-            raw = proc.stdout.readline()
-            if not raw:
-                break
+        cursor = tunnel("get_events_since", after_id=0, limit=1000)["last_id"]
+    except Exception as e:
+        sys.exit("daemon: chat-tunnel not reachable at %s (%s) - it must be up "
+                 "before the daemon" % (TUNNEL_URL, e))
+    while True:
+        try:
+            batch = tunnel("wait_for_events", after_id=cursor, timeout=25,
+                           limit=200, http_timeout=SVC_TIMEOUT + 30)
+        except Exception as e:
+            print("daemon: tunnel read error: %s - retrying in 2s" % e)
+            time.sleep(2)
+            continue
+        cursor = batch["last_id"]
+        for ev in batch["events"]:
             sender = None
             try:
-                m = LINE_RE.search(raw)
-                if not m:
-                    if DEBUG:
-                        print("daemon: unmatched log line: %r" % raw.rstrip())
+                if ev["direction"] != "reply":
+                    continue          # our own sends (sent events) - not input
+                sender, channel, text = ev["sender"], ev["channel"], (ev["command"] or "").strip()
+                if channel not in ("whisper", "guild"):
                     continue
-                sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
                 if sender in ("Leo", "System") or not text:
                     continue
                 if sender.lower() not in authed:
@@ -1161,7 +1145,7 @@ def daemon():
                 if _is_bot_sender(sender):
                     # bots whisper their master (Leo) their "Selling/Using X"
                     # reports and RP chatter; answering them makes the two LLM
-                    # layers talk to each other and starves Ollama (seen live
+                    # layers talk to each other and starved Ollama (seen live
                     # 2026-11-05). Dropped structurally via the account check -
                     # EXCEPT error/refusal lines (BOT_ERROR_RE), which are surfaced
                     # to the LLM as context in the roster message (BOTFB) so Leo
@@ -1182,7 +1166,7 @@ def daemon():
                     continue
                 print("daemon: [%s] (%s): %s" % (sender, channel, text))
                 if ACKS:
-                    say(sender, random.choice(ACKS), guild=(channel == "guild"))
+                    say(sender, random.choice(ACKS))
                 low = text.lower().strip()
                 if CONFIRM and low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
@@ -1206,7 +1190,6 @@ def daemon():
                 conv.append({"role": "user", "content": text})
                 try:
                     t0 = time.time()
-                    print("daemon: [%s] thinking (model %s)..." % (sender, MODEL))
                     roster_msg = ("Live roster (name, account, level, map, status): "
                                   + roster_text(census(online_only=False)))
                     try:
@@ -1269,23 +1252,21 @@ def daemon():
                         else:
                             # auto-execute: validation is the safety net, no ritual
                             for o in sent:
-                                send_line(order_line(str(o["bot"]), str(o["cmd"])), 1.0)
-                            msg += " | executed: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
+                                try:
+                                    res = send_order(str(o["bot"]), str(o["cmd"]))
+                                    msg += " | executed: " + res["line"]
+                                except Exception as e:
+                                    msg += " | send FAILED: %s" % e
                 print("daemon -> %s: %s (turn %.1fs)" % (sender, msg, time.time() - t0))
-                if channel == "guild" and not sent and not (CONFIRM and sender in pending):
-                    say(None, msg, guild=True)
-                else:
-                    say(sender, msg)
+                say(sender, msg)
             except Exception as e:
-                print("daemon line error: %s" % e)
+                print("daemon event error: %s" % e)
                 if sender:
                     # never drop a turn silently: the master must know we choked
                     try:
                         say(sender, "error: %s" % e)
                     except Exception:
                         pass
-    finally:
-        proc.terminate()
 
 
 def run_file(path, go, pace):

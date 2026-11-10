@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Service-wiring proof (LLM daemon -> db-search + chat-tunnel, roadmap row 5).
+
+Runs the REAL services offline - db-search on the SQLite fixture DB (same
+build as services/db-search/harness.py), chat-tunnel on a temp log + FIFO
+(same pattern as services/chat-tunnel/proof.py) - then drives director.py's
+wiring: census/masters/sender gates/group lookups (db-search), query digest
+with queried_at + caveat, live strategies via inspect, the validated order
+pipeline sending through the tunnel, and the presence fact gatherer.
+
+Also asserts the raw paths are GONE: no _mysql, no mysql CLI, no 8888, no
+direct FIFO/log access, no `tail` in director.py.
+
+Run: python3 tests/test_services_wiring.py   (no worldserver needed)
+"""
+import json
+import os
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "services", "db-search"))
+
+PASS = FAIL = 0
+
+
+def check(name, cond, detail=""):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print("  PASS  %s" % name)
+    else:
+        FAIL += 1
+        print("  FAIL  %s  %s" % (name, detail))
+
+
+def build_fixture(dirpath):
+    for f in os.listdir(dirpath):
+        if f.startswith("fixture_") and f.endswith(".db"):
+            os.unlink(os.path.join(dirpath, f))
+    con = sqlite3.connect(os.path.join(dirpath, "fixture_acore_characters.db"))
+    try:
+        con.executescript(
+            open(os.path.join(REPO, "services", "db-search", "fixtures", "fixture.sql")).read()
+            .replace("ATTACH DATABASE 'fixture_",
+                     "ATTACH DATABASE '" + dirpath + os.sep + "fixture_"))
+        con.commit()
+    finally:
+        con.close()
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def wait_socket(path, tries=100):
+    for _ in range(tries):
+        if os.path.exists(path):
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.connect(path)
+                s.close()
+                return True
+            except OSError:
+                pass
+        time.sleep(0.05)
+    return False
+
+
+def wait_http(url, tries=100):
+    for _ in range(tries):
+        try:
+            urllib.request.urlopen(url, timeout=1).read()
+            return True
+        except Exception:
+            time.sleep(0.05)
+    return False
+
+
+def main():
+    tmp = tempfile.mkdtemp(prefix="director-wiring-")
+    sock_path = os.path.join(tmp, "db-search.sock")
+    log_path = os.path.join(tmp, "leo.log")
+    fifo_path = os.path.join(tmp, "leo.in")
+    tunnel_db = os.path.join(tmp, "tunnel.db")
+    port = free_port()
+    tunnel_url = "http://127.0.0.1:%d/" % port
+    open(log_path, "w").close()
+    os.mkfifo(fifo_path)
+
+    # a reader for the FIFO: collects every line the tunnel writes in-game
+    fifo_lines = []
+
+    def fifo_reader():
+        # a FIFO read returns EOF when the writer closes - reopen and keep
+        # reading (each tunnel send is its own open/write/close)
+        while True:
+            fd = os.open(fifo_path, os.O_RDONLY)
+            buf = b""
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    fifo_lines.append(line.decode())
+            os.close(fd)
+
+    threading.Thread(target=fifo_reader, daemon=True).start()
+
+    build_fixture(tmp)
+
+    db_env = dict(os.environ,
+                  DBSEARCH_ADAPTER="sqlite",
+                  DBSEARCH_FIXTURE_DB=os.path.join(tmp, "fixture_acore_characters.db"),
+                  DBSEARCH_SOCKET=sock_path)
+    db_proc = subprocess.Popen([sys.executable, "dbsearch.py", "serve"],
+                               cwd=os.path.join(REPO, "services", "db-search"),
+                               env=db_env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ct_env = dict(os.environ,
+                  CHAT_TUNNEL_LOG=log_path,
+                  CHAT_TUNNEL_FIFO=fifo_path,
+                  CHAT_TUNNEL_PORT=str(port),
+                  CHAT_TUNNEL_DB=tunnel_db,
+                  CHAT_TUNNEL_ALLOW="Leo,Cecil,Rydia,Vivi,Ayla,Gau,Locke,Golbez",
+                  CHAT_TUNNEL_PACE="0.05",
+                  CHAT_TUNNEL_PURGE_EVERY="3600")
+    ct_proc = subprocess.Popen([sys.executable, "chat_tunnel.py"],
+                               cwd=os.path.join(REPO, "services", "chat-tunnel"),
+                               env=ct_env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        check("db-search socket came up", wait_socket(sock_path))
+        check("chat-tunnel HTTP came up", wait_http(tunnel_url + "health"))
+        if FAIL:
+            return finish()
+
+        # director reads its service endpoints from env at import time
+        os.environ["DIRECTOR_DBSEARCH_SOCK"] = sock_path
+        os.environ["DIRECTOR_TUNNEL_URL"] = tunnel_url
+        import director
+        director.AUDIT = os.path.join(tmp, "audit.log")
+
+        print("== 1. raw paths are gone from director.py ==")
+        src = open(director.__file__).read()
+        check("no _mysql / mysql CLI", "_mysql" not in src and "defaults-file" not in src)
+        check("no 8888 / rtt remnants", "8888" not in src and "rtt" not in src)
+        check("no direct FIFO/log access",
+              "LEO_FIFO" not in src and "DIRECTOR_LOG" not in src)
+        check("no log tailing", 'Popen(["tail"' not in src and '"-F"' not in src)
+        check("no botcmd probe", '"states", "verify"' not in src and '"botcmd"' not in src)
+
+        print("== 2. db-search facts: census, masters, sender gates ==")
+        online = director.census()
+        check("census (online): Ayla, Gau, Golbez, Leo",
+              sorted(online) == ["Ayla", "Gau", "Golbez", "Leo"], sorted(online))
+        all_bots = director.census(online_only=False)
+        check("census (all) includes offline Locke/Cecil/Rydia/Vivi",
+              {"Locke", "Cecil", "Rydia", "Vivi"} <= set(all_bots), sorted(all_bots))
+        check("census account for guild member Leo is the shell account",
+              all_bots["Leo"]["account"] == "i_was_cmd", all_bots.get("Leo"))
+        check("masters: HUMANS on master account only (no Leo, no bot toons)",
+              director.masters() == {"cecil", "rydia", "vivi"}, director.masters())
+        check("sender account: Leo -> i_was_cmd",
+              director._sender_account("Leo") == "i_was_cmd")
+        check("bot sender gate: Ayla (bot account) is a bot sender",
+              director._is_bot_sender("Ayla") is True)
+        check("bot sender gate: Leo (shell account) is a bot sender",
+              director._is_bot_sender("Leo") is True)
+        check("bot sender gate: Cecil (master account) is not",
+              director._is_bot_sender("Cecil") is False)
+
+        print("== 3. group lookups via db-search ==")
+        # Locke is still in the raid rows (A3 async logout) - the fixture models it
+        check("Leo's group members", director.group_members("Leo") == ["Leo", "Ayla", "Gau", "Locke"],
+              director.group_members("Leo"))
+        gt = director.group_text("Leo")
+        check("group text: raid led by Leo with Ayla+Gau",
+              "raid" in gt and "led by Leo" in gt and "Ayla" in gt and "Gau" in gt, gt)
+        check("ungrouped toon reads 'not in any group'",
+              director.group_text("Cecil") == "not in any group", director.group_text("Cecil"))
+
+        print("== 4. query digest carries queried_at + caveat (staleness contract) ==")
+        digest = director.run_queries(
+            [{"query": "quest", "bot": "Locke"},
+             {"query": "money", "bot": "Ayla"},
+             {"query": "skills", "bot": "Ayla"}],
+            all_bots)
+        digest2 = director.run_queries(
+            [{"query": "bags", "bot": "Ayla"},
+             {"query": "played", "bot": "Locke"}],
+            all_bots)
+        digest += "\n" + digest2
+        for ln in digest.splitlines():
+            check("queried_at + caveat: %s" % ln.split(":")[0],
+                  "queried_at" in ln and "caveat:" in ln, ln)
+        check("quest digest names fixture quests",
+              "The Fargatome" in digest or "ready to turn in" in digest, digest)
+        check("money digest formats gold", "0g 50s 0c" in digest, digest)
+        check("skills digest names professions", "herb" in digest, digest)
+        check("bags digest counts free slots", "free bag slots" in digest, digest)
+        check("unknown query refused", "unknown" in
+              director.run_queries([{"query": "nope", "bot": "Ayla"}], all_bots))
+        check("out-of-census bot refused", "not in census" in
+              director.run_queries([{"query": "money", "bot": "Nobody"}], all_bots))
+
+        print("== 5. validated order pipeline -> sends through chat-tunnel ==")
+        bots = director.census()
+        check("whitelisted order to an online bot validates",
+              director.validate({"bot": "Ayla", "cmd": "nc +grind"}, bots) is None)
+        check("FORBIDDEN command refused",
+              "FORBIDDEN" in director.validate({"bot": "Ayla", "cmd": "destroy all"}, bots))
+        check("unknown bot refused",
+              "not online" in director.validate({"bot": "Nobody", "cmd": "nc"}, bots))
+        check("cast gated per profession (Ayla is herb/mine, not tailor)",
+              "not allowed" in director.validate({"bot": "Ayla", "cmd": "cast Mooncloth"}, bots))
+        check("hand-play toon never commanded",
+              "hand-play" in director.validate({"bot": "Cecil", "cmd": "nc +grind"}, bots))
+        check("group remove of a non-member refused",
+              "not a member" in director.validate({"bot": "Golbez", "cmd": "group remove"}, bots))
+        o = {"bot": "Gau", "cmd": "group remove"}
+        err = director.validate(o, bots)
+        check("group remove of a bot member rewrites to 'leave'",
+              err is None and o["cmd"] == "leave", (err, o))
+        o = {"bot": "Locke", "cmd": "bot add"}
+        check("bot add for an OFFLINE unit validates",
+              director.validate(o, director.census(online_only=False)) is None)
+
+        sent = director.execute(
+            [{"bot": "Ayla", "cmd": "nc ?"},
+             {"bot": "Locke", "cmd": "bot add"},
+             {"bot": "Nobody", "cmd": "nc"}],
+            bots, pace=0, dry=False)
+        time.sleep(0.5)
+        check("whisper order went out as /w via the tunnel",
+              "/w Ayla nc ?" in fifo_lines, fifo_lines)
+        check("master cmd went out as .playerbots via the tunnel",
+              ".playerbots bot add Locke" in fifo_lines, fifo_lines)
+        check("unknown bot was skipped (nothing sent to it)",
+              not any("Nobody" in l for l in fifo_lines), fifo_lines)
+        check("execute returned the 2-order plan", sent and len(sent) == 2, sent)
+        check("audit log recorded the sends",
+              "SENT /w Ayla nc ?" in open(director.AUDIT).read())
+
+        print("== 6. replies: say() whispers back through the tunnel ==")
+        director.say("Cecil", "aye, moving out")
+        time.sleep(0.5)
+        check("say() wrote /w Cecil via the tunnel",
+              "/w Cecil aye, moving out" in fifo_lines, fifo_lines)
+
+        print("== 6b. human whispers land as tunnel events (the daemon's input feed) ==")
+        cursor = director.tunnel("get_events_since", after_id=0, limit=1000)["last_id"]
+        with open(log_path, "a") as f:
+            f.write("2026-11-10 20:00:30.000 | MESSAGES | headless.world.chat.chat:display:124 - "
+                    "[Cecil] [whisper]: leo, status report\n")
+        ev = None
+        for _ in range(40):
+            batch = director.tunnel("get_events_since", after_id=cursor, limit=100)
+            for e in batch["events"]:
+                if e["direction"] == "reply" and e["sender"] == "Cecil":
+                    ev = e
+            if ev:
+                break
+            time.sleep(0.05)
+        check("human whisper parsed into a reply event with channel + text",
+              ev is not None and ev["channel"] == "whisper"
+              and ev["command"] == "leo, status report", ev)
+
+        print("== 7. live read: strategies via chat-tunnel inspect (A23) ==")
+
+        def fake_worldserver():
+            time.sleep(1.0)
+            with open(log_path, "a") as f:
+                f.write("2026-11-10 20:00:00.000 | MESSAGES | headless.world.chat.chat:display:124 - "
+                        "[System]: Ayla: Strategies: rpg, grind\n")
+
+        threading.Thread(target=fake_worldserver, daemon=True).start()
+        ok, txt = director._probe_strategies("Ayla")
+        check("inspect strategy reply correlated back",
+              ok and "rpg, grind" in txt, (ok, txt))
+
+        def fake_worldserver2():
+            time.sleep(1.0)
+            with open(log_path, "a") as f:
+                f.write("2026-11-10 20:01:00.000 | MESSAGES | headless.world.chat.chat:display:124 - "
+                        "[System]: Ayla: Strategies: rpg, grind\n")
+
+        threading.Thread(target=fake_worldserver2, daemon=True).start()
+        check("strategies digest surfaces the live read",
+              "rpg, grind" in director.run_queries(
+                  [{"query": "strategies", "bot": "Ayla"}], all_bots))
+
+        print("== 8. presence facts (heartbeat hands, never decides) ==")
+        director._svc_state = lambda: "active"
+        cfg = director._wd_conf()
+        cfg["GROUP"] = "Cecil Rydia"
+        leo, group_on, wanted, svc = director._presence_facts(cfg)
+        check("Leo online flag from db-search", leo == 1, leo)
+        check("hand-play group offline count", group_on == 0, group_on)
+        check("service state passed through", svc == "active", svc)
+        msg = director._hb_msg((leo, group_on, wanted, svc), "state change", cfg)
+        check("heartbeat message lists Leo's group members",
+              "Ayla" in msg and "Gau" in msg, msg)
+        return finish()
+    finally:
+        db_proc.terminate()
+        ct_proc.terminate()
+        for p in (db_proc, ct_proc):
+            try:
+                p.wait(5)
+            except Exception:
+                p.kill()
+
+
+def finish():
+    print("service wiring tests: %s" %
+          ("ALL PASS" if not FAIL else "FAILURES: %d" % FAIL))
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
