@@ -32,6 +32,26 @@ Shared rules for all four conversations:
 
 Contracts live here so a change is visible to every conversation:
 
+- **Single-brain rule (all, IMPLEMENTED for presence 2026-11-10, operator's
+  take):** the LLM is the ONLY decision-maker about game state — which bots
+  exist, who is in what group, what gets whispered and when, AND Leo's own
+  presence. Everything else is hands: they may gather facts, execute orders,
+  and journal — never decide. Implemented: the leo watchdog is INFO-ONLY
+  (journals state changes + alarms, never acts; if the daemon is down the
+  body is down BY DESIGN and the watchdog journal says so). The daemon's
+  presence thread gathers facts every ~30s and, when attention is needed
+  (state change fires immediately; standing alarms re-notify at most every
+  5 min), sends the LLM a PRESENCE HEARTBEAT: facts + the operator's standing
+  policy + the ritual recipe + current group members. The LLM's orders flow
+  through the SAME validated pipeline as human orders, plus a strict service
+  order ({"service":"leo","cmd":"start|stop|restart"}). `bot addaccount` joined
+  the LLM's master-cmd vocabulary so the ritual is expressible as orders.
+  The old watchdog auto-ritual/group-clear (which re-added bots the LLM may
+  have removed — the #38/#39 remaster ping-pong — and dissolved LLM-assembled
+  groups) is gone. First catch: the acore_auth.logs transcript showed a
+  10-bot `leave` batch (watchdog clear) — the chat-log audit trail is the
+  instrument that detects brain-fights. Verified by tests/test_presence.py
+  (heartbeat conditions + service-order allowlist, 12/12).
 - **Event schema (chat-tunnel owns):** a tunnel event is
   `{id, ts, direction (sent|reply), sender, target, command, correlation_id, raw_line}`.
   `correlation_id` is unique per sent command; a reply is matched only within
@@ -52,17 +72,21 @@ Contracts live here so a change is visible to every conversation:
   true delivery receipt — but it needs a mod-playerbots change (new verb
   in `PlayerbotCommandServer.cpp`), so it needs an assumptions-row +
   evidence before anyone builds it. Not agreed yet; nothing depends on it.
-- **Chat log in DB (db-search owns, PROPOSED 2026-11-10):** AC core can log
-  chat natively via the DB appender (`Appender.DB=3,5,0` +
-  `Logger.chat.whisper=4,DB` etc. in worldserver.conf, `logs` table) — no
-  module change. Gives EVERY whisper in the world, both directions:
-  delivery receipts for chat-tunnel sends (Leo's outgoing whispers appear)
-  plus bot-to-bot/other-channel chatter leo.log never sees. Gates: it is a
-  live worldserver config change (assumption row + pasted evidence first,
-  incl. the known encoding issue azerothcore#17519), a world-thread write
-  per chat line (needs retention from day one), and it is POLLED — a
-  db-search catalog query with the staleness caveat, never a replacement
-  for the tunnel's real-time feed. Not enabled yet; nothing depends on it.
+- **Chat log in DB (db-search owns, CONFIRMED 2026-11-10):** AC core logs
+  whispers natively into `acore_auth.logs` (AppenderDB writes via
+  LoginDatabase — verified in core source `AppenderDB.cpp`). Live paste
+  shows clean text, both directions, human and bot traffic, including Leo's
+  OUTGOING whispers → chat-tunnel delivery receipts are now available.
+  Required worldserver.conf recipe (all four, no module change):
+  `ChatLog.Enable = 1` (the emitter gate — `chat_log.cpp` returns early
+  without it; this was the silent blocker), `Appender.DB=3,5,0`,
+  `Logger.chat.whisper=4,DB`, `Log.Async.Enable = 1` (writes off the world
+  tick). Only whisper is routed to DB, so say/guild/yell never land there.
+  Retention is core-provided: `LogDB.Opt.ClearTime` purges rows older than
+  14 days every 10 min (tighten if needed). Still POLLED — a db-search
+  catalog query with the staleness caveat, never a replacement for the
+  tunnel's real-time feed. Encoding issue azerothcore#17519 did NOT
+  reproduce (clean UTF-8 in the live rows).
 - **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
