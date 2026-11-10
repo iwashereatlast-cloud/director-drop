@@ -26,6 +26,8 @@ Env:  CHAT_TUNNEL_LOG /tmp/leo.log     log to tail
       CHAT_TUNNEL_WINDOW 30           reply window, seconds
       CHAT_TUNNEL_RETENTION 86400     events older than this are purged
       CHAT_TUNNEL_PURGE_EVERY 60      purge/timing sweep cadence, seconds
+      CHAT_TUNNEL_PACE 1.0           min seconds between FIFO writes (whisper
+                                     throttle: bursts get dropped in-game)
       CHAT_TUNNEL_MAX_ROWS 100000     hard row cap (oldest purged first)
       CHAT_TUNNEL_DB <repo>/services/chat-tunnel/tunnel.db
 """
@@ -39,6 +41,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +53,11 @@ PORT = int(os.environ.get("CHAT_TUNNEL_PORT", "8765"))
 WINDOW = float(os.environ.get("CHAT_TUNNEL_WINDOW", "30"))
 RETENTION = float(os.environ.get("CHAT_TUNNEL_RETENTION", str(24 * 3600)))
 PURGE_EVERY = float(os.environ.get("CHAT_TUNNEL_PURGE_EVERY", "60"))
+# minimum seconds between FIFO writes: the client/server throttle whispers,
+# so bursts get dropped - sends are serialized and spaced by this
+PACE = float(os.environ.get("CHAT_TUNNEL_PACE", "1.0"))
+_send_lock = threading.Lock()
+_last_send = [0.0]
 MAX_ROWS = int(os.environ.get("CHAT_TUNNEL_MAX_ROWS", "100000"))
 MASTER = os.environ.get("CHAT_TUNNEL_MASTER", "Leo")
 
@@ -94,7 +102,7 @@ def db():
 
 
 def init_db():
-    with db() as conn:
+    with closing(db()) as conn, conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""
@@ -135,13 +143,25 @@ def send_command(bot, cmd):
         return False, "bad command %r" % cmd[:40]
     line = order_line(bot, cmd)
     cid = new_cid()
-    try:
-        with open(FIFO, "w") as f:
-            f.write(line + "\n")
-    except OSError as e:
-        STATS["sends_failed"] += 1
-        return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
-    with db() as conn:
+    # nonblocking FIFO write: ENXIO when no reader (leo shell down) instead
+    # of blocking an HTTP worker forever on a hung shell; lines < PIPE_BUF
+    # are atomic on a FIFO, so a concurrent writer cannot interleave.
+    # Serialized + spaced by PACE: the client/server drops whisper bursts.
+    with _send_lock:
+        delay = _last_send[0] + PACE - now()
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(fd, (line + "\n").encode())
+            finally:
+                os.close(fd)
+        except OSError as e:
+            STATS["sends_failed"] += 1
+            return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
+        _last_send[0] = now()
+    with closing(db()) as conn, conn:
         conn.execute(
             "INSERT INTO events (ts, direction, sender, target, command,"
             " correlation_id, raw_line, channel, status)"
@@ -163,7 +183,7 @@ def match_reply(sender, channel, text, raw_line, t):
     """Bind a reply to the exact command that triggered it: same bot (sender)
     + inside the reply window, OLDEST pending command first. A garbled or
     out-of-window line never consumes a pending command."""
-    with db() as conn:
+    with closing(db()) as conn, conn:
         sweep_timeouts(conn, t)
         if channel == "whisper":
             row = conn.execute(
@@ -215,7 +235,7 @@ def handle_reply_line(raw_line, t):
 
 def get_reply(correlation_id):
     cid = str(correlation_id or "").strip()
-    with db() as conn:
+    with closing(db()) as conn, conn:
         sweep_timeouts(conn, now())
         sent = conn.execute(
             "SELECT * FROM events WHERE correlation_id=? AND direction='sent'",
@@ -230,7 +250,7 @@ def get_reply(correlation_id):
 
 def get_recent_events(limit=50, direction=None):
     limit = max(1, min(int(limit or 50), 1000))
-    with db() as conn:
+    with closing(db()) as conn, conn:
         sweep_timeouts(conn, now())
         if direction in ("sent", "reply", None):
             q = "SELECT * FROM events"
@@ -253,7 +273,7 @@ def get_events_since(after_id, limit=200):
     simply gone (a GUI re-syncs from id 0 after a gap longer than retention)."""
     after = int(after_id or 0)
     limit = max(1, min(int(limit or 200), 1000))
-    with db() as conn:
+    with closing(db()) as conn, conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
             (after, limit)).fetchall()
@@ -286,7 +306,7 @@ def stats():
     LINE_RE is missing a live format (A14 FAIL)."""
     out = dict(STATS)
     out["uptime_sec"] = round(now() - STATS["started_at"], 1)
-    with db() as conn:
+    with closing(db()) as conn, conn:
         conn.row_factory = sqlite3.Row
         tally = {r["status"] or "reply": r["n"] for r in conn.execute(
             "SELECT status, COUNT(*) AS n FROM events GROUP BY status")}
@@ -313,7 +333,7 @@ def purge_loop():
         time.sleep(PURGE_EVERY)
         t = now()
         try:
-            with db() as conn:
+            with closing(db()) as conn, conn:
                 sweep_timeouts(conn, t)
                 conn.execute("DELETE FROM events WHERE ts < ?", (t - RETENTION,))
                 conn.execute(

@@ -22,9 +22,34 @@ Usage (serverpc, leo online, chat-tunnel running):
 """
 import argparse
 import json
+import socket
 import sys
 import time
 import urllib.request
+
+
+def rtt_pinfo(sock_path, name):
+    """One rtt-engine/1 request over its unix socket: is this bot online and
+    reachable SERVER-side (command server), through a path that does not
+    involve the FIFO whisper transport? None = rtt-engine not answerable."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(sock_path)
+        s.sendall((json.dumps({"op": "pinfo", "name": name}) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        env = json.loads(data.decode())
+        if env.get("ok"):
+            return env["result"].get("online")
+        return None
+    except OSError:
+        return None
 
 
 def call(port, tool, args=None, timeout=30):
@@ -46,6 +71,10 @@ def main():
                     help="seconds between sends")
     ap.add_argument("--wait", type=float, default=None,
                     help="per-probe wait for the reply (default: 2x service window)")
+    ap.add_argument("--rtt-sock", default=None,
+                    help="rtt-engine unix socket (e.g. /tmp/rtt-engine.sock): "
+                         "pre-flight each bot with pinfo - a server-side "
+                         "online check on a path that bypasses the FIFO")
     a = ap.parse_args()
     bots = [b.strip() for b in a.bots.split(",") if b.strip()]
 
@@ -57,6 +86,14 @@ def main():
     wait = a.wait if a.wait is not None else max(30.0, 2 * 30.0)
     print("chat-tunnel liveprobe: %d round(s) of %r to %s (per-probe wait %.0fs)"
           % (a.rounds, a.cmd, ",".join(bots), wait))
+    preflight = {}
+    if a.rtt_sock:
+        for bot in bots:
+            online = rtt_pinfo(a.rtt_sock, bot)
+            preflight[bot] = online
+            print("  preflight %-10s server-side: %s"
+                  % (bot, "online" if online else
+                     ("OFFLINE" if online is False else "unanswerable")))
     print("uptime %.0fs  lines seen/parsed/noise/garbled: %d/%d/%d/%d  "
           "replies matched/unmatched: %d/%d"
           % (cfg["uptime_sec"], cfg["lines_seen"], cfg["lines_parsed"],
@@ -95,7 +132,12 @@ def main():
         elif status == "replied":
             verdict = "WRONG-SENDER"   # bound, but not the bot we probed
         elif status == "timeout":
-            verdict = "SILENT"         # no in-window reply at all
+            # no in-window reply at all; if the rtt pre-flight saw the bot
+            # online server-side, the bot is reachable but not answering -
+            # a different layer than a bot that is simply offline
+            verdict = "SILENT (server: online - not answering)" \
+                if preflight.get(bot) else \
+                "SILENT (server: offline or unanswerable)"
         else:
             verdict = "PENDING"         # still open at deadline (wait too short)
         if verdict != "OK":
