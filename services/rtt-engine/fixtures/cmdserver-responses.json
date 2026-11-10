@@ -1,8 +1,8 @@
 {
-  "position,9": "Vivi position (live): map 1 at -8925.06,133.77,83.33 in Dun Morogh",
-  "position,21": "Locke position (live): map 1 at -8874.11,110.42,82.71 in Dun Morogh",
-  "position,34": "Terra is offline",
+  "position,9": "-8925.06 133.77 83.33 1 0.557952 |Dun Morogh|",
+  "position,21": "-8874.11 110.42 82.71 1 1.204 |Dun Morogh|",
+  "position,34": "invalid guid",
   "position,2": "",
-  "status,9": "Vivi status (live): non-combat; map 1 at -8925.06,133.77,83.33 in Dun Morogh; 100%",
-  "status,21": "Locke status (live): combat; map 1 at -8874.11,110.42,82.71 in Dun Morogh; 63%"
+  "status,9": "-8925.06 133.77 83.33 1 0.557952 |Dun Morogh| 100%",
+  "status,21": "-8874.11 110.42 82.71 1 1.204 |Dun Morogh| 63%"
 }

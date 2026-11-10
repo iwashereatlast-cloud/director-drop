@@ -96,24 +96,25 @@ check "e['ok'] and e['result']['online'] is True and e['result']['guid']==9 and 
 check "e['ok'] and e['result']['online'] is True and e['result']['guid']==21" \
   '{"op":"pinfo","name":"Locke"}'
 
-# --- offline bot: command server says not live -> db-search is the truth ---
-check "e['ok'] and e['result']['online'] is False and 'db-search' in e['result']['caveat']" \
+# --- offline bot: live-confirmed 'invalid guid' reply -> db-search is the truth ---
+check "e['ok'] and e['result']['online'] is False and 'invalid guid' in e['result']['caveat'] and 'db-search' in e['result']['caveat']" \
   '{"op":"pinfo","name":"Terra"}'
-# invalid guid (empty reply, connection closed): same offline fallback
+# empty reply (connection closed, dead guid): same offline fallback
 check "e['ok'] and e['result']['online'] is False and 'db-search' in e['result']['caveat']" \
   '{"op":"pinfo","name":"Cecil"}'
-# name with no GUID at all: offline fallback, never an error
-check "e['ok'] and e['result']['online'] is False and 'db-search' in e['result']['caveat']" \
+# name not on the watch list: refused by the GUID gate, never probed
+check "e['ok'] and e['result']['online'] is False and 'watch list' in e['result']['caveat']" \
   '{"op":"pinfo","name":"Nobody"}'
 
 # --- alias: get_current_position == pinfo (the name db-search redirects here) ---
 check "e['ok'] and e['result']['online'] is True and e['result']['guid']==9 and e['result']['position']==[-8925.06,133.77,83.33] and e['result']['zone']=='Dun Morogh'" \
   '{"op":"get_current_position","name":"Vivi"}'
 
-# --- live status: state + position + HP% via the 'status' verb ---
-check "e['ok'] and e['result']['online'] is True and e['result']['state']=='non-combat' and e['result']['hp_pct']==100 and e['result']['position']==[-8925.06,133.77,83.33]" \
+# --- live status: position + HP% via the 'status' verb (shape unconfirmed
+# until a live sample lands - A19; parsing is tolerant) ---
+check "e['ok'] and e['result']['online'] is True and e['result']['hp_pct']==100 and e['result']['position']==[-8925.06,133.77,83.33] and e['result']['map']==1" \
   '{"op":"get_live_status","name":"Vivi"}'
-check "e['ok'] and e['result']['online'] is True and e['result']['state']=='combat' and e['result']['hp_pct']==63" \
+check "e['ok'] and e['result']['online'] is True and e['result']['hp_pct']==63" \
   '{"op":"get_live_status","name":"Locke"}'
 
 # --- routing rule: kick -> chat-tunnel (accepted gap), DB-answerable -> db-search ---

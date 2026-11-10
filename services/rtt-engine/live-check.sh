@@ -35,24 +35,28 @@ if ! [ -S "$SOCK" ]; then
   [ -S "$SOCK" ] || { fail "service did not come up (see live-check.log)"; exit 1; }
 fi
 
-# pick bots: args, else up to 3 online watched toons from the RO census
-# (same watch list as director.py census: bot accounts by username LIKE, plus
-# the watched guild - characters.account is a numeric ID, the name lives in
-# acore_auth.account)
+# pick bots: args (capped at 5 - this is a spot check, not a fleet sweep),
+# else up to 3 online GUILD members. The guild ('Special FXc') is the main
+# filter - the roster IS the guild; never sweep every toon on the server
+# (live finding 2026-11-10).
+if [ $# -gt 5 ]; then
+  say "note: more than 5 names given - using the first 5 (spot check, not a sweep)"
+  set -- $(printf '%s\n' "$@" | head -5)
+fi
 if [ $# -gt 0 ]; then
   BOTS="$*"
 else
   BOTS=$(mysql --defaults-file="$MYCNF" -N -B -e \
     "SELECT c.name FROM acore_characters.characters c "
-    "JOIN acore_auth.account a ON a.id=c.account "
-    "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
-    "WHERE c.online=1 AND (a.username LIKE 'i_was_here%' "
-    "OR gm.guildid IN (SELECT guildid FROM acore_characters.guild "
-    "WHERE name='Special FXc')) LIMIT 3" \
+    "JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
+    "WHERE c.online=1 AND gm.guildid IN "
+    "(SELECT guildid FROM acore_characters.guild WHERE name='Special FXc') "
+    "ORDER BY c.name LIMIT 3" \
     2>/dev/null | tr '\n' ' ')
-  [ -n "$BOTS" ] || { fail "no online watched toons found (census empty "
-    "- is the DB reachable via $MYCNF? or pass bot names as args)"; exit 1; }
-  say "auto-picked online bots: $BOTS"
+  [ -n "$BOTS" ] || { fail "no online guild bots found (census empty "
+    "- is the DB reachable via $MYCNF, and are guild bots online? "
+    "or pass bot names as args)"; exit 1; }
+  say "auto-picked online guild bots: $BOTS"
 fi
 
 q() {  # $1 = request JSON; prints the raw envelope JSON
@@ -71,6 +75,13 @@ sys.exit(0 if ($expr) else 1)
 }
 
 say "== rtt-engine LIVE function check (command server 127.0.0.1:8888) =="
+
+# stale-daemon detection: the running service must know the current op set
+if ! q '{"op":"catalog"}' | grep -q get_live_status; then
+  fail "running daemon is STALE CODE (catalog lacks get_live_status) -"
+  say "  systemctl --user restart rtt-engine   (started before the last git pull)"
+  exit 1
+fi
 
 say "-- function: ping (live path up) --"
 check "e['ok'] and e['result']['alive'] is True" '{"op":"ping"}'
