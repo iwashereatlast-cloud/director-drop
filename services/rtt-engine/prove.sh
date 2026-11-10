@@ -87,7 +87,7 @@ check "set(e.keys()) == {'interface','ok','op','backend','queried_at','latency_m
   '{"op":"ping"}'
 
 # --- op catalog: what routes here; kick -> chat-tunnel, DB-answerable -> db-search ---
-check "set(o['op'] for o in e['result']['ops']) == {'catalog','ping','pinfo'} and e['result']['refused']['route_hints']['kick']=='chat-tunnel' and e['result']['refused']['route_hints']['raid']=='db-search'" \
+check "set(o['op'] for o in e['result']['ops']) == {'catalog','ping','pinfo','get_current_position','get_live_status'} and e['result']['refused']['route_hints']['kick']=='chat-tunnel' and e['result']['refused']['route_hints']['raid']=='db-search' and e['result']['refused']['route_hints']['get_bot_master']=='chat-tunnel'" \
   '{"op":"catalog"}'
 
 # --- live position of an ONLINE bot via the 8888 line protocol ---
@@ -106,9 +106,24 @@ check "e['ok'] and e['result']['online'] is False and 'db-search' in e['result']
 check "e['ok'] and e['result']['online'] is False and 'db-search' in e['result']['caveat']" \
   '{"op":"pinfo","name":"Nobody"}'
 
+# --- alias: get_current_position == pinfo (the name db-search redirects here) ---
+check "e['ok'] and e['result']['online'] is True and e['result']['guid']==9 and e['result']['position']==[-8925.06,133.77,83.33] and e['result']['zone']=='Dun Morogh'" \
+  '{"op":"get_current_position","name":"Vivi"}'
+
+# --- live status: state + position + HP% via the 'status' verb ---
+check "e['ok'] and e['result']['online'] is True and e['result']['state']=='non-combat' and e['result']['hp_pct']==100 and e['result']['position']==[-8925.06,133.77,83.33]" \
+  '{"op":"get_live_status","name":"Vivi"}'
+check "e['ok'] and e['result']['online'] is True and e['result']['state']=='combat' and e['result']['hp_pct']==63" \
+  '{"op":"get_live_status","name":"Locke"}'
+
 # --- routing rule: kick -> chat-tunnel (accepted gap), DB-answerable -> db-search ---
 check "e['ok'] is False and e['error']['code']=='wrong_service' and e['error']['route_hint']=='chat-tunnel' and 'accepted gap' in e['error']['message']" \
   '{"op":"kick"}'
+# live-session facts the command server has no verb for -> chat-tunnel
+check "e['ok'] is False and e['error']['code']=='wrong_service' and e['error']['route_hint']=='chat-tunnel' and 'mastership' in e['error']['message']" \
+  '{"op":"get_bot_master"}'
+check "e['ok'] is False and e['error']['code']=='wrong_service' and e['error']['route_hint']=='chat-tunnel' and 'correlated' in e['error']['message']" \
+  '{"op":"is_bot_responding"}'
 check "e['ok'] is False and e['error']['code']=='wrong_service' and e['error']['route_hint']=='db-search'" \
   '{"op":"raid"}'
 check "e['ok'] is False and e['error']['code']=='unknown_op' and e['error']['route_hint'].startswith('db-search')" \

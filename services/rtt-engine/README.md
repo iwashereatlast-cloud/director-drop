@@ -2,7 +2,9 @@
 
 Real-time / **non-polled** query service. Owns the tick-time-sensitive
 surface: LIVE reads of ONLINE bots through the **stock mod-playerbots
-command server** (`Playerbots.CommandServerPort`, default 8888, read-only
+command server**. The director brain's function outline lives in
+[TOOLS.md](TOOLS.md) (prompt-ready); `live-check.sh` verifies every
+function against the real server on serverpc. (`Playerbots.CommandServerPort`, default 8888, read-only
 line protocol `<verb>,<guid>\n` per `PlayerbotCommandServer.cpp` — zero
 module changes). Everything the DB can answer belongs to
 `services/db-search/` (service 2) and is **refused here** with a
@@ -49,6 +51,8 @@ Codes: `unknown_op`, `wrong_service`, `bad_params`, `backend_unavailable`,
 | `catalog` | — | this list + the refused set | — |
 | `ping` | — | command-server liveness + latency | health of the live path |
 | `pinfo` | `name` | LIVE position of an ONLINE bot (map/zone/xyz) | the DB only has the LAST LOGOUT position; `online` resets at worldserver boot (assumption A5) |
+| `get_current_position` | `name` | alias of `pinfo` — the name db-search redirects here | same; `get_character`'s map/zone is the last FLUSHED position |
+| `get_live_status` | `name` | LIVE state (combat/non-combat) + position + HP% | HP/state never lives in the DB |
 
 **Refused:**
 
@@ -58,6 +62,13 @@ Codes: `unknown_op`, `wrong_service`, `bad_params`, `backend_unavailable`,
   registered bots (chat-tunnel owns command sends); force-kicking a non-bot
   plain session is an **accepted gap** (DB logout flush covers offline
   truth).
+- `get_bot_master`, `is_bot_responding` → `route_hint: "chat-tunnel"` —
+  db-search redirects these names here, but mastership and whisper
+  responsiveness are live session state with NO command-server verb; they
+  are proven by a correlated whisper probe (A1/A4: an `strategies query`
+  reply only goes to the bot's master). `pinfo` online is only the
+  server-side pre-flight (chat-tunnel's liveprobe already uses it that
+  way).
 
 Unknown ops get the same `db-search` hint. Never live-probe for something
 the DB already knows.
