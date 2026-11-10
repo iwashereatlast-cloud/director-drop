@@ -7,8 +7,10 @@
 --   Leo (shell account i_was_cmd) leads a raid with bots Ayla, Gau, Locke.
 --   Cecil/Rydia/Shadow/Vivi/Aerith are the hand-play five (G1) on the master
 --   account; Golbez is the extra bot on I_WAS_HERE5TH (live census 2026-11-10).
---   Guild "Special" holds the watched members; account links cover ALL the
---   ritual accounts including I_WAS_HERE5TH (live: 5TH IS linked).
+--   Guild "Special FXc" holds the watched members; account links cover ALL the
+--   ritual accounts including I_WAS_HERE5TH (live: 5TH IS linked). Link table
+--   mirrors the live schema (DESCRIBE 2026-11-10): id, account_id,
+--   linked_account_id, created_at - account IDs, not names.
 
 ATTACH DATABASE 'fixture_acore_characters.db' AS acore_characters;
 ATTACH DATABASE 'fixture_acore_auth.db'       AS acore_auth;
@@ -55,7 +57,7 @@ INSERT INTO acore_characters.group_member VALUES
 
 CREATE TABLE acore_characters.guild (
   guildid INTEGER PRIMARY KEY, name TEXT);
-INSERT INTO acore_characters.guild VALUES (7, 'Special');
+INSERT INTO acore_characters.guild VALUES (7, 'Special FXc');
 
 CREATE TABLE acore_characters.guild_member (
   guildid INTEGER, guid INTEGER, rank INTEGER);
@@ -78,12 +80,13 @@ INSERT INTO acore_characters.character_queststatus VALUES
   (20, 12,  5, 0);   -- Ayla: FAILED
 
 CREATE TABLE acore_playerbots.playerbots_account_links (
-  accountName TEXT, botAccount TEXT, createTime INTEGER);
+  id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER,
+  linked_account_id INTEGER, created_at TEXT);
 INSERT INTO acore_playerbots.playerbots_account_links VALUES
-  ('i_was_cmd', 'i_was_here2nd', 1730000000),
-  ('i_was_cmd', 'i_was_here3rd', 1730000001),
-  ('i_was_cmd', 'i_was_here4th', 1730000002),
-  ('i_was_cmd', 'i_was_here5th', 1730000003);  -- live 2026-11-10: 5TH IS linked
+  (1, 1, 3, '2024-10-27 04:26:40'),
+  (2, 1, 4, '2024-10-27 04:26:41'),
+  (3, 1, 5, '2024-10-27 04:26:42'),
+  (4, 1, 6, '2024-10-27 04:26:43');  -- live 2026-11-10: 5TH IS linked
 
 CREATE TABLE acore_world.quest_template (
   ID INTEGER PRIMARY KEY, LogTitle TEXT);
