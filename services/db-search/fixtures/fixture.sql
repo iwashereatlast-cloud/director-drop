@@ -82,11 +82,15 @@ INSERT INTO acore_characters.character_queststatus VALUES
 CREATE TABLE acore_playerbots.playerbots_account_links (
   id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER,
   linked_account_id INTEGER, created_at TEXT);
+-- the mod writes every link in BOTH directions (live 2026-11-10: 10 rows for
+-- 5 links); the tool dedupes. ALL five accounts incl. the master are linked
+-- live, so the fixture models the same five mutual pairs.
 INSERT INTO acore_playerbots.playerbots_account_links VALUES
-  (1, 1, 3, '2024-10-27 04:26:40'),
-  (2, 1, 4, '2024-10-27 04:26:41'),
-  (3, 1, 5, '2024-10-27 04:26:42'),
-  (4, 1, 6, '2024-10-27 04:26:43');  -- live 2026-11-10: 5TH IS linked
+  (1,  1, 2, '2026-11-02 16:31:36'), (2,  2, 1, '2026-11-02 16:31:36'),
+  (3,  1, 3, '2026-11-02 16:22:40'), (4,  3, 1, '2026-11-02 16:22:40'),
+  (5,  1, 4, '2026-11-02 16:22:40'), (6,  4, 1, '2026-11-02 16:22:40'),
+  (7,  1, 5, '2026-11-02 16:22:40'), (8,  5, 1, '2026-11-02 16:22:40'),
+  (9,  1, 6, '2026-11-05 22:12:47'), (10, 6, 1, '2026-11-05 22:12:47');
 
 CREATE TABLE acore_world.quest_template (
   ID INTEGER PRIMARY KEY, LogTitle TEXT);

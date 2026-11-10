@@ -116,18 +116,21 @@ CATALOG = {
 
   "get_account_links": {
     # live schema (DESCRIBE 2026-11-10): id, account_id, linked_account_id,
-    # created_at - the mod stores account IDs, not names, so join acore_auth.
+    # created_at - the mod stores every link in BOTH directions (live 2026-11-10:
+    # 10 rows for 5 links), so dedupe to one row per pair via account_id <
+    # linked_account_id; the pair is mutual, column order is by account id.
     "sql": ("SELECT a1.username AS account, a2.username AS linked_account, "
             "l.created_at "
             "FROM acore_playerbots.playerbots_account_links l "
             "JOIN acore_auth.account a1 ON a1.id = l.account_id "
             "JOIN acore_auth.account a2 ON a2.id = l.linked_account_id "
-            "WHERE a1.username LIKE '{account}%' OR a2.username LIKE '{account}%' "
+            "WHERE l.account_id < l.linked_account_id "
+            "AND (a1.username LIKE '{account}%' OR a2.username LIKE '{account}%') "
             "ORDER BY a1.username, a2.username"),
     "params": {"account": "required - account name prefix to filter by (pass the bare prefix)"},
     "timeout": 10,
-    "can": "which accounts are linked to which (cross-account addaccount is refused unless linked, A12) + link creation times; the ID columns are resolved to account names via acore_auth",
-    "cannot": "whether any given toon of a linked account is online or has AI (that is census + live probe); which side ran the link command (direction semantics of account_id vs linked_account_id not live-verified)",
+    "can": "which accounts are linked to which, one row per pair (cross-account addaccount is refused unless linked, A12) + link creation times; the mod writes both directions into the table, this tool dedupes to the mutual pair",
+    "cannot": "whether any given toon of a linked account is online or has AI (that is census + live probe)",
     "caveat": "the link table only changes via .playerbots account link/unlink commands, so it is near-real-time stable; but a link existing says nothing about current sessions (A3/A5 staleness applies to the toons, not the rows).",
     "fill": lambda p: {"account": _p("get_account_links", p, "account")},
   },
