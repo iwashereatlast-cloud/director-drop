@@ -26,6 +26,8 @@ Env:  CHAT_TUNNEL_LOG /tmp/leo.log     log to tail
       CHAT_TUNNEL_WINDOW 30           reply window, seconds
       CHAT_TUNNEL_RETENTION 86400     events older than this are purged
       CHAT_TUNNEL_PURGE_EVERY 60      purge/timing sweep cadence, seconds
+      CHAT_TUNNEL_PACE 1.0           min seconds between FIFO writes (whisper
+                                     throttle: bursts get dropped in-game)
       CHAT_TUNNEL_MAX_ROWS 100000     hard row cap (oldest purged first)
       CHAT_TUNNEL_DB <repo>/services/chat-tunnel/tunnel.db
 """
@@ -50,6 +52,11 @@ PORT = int(os.environ.get("CHAT_TUNNEL_PORT", "8765"))
 WINDOW = float(os.environ.get("CHAT_TUNNEL_WINDOW", "30"))
 RETENTION = float(os.environ.get("CHAT_TUNNEL_RETENTION", str(24 * 3600)))
 PURGE_EVERY = float(os.environ.get("CHAT_TUNNEL_PURGE_EVERY", "60"))
+# minimum seconds between FIFO writes: the client/server throttle whispers,
+# so bursts get dropped - sends are serialized and spaced by this
+PACE = float(os.environ.get("CHAT_TUNNEL_PACE", "1.0"))
+_send_lock = threading.Lock()
+_last_send = [0.0]
 MAX_ROWS = int(os.environ.get("CHAT_TUNNEL_MAX_ROWS", "100000"))
 MASTER = os.environ.get("CHAT_TUNNEL_MASTER", "Leo")
 
@@ -138,15 +145,21 @@ def send_command(bot, cmd):
     # nonblocking FIFO write: ENXIO when no reader (leo shell down) instead
     # of blocking an HTTP worker forever on a hung shell; lines < PIPE_BUF
     # are atomic on a FIFO, so a concurrent writer cannot interleave.
-    try:
-        fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+    # Serialized + spaced by PACE: the client/server drops whisper bursts.
+    with _send_lock:
+        delay = _last_send[0] + PACE - now()
+        if delay > 0:
+            time.sleep(delay)
         try:
-            os.write(fd, (line + "\n").encode())
-        finally:
-            os.close(fd)
-    except OSError as e:
-        STATS["sends_failed"] += 1
-        return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
+            fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(fd, (line + "\n").encode())
+            finally:
+                os.close(fd)
+        except OSError as e:
+            STATS["sends_failed"] += 1
+            return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
+        _last_send[0] = now()
     with db() as conn:
         conn.execute(
             "INSERT INTO events (ts, direction, sender, target, command,"

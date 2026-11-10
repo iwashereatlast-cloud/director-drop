@@ -42,6 +42,16 @@ Contracts live here so a change is visible to every conversation:
 - **Routing rule (all):** DB-answerable → db-search; tick-sensitive or
   non-polled → rtt-engine; never whisper-probe to learn something the DB
   already knows.
+- **Send-liveness cross-check (chat-tunnel → rtt-engine, PROPOSED
+  2026-11-10):** chat-tunnel's `liveprobe.py --rtt-sock` consumes the
+  existing `rtt-engine/1` `pinfo` op as a per-bot pre-flight: a server-side
+  online check on a path that bypasses the FIFO whisper transport. This
+  separates "reachable but not answering" from "offline" without a new
+  op. OPEN for rtt-engine's owner: a read-only chat verb on the command
+  server (see recent incoming whispers per GUID) would give chat-tunnel a
+  true delivery receipt — but it needs a mod-playerbots change (new verb
+  in `PlayerbotCommandServer.cpp`), so it needs an assumptions-row +
+  evidence before anyone builds it. Not agreed yet; nothing depends on it.
 - **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,

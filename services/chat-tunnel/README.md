@@ -72,7 +72,9 @@ anything starting with `.` goes out verbatim, everything else as `/w <bot> <cmd>
 `CHAT_TUNNEL_LOG` (/tmp/leo.log), `CHAT_TUNNEL_FIFO` (/tmp/leo.in),
 `CHAT_TUNNEL_PORT` (8765), `CHAT_TUNNEL_WINDOW` (30 s),
 `CHAT_TUNNEL_RETENTION` (24 h), `CHAT_TUNNEL_PURGE_EVERY` (60 s),
-`CHAT_TUNNEL_MAX_ROWS` (100000 hard cap), `CHAT_TUNNEL_DB`
+`CHAT_TUNNEL_PACE` (1.0 s min between FIFO writes — the client/server
+throttles whispers, so bursts get dropped in-game; sends are serialized
+and spaced), `CHAT_TUNNEL_MAX_ROWS` (100000 hard cap), `CHAT_TUNNEL_DB`
 (`<repo>/services/chat-tunnel/tunnel.db`).
 
 Single-owner: a `flock` on `<db>.lock` refuses a second instance (two tailers
@@ -111,6 +113,19 @@ the bot never answered, not that the tunnel lost it. `nc ?` needs mastership
 (A1); to separate a mastership problem from a transport problem, cross-check
 with an unsecured command (A10) that every online bot answers regardless of
 master: `liveprobe.py --cmd "who"`.
+
+### Delivery receipts (the known blind spot)
+
+The headless client does not log outgoing whispers, so a successful FIFO
+write proves a reader existed — not that the whisper was spoken in-game.
+To narrow that gap, `liveprobe.py --rtt-sock /tmp/rtt-engine.sock` runs a
+pre-flight `pinfo` per bot through rtt-engine (service 3): a server-side
+online check on a path that bypasses the FIFO entirely. A SILENT verdict
+then reads either `server: online - not answering` (reachable, silent —
+bot-side question) or `server: offline` (silence explained). Full send
+confirmation (seeing the whisper arrive server-side) would need a chat
+verb on the mod-playerbots command server — proposed in the roadmap's
+cross-service contracts, rtt-engine's call to make.
 
 ### When we call it stable
 

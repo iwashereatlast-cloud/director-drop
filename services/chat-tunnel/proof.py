@@ -49,7 +49,7 @@ def free_port():
 
 
 class Tunnel:
-    def __init__(self, tmp, retention=RETENTION):
+    def __init__(self, tmp, retention=RETENTION, pace=0.05):
         self.log = os.path.join(tmp, "leo.log")
         self.fifo = os.path.join(tmp, "leo.in")
         self.db = os.path.join(tmp, "tunnel.db")
@@ -63,7 +63,8 @@ class Tunnel:
                    CHAT_TUNNEL_PORT=str(self.port),
                    CHAT_TUNNEL_WINDOW=str(WINDOW),
                    CHAT_TUNNEL_RETENTION=str(retention),
-                   CHAT_TUNNEL_PURGE_EVERY=str(PURGE_EVERY))
+                   CHAT_TUNNEL_PURGE_EVERY=str(PURGE_EVERY),
+                   CHAT_TUNNEL_PACE=str(pace))
         self.proc = subprocess.Popen([sys.executable, SERVICE], env=env,
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
