@@ -53,6 +53,8 @@ class Tunnel:
         self.log = os.path.join(tmp, "leo.log")
         self.fifo = os.path.join(tmp, "leo.in")
         self.db = os.path.join(tmp, "tunnel.db")
+        self.logdb = os.path.join(tmp, "logdb.json")
+        open(self.logdb, "w").write("[]")
         os.mkfifo(self.fifo)
         open(self.log, "w").close()
         self.port = free_port()
@@ -64,7 +66,8 @@ class Tunnel:
                    CHAT_TUNNEL_WINDOW=str(WINDOW),
                    CHAT_TUNNEL_RETENTION=str(retention),
                    CHAT_TUNNEL_PURGE_EVERY=str(PURGE_EVERY),
-                   CHAT_TUNNEL_PACE=str(pace))
+                   CHAT_TUNNEL_PACE=str(pace),
+                   CHAT_TUNNEL_LOGDB_FIXTURE=self.logdb)
         self.proc = subprocess.Popen([sys.executable, SERVICE], env=env,
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
@@ -96,6 +99,10 @@ class Tunnel:
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=5) as r:
             return json.loads(r.read().decode())
+
+    def set_logdb(self, rows):
+        with open(self.logdb, "w") as f:
+            json.dump(rows, f)
 
     def send(self, bot, cmd):
         r = self.call("send_command", {"bot": bot, "cmd": cmd})
@@ -240,7 +247,9 @@ def s_ordered(t):
 
 
 def s_retention(t):
-    # a dedicated short-retention instance: old events must vanish on sweep
+    # a dedicated short-retention instance: the purge is folded into the
+    # write path (no timer thread), so WRITES trigger it - old events must
+    # vanish once they age out and the next insert lands
     import tempfile
     tmp = tempfile.mkdtemp(prefix="chat-tunnel-proof-ret-")
     r = Tunnel(tmp, retention=2.0)
@@ -248,11 +257,13 @@ def s_retention(t):
         cid = r.send("Ayla", "nc ?")
         r.reply("Ayla", "to be purged")
         r.wait_for(lambda: r.get_reply(cid)["reply"], 5, "reply stored")
-        r.wait_for(lambda: r.call("get_recent_events", {"limit": 1})
-                   ["result"]["events"] == [], 2.0 + PURGE_EVERY + 3,
-                   "retention purge")
-        ev = r.call("get_recent_events", {"limit": 100})
-        check(ev["result"]["events"] == [], "events survived the retention purge")
+        time.sleep(2.0 + 0.5)          # the events age past retention
+        filler = r.send("Ayla", "who")  # a write triggers the inline purge
+        ev = r.call("get_recent_events", {"limit": 100})["result"]["events"]
+        olds = [e for e in ev if e["command"] in ("nc ?", "to be purged")]
+        check(olds == [], "aged events survived the inline retention purge")
+        news = [e for e in ev if e["command"] == "who"]
+        check(news != [], "the triggering write was itself purged")
     finally:
         r.stop()
 
@@ -298,6 +309,46 @@ def s_longpoll(t):
     check(0.8 <= took <= 3.0, "idle long-poll returned in %.1fs, want ~1s" % took)
 
 
+def s_describe(t):
+    g = t.call("describe", {})["result"]
+    check(g["send"]["whisper"]["line"] == "/w <bot> <command>",
+          "grammar: whisper line shape")
+    check(".playerbots bot add Gau" in g["send"]["master_command"]["example"],
+          "grammar: master command example")
+    check("verify" in g["tools"] and "describe" in g["tools"],
+          "grammar: tool list includes the new tools")
+    check(g["listen_channels"] == ["whisper", "guild"],
+          "grammar: listen channels")
+
+
+def s_verify(t):
+    # delivered: the server logged exactly what we sent and what we parsed
+    cid = t.send("Ayla", "nc ?")
+    t.reply("Ayla", "Strategies: -new rpg")
+    ev = t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "reply stored")
+    t.set_logdb([[int(ev["ts"]), "Player Ayla whisper Leo: Strategies: -new rpg"]])
+    sent_ev = t.get_reply(cid)["sent"]
+    t.set_logdb([[int(sent_ev["ts"]), "Player Leo whisper Ayla: nc ?"],
+                 [int(ev["ts"]), "Player Ayla whisper Leo: Strategies: -new rpg"]])
+    v = t.call("verify", {"correlation_id": cid})["result"]
+    check(v["sent"]["verdict"] == "delivered", "verify: sent delivered")
+    check(v["reply"]["verdict"] == "delivered", "verify: reply delivered")
+    # garbled: the server saw DIFFERENT text from the same speakers
+    t.set_logdb([[int(sent_ev["ts"]), "Player Leo whisper Ayla: nc ?? GARBLED"],
+                 [int(ev["ts"]), "Player Ayla whisper Leo: Strategies: -new rpg"]])
+    v = t.call("verify", {"correlation_id": cid})["result"]
+    check(v["sent"]["verdict"] == "garbled",
+          "verify: garbled send is CAUGHT, not assumed fine")
+    check(v["sent"].get("expected") == "Player Leo whisper Ayla: nc ?",
+          "verify: garble report carries the expected line")
+    # not_found: nothing logged in the window
+    t.set_logdb([])
+    v = t.call("verify", {"correlation_id": cid})["result"]
+    check(v["sent"]["verdict"] == "not_found", "verify: silent log = not_found")
+    check(v["reply"]["verdict"] == "no_event" or v["reply"]["verdict"] == "not_found",
+          "verify: reply verdict on empty log")
+
+
 SCENARIOS = [
     ("basic - reply binds to its own correlation_id", s_basic),
     ("interleaved - per-bot binding, out-of-order replies", s_interleaved),
@@ -307,6 +358,8 @@ SCENARIOS = [
     ("retention - purge keeps the DB bounded", s_retention),
     ("cursor - get_events_since reads ascending from a cursor", s_cursor),
     ("longpoll - wait_for_events returns new lines promptly", s_longpoll),
+    ("describe - the grammar exposes send shapes and tools", s_describe),
+    ("verify - delivery + garble check against the chat log", s_verify),
 ]
 
 
