@@ -44,16 +44,20 @@ DEFAULT_TIMEOUT = float(os.environ.get("DBSEARCH_TIMEOUT", "10"))
 # there is no code path that puts client text into SQL unvalidated.
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
 
-def _p(tool, params, key, required=True):
+def _p(tool, params, key, required=True, pattern=None):
     v = (params or {}).get(key)
     if v is None or v == "":
         if required:
             raise ToolError("missing param '%s'" % key, "bad_param")
         return None
     v = str(v)
-    if not NAME_RE.fullmatch(v):
-        raise ToolError("param '%s' must match %s (got %r)" % (key, NAME_RE.pattern, v[:40]), "bad_param")
+    if not (pattern or NAME_RE).fullmatch(v):
+        raise ToolError("param '%s' must match %s (got %r)" % (key, (pattern or NAME_RE).pattern, v[:40]), "bad_param")
     return v
+
+# guild names can contain spaces (the watched guild does); still no quotes or
+# SQL metacharacters - leading/trailing space refused too.
+GUILD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_ ]{0,30}[A-Za-z0-9]$")
 
 # --------------------------------------------------------------- catalog ----
 # sql: ONE static SELECT. Placeholders {x} are filled only from _p()-validated
@@ -111,16 +115,21 @@ CATALOG = {
   },
 
   "get_account_links": {
-    "sql": ("SELECT accountName, botAccount, createTime "
-            "FROM acore_playerbots.playerbots_account_links "
-            "WHERE accountName LIKE '{account_like}' OR botAccount LIKE '{account_like}' "
-            "ORDER BY accountName, botAccount"),
+    # live schema (DESCRIBE 2026-11-10): id, account_id, linked_account_id,
+    # created_at - the mod stores account IDs, not names, so join acore_auth.
+    "sql": ("SELECT a1.username AS account, a2.username AS linked_account, "
+            "l.created_at "
+            "FROM acore_playerbots.playerbots_account_links l "
+            "JOIN acore_auth.account a1 ON a1.id = l.account_id "
+            "JOIN acore_auth.account a2 ON a2.id = l.linked_account_id "
+            "WHERE a1.username LIKE '{account}%' OR a2.username LIKE '{account}%' "
+            "ORDER BY a1.username, a2.username"),
     "params": {"account": "required - account name prefix to filter by (pass the bare prefix)"},
     "timeout": 10,
-    "can": "which bot accounts are linked (cross-account addaccount is refused unless linked, A12); link creation times",
-    "cannot": "whether any given toon of a linked account is online or has AI (that is census + live probe)",
+    "can": "which accounts are linked to which (cross-account addaccount is refused unless linked, A12) + link creation times; the ID columns are resolved to account names via acore_auth",
+    "cannot": "whether any given toon of a linked account is online or has AI (that is census + live probe); which side ran the link command (direction semantics of account_id vs linked_account_id not live-verified)",
     "caveat": "the link table only changes via .playerbots account link/unlink commands, so it is near-real-time stable; but a link existing says nothing about current sessions (A3/A5 staleness applies to the toons, not the rows).",
-    "fill": lambda p: {"account_like": _p("get_account_links", p, "account") + "%"},
+    "fill": lambda p: {"account": _p("get_account_links", p, "account")},
   },
 
   "get_quest_log": {
@@ -131,7 +140,7 @@ CATALOG = {
             "ORDER BY cqs.status, cqs.quest"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
-    "can": "the toon's quest log rows with status codes (1=COMPLETE, 3=INCOMPLETE, 5=FAILED, 6=REWARDED) and titles when acore_world is granted",
+    "can": "the toon's quest log rows with status codes (1=COMPLETE, 3=INCOMPLETE, 5=FAILED, 6=REWARDED per the repo audit; 0 = in the log with no recorded terminal state, seen live) and titles when acore_world is granted",
     "cannot": "live progress within an incomplete quest (mob kill counts live in memory until save); whether the bot's rpg engine will accept it (needs a POI - A8)",
     "caveat": "quest status rows flush with the character save - an in-flight quest can be further along than this shows. REWARDED/FAILED rows are stable; INCOMPLETE progress can lag by minutes.",
     "fill": lambda p: {"toon": _p("get_quest_log", p, "toon")},
@@ -144,12 +153,12 @@ CATALOG = {
             "JOIN acore_characters.characters c ON c.guid = gm.guid "
             "JOIN acore_characters.`guild_rank` g_r ON g_r.guildid = g.guildid AND g_r.rid = gm.rank "
             "WHERE g.name = '{guild}' ORDER BY c.name"),
-    "params": {"guild": "required - exact guild name (single word; quote-free by repo rule)"},
+    "params": {"guild": "required - exact guild name; spaces allowed (e.g. 'Special FXc'), no quotes"},
     "timeout": 10,
     "can": "every member of one guild with rank, level, class, DB online flag",
     "cannot": "guilds other than the one named; guild bank contents; online-truth (A5)",
     "caveat": "guild membership/rank rows persist on change and are stable, but the online column is the boot-reset/async flag (A5) - a member shown online may have crashed without a logout write.",
-    "fill": lambda p: {"guild": _p("get_guild_members", p, "guild")},
+    "fill": lambda p: {"guild": _p("get_guild_members", p, "guild", pattern=GUILD_RE)},
   },
 }
 

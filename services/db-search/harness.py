@@ -90,6 +90,11 @@ def main():
         linked = {row[1] for row in r["rows"]}
         check("links: all four ritual accounts linked (5th included, live 2026-11-10)",
               linked == {"i_was_here2nd", "i_was_here3rd", "i_was_here4th", "i_was_here5th"}, linked)
+        check("links: account names resolved from IDs (no raw account_id in rows)",
+              all(not row[0].isdigit() for row in r["rows"]), r["rows"])
+        r = handle(adapter, {"tool": "get_account_links", "params": {"account": "i_was_here4th"}})
+        check("links: filter matches either side of the link",
+              r.get("ok") and r["row_count"] == 1 and r["rows"][0][0] == "i_was_cmd", r)
 
         r = handle(adapter, {"tool": "get_quest_log", "params": {"toon": "Locke"}})
         check("quest envelope", envelope_ok(r, "get_quest_log"))
@@ -99,8 +104,8 @@ def main():
         check("quest: status codes 1/3/6 present",
               {q[k][2] for k in q} == {"1", "3", "6"}, q)
 
-        r = handle(adapter, {"tool": "get_guild_members", "params": {"guild": "Special"}})
-        check("guild envelope", envelope_ok(r, "get_guild_members"))
+        r = handle(adapter, {"tool": "get_guild_members", "params": {"guild": "Special FXc"}})
+        check("guild envelope (name with a space accepted)", envelope_ok(r, "get_guild_members"))
         g = rows_by_key(r)
         check("guild: Cecil is Guild Master", g["Cecil"][1] == "Guild Master", g.get("Cecil"))
 
@@ -111,6 +116,9 @@ def main():
               "redirects" in str(r.get("error", "")), r)
         r = handle(adapter, {"tool": "get_character", "params": {"toon": "Leo' OR 1=1--"}})
         check("SQL-injection-shaped param refused", r.get("ok") is False and r.get("code") == "bad_param", r)
+        r = handle(adapter, {"tool": "get_guild_members", "params": {"guild": "Special'; DROP TABLE guild;--"}})
+        check("guild param: spaces ok but quotes still refused",
+              r.get("ok") is False and r.get("code") == "bad_param", r)
         r = handle(adapter, {"tool": "get_character"})
         check("missing required param refused", r.get("ok") is False and r.get("code") == "bad_param", r)
         r = handle(adapter, {"tool": "catalog"})
