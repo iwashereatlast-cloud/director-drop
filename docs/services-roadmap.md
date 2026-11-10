@@ -32,6 +32,20 @@ Shared rules for all four conversations:
 
 Contracts live here so a change is visible to every conversation:
 
+- **Single-brain rule (all, PROPOSED 2026-11-10, operator's take):** the LLM
+  (director daemon) is the ONLY decision-maker about game state — which bots
+  exist, who is in what group, what gets whispered and when. Everything else
+  is hands: services may execute, report, and restart broken things
+  (reflexes: presence policy, zombie-kill, watchdog restarts, purge sweeps)
+  but must never issue game-state commands on their own initiative. Named
+  offender: the leo watchdog's auto-ritual + post-ritual group clear — it
+  re-adds bots the LLM may have deliberately removed (#38/#39 remaster
+  ping-pong) and dissolves groups the LLM may have assembled. Target state:
+  watchdog keeps reflexes only; ritual + clear become LLM-invocable tools the
+  daemon runs at Leo-login (and can choose not to). First catch: the
+  acore_auth.logs transcript showed a 10-bot `leave` batch (watchdog clear)
+  — the chat-log audit trail is the instrument that detects brain-fights.
+  Not yet implemented; nothing depends on it until blessed.
 - **Event schema (chat-tunnel owns):** a tunnel event is
   `{id, ts, direction (sent|reply), sender, target, command, correlation_id, raw_line}`.
   `correlation_id` is unique per sent command; a reply is matched only within
