@@ -135,9 +135,15 @@ def send_command(bot, cmd):
         return False, "bad command %r" % cmd[:40]
     line = order_line(bot, cmd)
     cid = new_cid()
+    # nonblocking FIFO write: ENXIO when no reader (leo shell down) instead
+    # of blocking an HTTP worker forever on a hung shell; lines < PIPE_BUF
+    # are atomic on a FIFO, so a concurrent writer cannot interleave.
     try:
-        with open(FIFO, "w") as f:
-            f.write(line + "\n")
+        fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(fd, (line + "\n").encode())
+        finally:
+            os.close(fd)
     except OSError as e:
         STATS["sends_failed"] += 1
         return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
