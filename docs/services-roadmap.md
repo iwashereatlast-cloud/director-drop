@@ -25,7 +25,7 @@ Shared rules for all four conversations:
 |---|---|---|---|---|---|
 | 1. chat-tunnel | `services/chat-tunnel/` | single owner of `/tmp/leo.log`: tailer → SQLite (WAL) with retention purge; sends commands with correlation IDs; matches replies to the command that triggered them (sender + window) — kills the stale-line false positive | SHIPPED (PR) | `services/chat-tunnel/proof.py`: 8/8 replay scenarios green without a live worldserver (basic bind, interleaved out-of-order replies, garbled-line corpus `fixtures/replay-corrupt.log.txt`, late past-window reply, ordered same-bot replies, retention purge, cursor read, long-poll); live gate = `liveprobe.py` (self-contained JSON battery) + `wait_for_events` long-poll seam for the web-gui feed | build FIRST: ground-truth layer everything else verifies against |
 | 2. db-search | `services/db-search/` | premade read-only query catalog (typed tools with "what it can/can't answer" contracts); every result carries `queried_at` + staleness caveat; hard allowlist, read-only DB user, per-query timeout | SHIPPED + LIVE-VERIFIED 2026-11-10 (PRs #45/#70/#71/#73/#74/#76/#77) | `services/db-search/harness.py`: 62/62 offline; 15 tools + `catalog` meta + 4 redirects; live-verified: census, group, character, quest log w/ titles, links (deduped), guild w/ space, skills, redirects, socket e2e; leveling catalog (gear/KPIs/XP-penalty/quest-bands/skills/bags/mounts/wallets/talents) offline-proofed, gear+skills live-run pending post-#77; RO grants landed (`acore_playerbots.*`, `acore_world.quest_template`, `acore_world.item_template`); schema drifts fixed from live evidence (`guild_rank.rname`, `account_access.gmlevel`, `playerbots_account_links` id-pair, `character_talent` spell/specMask, no world talent tables) | free from a world-tick perspective; LLM never writes free-form SQL; out-of-scope names answer code=redirect to rtt-engine |
-| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries + commands; stable JSON interface, SOAP backend initially, swap for an in-core command bus later | NOT STARTED | — | only for tick-time-sensitive data; anything the DB answers never routes here |
+| 3. rtt-engine ("8.8.8.8") | `services/rtt-engine/` | real-time / non-polled queries; stable `rtt-engine/1` JSON interface; backend = the stock mod-playerbots command server (8888, read-only `<verb>,<guid>\n` per PlayerbotCommandServer.cpp) — no console credentials anywhere | **SHIPPED pbcmd** (PRs #46/#52 + this pass): ops `catalog`/`ping`/`pinfo`/`get_current_position` (alias)/`get_live_status` (state+HP); brain-facing function outline in `services/rtt-engine/TOOLS.md`; `kick`/`get_bot_master`/`is_bot_responding` refused → chat-tunnel; LIVE run on serverpc pending (`live-check.sh` ready) | `bash services/rtt-engine/prove.sh` — 20 checks offline vs a mock 8888 server (envelope key-for-key stable, live position/status parsing, offline/invalid-guid → db-search fallback, redirects, GUID cache, backend-down); `live-check.sh` = the live protocol | only for tick-time-sensitive ONLINE-bot data; anything the DB answers never routes here — refused with a `route_hint` (db-search / chat-tunnel), structural in the op catalog |
 | 4. web-gui | `services/web-gui/` | read-only dashboard over 1–3: bot status table, live tunnel event feed, query catalog browser | NOT STARTED | — | LAST; trivial once the services expose JSON |
 
 ## Cross-service contracts
@@ -95,11 +95,15 @@ Contracts live here so a change is visible to every conversation:
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
   error:{code, message, route_hint?}}`. Ops: `catalog`, `ping`, `pinfo`
-  (live position of an ONLINE bot via the 8888 command server). Refused:
-  DB-answerable names → `route_hint: "db-search"`; `kick` → `route_hint:
-  "chat-tunnel"` (accepted gap). `backend` is always `pbcmd` — callers must
-  not depend on it beyond display. Offline truth is db-search (logout
-  flushes final position to `characters`).
+  (live position), `get_current_position` (alias — the name db-search
+  redirects here), `get_live_status` (live state+position+HP). Refused:
+  DB-answerable names → `route_hint: "db-search"`; `kick`,
+  `get_bot_master`, `is_bot_responding` → `route_hint: "chat-tunnel"`
+  (accepted gap / live-session facts the command server has no verb for —
+  correlated whisper probes own them). `backend` is always `pbcmd` —
+  callers must not depend on it beyond display. Offline truth is
+  db-search (logout flushes final position to `characters`). Brain-facing
+  outline: `services/rtt-engine/TOOLS.md`.
 
 ## SOAP end-of-life decision (2026-11-09)
 

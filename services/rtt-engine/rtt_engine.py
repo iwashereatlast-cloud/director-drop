@@ -19,9 +19,11 @@ Interface (STABLE - "rtt-engine/1"):
                "error": {"code": str, "message": str,
                          "route_hint": str|omitted}|null}
 
-Ops: catalog, ping, pinfo. Refused: DB-answerable names -> db-search;
-`kick` -> chat-tunnel (`.playerbots bot remove` covers registered bots;
-force-kicking a non-bot plain session is an accepted gap).
+Ops: catalog, ping, pinfo (live position), get_current_position (alias of
+pinfo - the name db-search redirects here), get_live_status (live
+state/position/HP). Refused: DB-answerable names -> db-search; kick,
+get_bot_master, is_bot_responding -> chat-tunnel (live session facts the
+command server has no verb for).
 
 SECURITY: the module's command server has NO auth and binds 0.0.0.0 - this
 service must talk to 127.0.0.1:8888 ONLY (RTT_PBHOST), and the operator
@@ -65,7 +67,28 @@ GUID_TTL = float(os.environ.get("RTT_GUID_TTL", "300"))  # cache seconds
 # is an accepted gap (end-of-life decision, docs/services-roadmap.md).
 DB_ANSWERABLE = ("location-static", "quest", "money", "skills", "bags",
                  "played", "raid", "census")
-CHAT_TUNNEL = ("kick",)
+
+# Live-session facts the command server CANNOT answer (no verb for them in
+# PlayerbotCommandServer.cpp) - refused with a route_hint to the owner:
+# - kick: '.playerbots bot remove' covers registered bots; force-kicking a
+#   non-bot plain session is an accepted gap (end-of-life decision).
+# - get_bot_master / is_bot_responding: db-search redirects these names HERE,
+#   but mastership and whisper-responsiveness are live session state - proven
+#   by a correlated whisper probe (A1/A4: an 'nc ?' reply only goes to the
+#   bot's master). chat-tunnel owns that; 'pinfo' online is only the
+#   server-side pre-flight.
+CHAT_TUNNEL = {
+    "kick": ("'kick' is refused - '.playerbots bot remove' covers registered "
+             "bots (chat-tunnel owns command sends); force-kicking a non-bot "
+             "plain session is an accepted gap"),
+    "get_bot_master": ("AI mastership is live session state (SetMaster at bot "
+                        "login; no command-server verb) - proven by a "
+                        "correlated whisper probe: an 'nc ?' reply only goes "
+                        "to the bot's master (A1/A4)"),
+    "is_bot_responding": ("whisper responsiveness is proven by a correlated "
+                          "probe (chat-tunnel liveprobe); 'pinfo' online is "
+                          "only the server-side pre-flight"),
+}
 
 ERR_UNKNOWN_OP = "unknown_op"
 ERR_WRONG_SERVICE = "wrong_service"
@@ -181,10 +204,16 @@ def op_catalog(backend):
     return {"ok": True, "result": {"ops": [
         {"op": "catalog", "answers": "this list (what routes here and why)"},
         {"op": "ping", "answers": "command-server liveness + latency"},
-        {"op": "pinfo", "answers": "LIVE position of an ONLINE bot via the "
-         "mod's command server (8888). Offline truth is db-search: logout "
-         "flushes the final position to characters (A5: online resets at "
-         "worldserver boot)"},
+        {"op": "pinfo", "params": "name",
+         "answers": "LIVE position of an ONLINE bot via the command server "
+         "(verb 'position'). Offline truth is db-search: logout flushes the "
+         "final position to characters (A5: online resets at boot)"},
+        {"op": "get_current_position", "params": "name",
+         "answers": "alias of pinfo - the name db-search redirects here "
+         "(get_character's map/zone is the last FLUSHED position)"},
+        {"op": "get_live_status", "params": "name",
+         "answers": "LIVE state + position + HP% of an ONLINE bot (verb "
+         "'status'). Same offline rule as pinfo"},
     ], "refused": refused}, "error": None}
 
 
@@ -233,7 +262,53 @@ def op_pinfo(backend, name):
         "zone": zone, "reply": text}, "error": None}
 
 
-OPS = {"catalog": op_catalog, "ping": op_ping, "pinfo": op_pinfo}
+HP_RE = re.compile(r"(\d+)\s*%", re.I)
+STATE_RE = re.compile(r"status\s*\(live\)\s*:\s*([^;]+)", re.I)
+
+
+def op_status(backend, name):
+    """Verb 'status': live state + position + HP% of an ONLINE bot. Same
+    offline rule as pinfo (offline truth is db-search)."""
+    if not name or not isinstance(name, str) or not re.fullmatch(
+            r"[A-Za-z0-9_\-']{1,12}", name):
+        return {"ok": False, "result": None,
+                "error": {"code": ERR_BAD_PARAMS,
+                          "message": "param 'name' must be a toon name"}}
+    guid = backend.guid(name)
+    if guid is None:
+        return {"ok": True, "result": {
+            "name": name, "online": False,
+            "caveat": "no GUID for %r in the characters DB - offline truth "
+                      "is db-search" % name}, "error": None}
+    ok, text = backend.ask("status", guid)
+    if not ok:
+        return {"ok": False, "result": None,
+                "error": {"code": ERR_BACKEND_DOWN, "message": text}}
+    m = POS_RE.search(text)
+    if not m:
+        return {"ok": True, "result": {
+            "name": name, "online": False, "reply": text,
+            "caveat": "not answering on the command server (offline or not "
+                      "an online bot) - offline truth is db-search"},
+            "error": None}
+    ms = STATE_RE.search(text)
+    mh = HP_RE.search(text)
+    zone = m.group(5).strip() if m.group(5) else None
+    return {"ok": True, "result": {
+        "name": name, "online": True, "guid": guid,
+        "state": ms.group(1).strip() if ms else None,
+        "hp_pct": int(mh.group(1)) if mh else None,
+        "map": int(m.group(1)),
+        "position": [float(m.group(i)) for i in (2, 3, 4)],
+        "zone": zone, "reply": text}, "error": None}
+
+
+OPS = {"catalog": op_catalog, "ping": op_ping, "pinfo": op_pinfo,
+       "get_current_position": op_pinfo, "get_live_status": op_status}
+
+# the request parameter each op reads (None = no params)
+PARAMS = {"pinfo": "name", "get_current_position": "name",
+          "get_live_status": "name"}
 
 
 def dispatch(req, backend):
@@ -258,18 +333,16 @@ def dispatch(req, backend):
     if op in CHAT_TUNNEL:
         return envelope(False, None, {
             "code": ERR_WRONG_SERVICE,
-            "message": "'%s' is refused - '.playerbots bot remove' covers "
-                       "registered bots (chat-tunnel owns command sends); "
-                       "force-kicking a non-bot plain session is an "
-                       "accepted gap" % op,
+            "message": CHAT_TUNNEL[op],
             "route_hint": "chat-tunnel"})
     if op not in OPS:
         return envelope(False, None, {
             "code": ERR_UNKNOWN_OP,
             "message": "unknown op '%s' (catalog lists what routes here)" % op,
             "route_hint": "db-search (if a DB query can answer it)"})
-    if op == "pinfo":
-        r = OPS[op](backend, req.get("name"))
+    param = PARAMS.get(op)
+    if param:
+        r = OPS[op](backend, req.get(param))
     else:
         r = OPS[op](backend)
     return envelope(r["ok"], r["result"], r["error"])
