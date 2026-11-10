@@ -88,8 +88,8 @@ def main():
         r = handle(adapter, {"tool": "get_account_links", "params": {"account": "i_was_cmd"}})
         check("links envelope", envelope_ok(r, "get_account_links"))
         linked = {row[1] for row in r["rows"]}
-        check("links: 2nd/3rd/4th linked, 5th absent",
-              linked == {"i_was_here2nd", "i_was_here3rd", "i_was_here4th"}, linked)
+        check("links: all four ritual accounts linked (5th included, live 2026-11-10)",
+              linked == {"i_was_here2nd", "i_was_here3rd", "i_was_here4th", "i_was_here5th"}, linked)
 
         r = handle(adapter, {"tool": "get_quest_log", "params": {"toon": "Locke"}})
         check("quest envelope", envelope_ok(r, "get_quest_log"))
@@ -179,6 +179,15 @@ def main():
               and resp.get("id") == "e2e" and resp["rows"][0][0] == "Golbez", resp)
         mode = oct(os.stat(sock_path).st_mode & 0o777)
         check("e2e: socket is 0600 (owner-only)", mode == "0o600", mode)
+        sck2 = s.socket(s.AF_UNIX, s.SOCK_STREAM)
+        sck2.settimeout(5)
+        sck2.connect(sock_path)
+        sck2.sendall(b'{"tool": "get_character", "params": {"toon": "Ayla"}}\n')
+        sck2.close()   # hang up before reading the reply
+        time.sleep(0.2)
+        r = handle(adapter, {"tool": "get_character", "params": {"toon": "Ayla"}})
+        check("e2e: client hangup before reply does not break the service",
+              r.get("ok") is True, r)
 
         print("\n%d pass, %d fail" % (PASS, FAIL))
         return 0 if FAIL == 0 else 1
