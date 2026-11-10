@@ -38,6 +38,9 @@ python3 -u for live logs.
 import argparse, fcntl, json, os, random, re, socket, subprocess, sys, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+AUDIT = os.path.join(HERE, "audit.log")
+# ^ append-only local audit trail: every executed send and service order lands
+#   here with a timestamp - one brain, visible
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 MODEL = os.environ.get("DIRECTOR_MODEL", "gemma4:12b")
 DBSEARCH_SOCK = os.environ.get("DIRECTOR_DBSEARCH_SOCK", "/tmp/db-search.sock")
