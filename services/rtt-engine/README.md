@@ -89,9 +89,12 @@ bot and `invalid guid` for a dead guid.
 `RandomPlayerbotMgr::HandleRemoteCommand` (PlayerbotCommandServer.cpp:49
 on the live build) — the registry is the RANDOM-bot pool. Guild-invited
 RNDBOTs are served (on the watch list AND in the registry); master-owned
-playerbots answer `invalid guid` even with live AI, and their position
-source is db-search (last flushed, honestly labeled). Extending the reach
-to playerbots is the A22 mod-change proposal (OPEN).
+playerbots answer `invalid guid` even with live AI. For playerbots, LIVE
+reads route through chat-tunnel instead: the module already ships
+`.playerbots inspect <bot> <query>` (SEC_GAMEMASTER, resolves via
+PlayerbotsMgr — any online bot with AI; live-proven 2026-11-10, A23,
+reply in leo.log in the same raw shape as 8888). db-search remains the
+last-flushed fallback. The A22 mod-change proposal is superseded.
 
 ### Watch-list guard (structural)
 
