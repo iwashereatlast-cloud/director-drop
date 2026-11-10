@@ -72,6 +72,14 @@ correlation_id, raw_line}` plus service columns `channel`, `status`
 | `describe` | — | the command grammar (send shapes, channels, constraints, tools) |
 | `stats` | — | line counters + DB status tally (parse truth) |
 
+**Known limitation (A21, live-proven):** not every mod reply type passes the
+server's chat logger — `who` replies land in `acore_auth.logs` (R:delivered),
+but the strategy-listing reply to the `nc ?` probe never does (R:not_found is
+EXPECTED for it; the mod delivers that reply type through a path the
+chat_log hook never sees). The tunnel's own parse of the reply remains the
+binding truth for matching; the DB check is corroboration where the mod lets
+it exist.
+
 `GET /grammar` serves the same grammar JSON to the web GUI. `verify` uses
 `CHAT_TUNNEL_MYCNF` (default `~/.my.cnf-director`, read-only) and accepts a
 `CHAT_TUNNEL_LOGDB_FIXTURE` JSON fixture so the proof harness runs the same
