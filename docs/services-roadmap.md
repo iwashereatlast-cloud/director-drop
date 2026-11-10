@@ -70,8 +70,10 @@ Contracts live here so a change is visible to every conversation:
   action, values, travel, budget; the reply lands as
   `[System]: <bot>: <reply>` in leo.log, same raw shape the 8888 port
   used. `.playerbots exec <bot> <command>` is the state-changing sibling
-  (replies go to the bot's master = Leo). ABSORPTION COMPLETE 2026-11-10
-  (chat-tunnel, PR pending): (1) `inspect(bot, query)` tool with correlation
+  (replies go to the bot's master = Leo). ABSORPTION COMPLETE + LIVE-VERIFIED
+  2026-11-10 (chat-tunnel, live run: liveprobe --inspect on Marle+Cyan, 2/2
+  OK at 0.0s, positions bound to their own inspect commands, parse truth
+  clean, S:delivered with system replies n/a per A21): (1) `inspect(bot, query)` tool with correlation
   IDs and `[System]` reply matching — only pending inspect commands are
   eligible, so whisper/system channels never cross-steal; `exec` rides the
   raw-dot passthrough and correlates as a whisper; (2) the watch-list gate =
