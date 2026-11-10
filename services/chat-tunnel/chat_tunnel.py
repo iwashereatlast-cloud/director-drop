@@ -41,6 +41,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -101,7 +102,7 @@ def db():
 
 
 def init_db():
-    with db() as conn:
+    with closing(db()) as conn, conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""
@@ -160,7 +161,7 @@ def send_command(bot, cmd):
             STATS["sends_failed"] += 1
             return False, "FIFO write to %s failed (no reader? leo shell down?): %s" % (FIFO, e)
         _last_send[0] = now()
-    with db() as conn:
+    with closing(db()) as conn, conn:
         conn.execute(
             "INSERT INTO events (ts, direction, sender, target, command,"
             " correlation_id, raw_line, channel, status)"
@@ -182,7 +183,7 @@ def match_reply(sender, channel, text, raw_line, t):
     """Bind a reply to the exact command that triggered it: same bot (sender)
     + inside the reply window, OLDEST pending command first. A garbled or
     out-of-window line never consumes a pending command."""
-    with db() as conn:
+    with closing(db()) as conn, conn:
         sweep_timeouts(conn, t)
         if channel == "whisper":
             row = conn.execute(
@@ -234,7 +235,7 @@ def handle_reply_line(raw_line, t):
 
 def get_reply(correlation_id):
     cid = str(correlation_id or "").strip()
-    with db() as conn:
+    with closing(db()) as conn, conn:
         sweep_timeouts(conn, now())
         sent = conn.execute(
             "SELECT * FROM events WHERE correlation_id=? AND direction='sent'",
@@ -249,7 +250,7 @@ def get_reply(correlation_id):
 
 def get_recent_events(limit=50, direction=None):
     limit = max(1, min(int(limit or 50), 1000))
-    with db() as conn:
+    with closing(db()) as conn, conn:
         sweep_timeouts(conn, now())
         if direction in ("sent", "reply", None):
             q = "SELECT * FROM events"
@@ -272,7 +273,7 @@ def get_events_since(after_id, limit=200):
     simply gone (a GUI re-syncs from id 0 after a gap longer than retention)."""
     after = int(after_id or 0)
     limit = max(1, min(int(limit or 200), 1000))
-    with db() as conn:
+    with closing(db()) as conn, conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
             (after, limit)).fetchall()
@@ -305,7 +306,7 @@ def stats():
     LINE_RE is missing a live format (A14 FAIL)."""
     out = dict(STATS)
     out["uptime_sec"] = round(now() - STATS["started_at"], 1)
-    with db() as conn:
+    with closing(db()) as conn, conn:
         conn.row_factory = sqlite3.Row
         tally = {r["status"] or "reply": r["n"] for r in conn.execute(
             "SELECT status, COUNT(*) AS n FROM events GROUP BY status")}
@@ -332,7 +333,7 @@ def purge_loop():
         time.sleep(PURGE_EVERY)
         t = now()
         try:
-            with db() as conn:
+            with closing(db()) as conn, conn:
                 sweep_timeouts(conn, t)
                 conn.execute("DELETE FROM events WHERE ts < ?", (t - RETENTION,))
                 conn.execute(
