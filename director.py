@@ -173,6 +173,51 @@ CAST_SPELLS = {"tailor": ("Mooncloth",),
 CAST_OVERRIDES = {}  # {"Botname": ("Exact Spell Name", ...)}
 
 # master-issued server commands (Leo runs them himself, not /w to a bot)
+# Zone -> engine destination translation table (the master speaks ZONE names,
+# the travel engine matches SUBZONE/town names - A24). Curated from the 3.3.5
+# AreaTable; every destination must be live-confirmed via the A25 batch probe
+# ("go travel <name>" must answer "Traveling to <name>", never "Clearing
+# travel target"); a FAIL row gets its mapping fixed, not shipped.
+ZONE_DESTINATIONS = {
+    # zone (canonical + common abbreviations)      engine destination   bracket
+    "Elwynn Forest":        ("Goldshire",           "1-10"),
+    "Dun Morogh":           ("Kharanos",            "1-10"),
+    "Teldrassil":           ("Dolanaar",            "1-10"),
+    "Mulgore":              ("Bloodhoof Village",   "1-10"),
+    "Westfall":             ("Sentinel Hill",      "10-20"),
+    "Loch Modan":           ("Thelsamar",           "10-20"),
+    "Darkshore":            ("Auberdine",           "10-20"),
+    "The Barrens":          ("Crossroads",          "10-20"),
+    "Redridge Mountains":   ("Lakeshire",          "20-30"),
+    "Wetlands":             ("Menethil Harbor",    "20-30"),
+    "Duskwood":             ("Darkshire",          "20-30"),
+    "Ashenvale":            ("Astranaar",          "20-30"),
+    "Silverpine Forest":    ("The Sepulcher",      "20-30"),
+    "Hillsbrad Foothills":  ("Tarren Mill",        "20-30"),
+    "Stranglethorn Vale":   ("Booty Bay",          "30-40"),
+    "Desolace":             ("Nijel's Point",      "30-40"),
+    "Arathi Highlands":     ("Refuge Point",       "30-40"),
+    "Badlands":             ("Kargath",            "35-45"),
+    "Dustwallow Marsh":     ("Theramore",          "35-45"),
+    "Thousand Needles":     ("Freewind Post",      "40-50"),
+    "Tanaris":               ("Gadgetzan",          "40-50"),
+    "Feralas":              ("Feathermoon",        "40-50"),
+    "The Hinterlands":      ("Aerie Peak",         "40-50"),
+    "Swamp of Sorrows":     ("Stonard",            "45-55"),
+    "Azshara":              ("Azshara",            "45-55"),
+    "Un'Goro Crater":       ("Marshal's Refuge",   "48-55"),
+    "Felwood":              ("Felwood",            "48-55"),
+    "Western Plaguelands":  ("Andorhal",           "50-58"),
+    "Eastern Plaguelands":  ("Light's Hope Chapel", "53-60"),
+    "Burning Steppes":      ("Flame Crest",        "52-60"),
+    "Winterspring":         ("Everlook",           "53-60"),
+    "Silithus":             ("Cenarion Hold",      "55-60"),
+}
+ZONE_ABBREVIATIONS = {"stv": "Stranglethorn Vale", "wpl": "Western Plaguelands",
+                      "epl": "Eastern Plaguelands", "barrens": "The Barrens",
+                      "tn": "Thousand Needles", "hillsbrad": "Hillsbrad Foothills",
+                      "elwynn": "Elwynn Forest", "plaguelands": "Eastern Plaguelands"}
+
 MASTER_CMDS = ("bot add", "bot remove", "bot addaccount")
 
 # group-management server commands; chat-tunnel formats them as '.group ...'
@@ -203,10 +248,17 @@ Rules:
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
 - Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or a strategies query timed out (silent, master-less bot), CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; wrong strategies -> re-push the recipe cmd; silent bot -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
-- Zone travel: cmd "go travel <destination>" sends a unit toward a destination matched by NAME (case-insensitive substring, nearest match wins) against the travel system's catalogs (zones/areas, towns, NPCs, mobs, bosses - verified vs mod-playerbots @ 405f8119, GoAction.cpp + ChooseTravelTargetAction.cpp). Destination names that match are SUBZONE/area and town names (e.g. "Booty Bay", "Tarren Mill", "Everlook", "The Barrens"), NOT parent zone names: "Stranglethorn Vale" matches NOTHING. There is NO level filter on this command. The bot's reply is the ONLY truth: "Traveling to <title>" = it is moving; "Clearing travel target" = the name matched nothing. NEVER tell the master a unit is moving unless the bot answered "Traveling to ..." - on "Clearing travel target", say the destination was not found and propose a town/subzone name instead. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order. Useful destinations by level bracket: 1-10 Elwynn/Dun Morogh/Teldrassil/Mulgore; 10-20 Westfall/Loch Modan/Darkshore/Crossroads; 20-30 Redridge/Wetlands/Darkshore/Ashenvale/Silverpine/Tarren Mill; 30-40 Booty Bay/Refuge Point/Desolace/Theramore; 40-50 Gadgetzan/Feathermoon/Aerie Peak/Stonard; 50-60 Light's Hope/Everlook/Cenarion Hold/Silithus/Moonglade.
+- Zone travel: cmd "go travel <destination>" sends a unit toward a destination matched by NAME (case-insensitive substring, nearest match wins) against the travel system's catalogs (zones/areas, towns, NPCs, mobs, bosses - verified vs mod-playerbots @ 405f8119, GoAction.cpp + ChooseTravelTargetAction.cpp). Destination names that match are SUBZONE/area and town names, NOT parent zone names: "Stranglethorn Vale" matches NOTHING. There is NO level filter on this command. The bot's reply is the ONLY truth: "Traveling to <title>" = it is moving; "Clearing travel target" = the name matched nothing. NEVER tell the master a unit is moving unless the bot answered "Traveling to ..." - on "Clearing travel target", say the destination was not found and propose a different one.
+- Destination translation: the master speaks in ZONE names and abbreviations ("send Golbez to Stranglethorn Vale", "go to stv", "level in Thousand Needles"); the engine wants the town/subzone name. Translate with this table (zone -> destination, level bracket):
+%(zones)s
+  Common abbreviations: %(abbr)s. If the master names a zone not in the table, pick the best-known town in it and TELL them which destination you are sending the unit to. If the master names a town/area directly, use it as-is. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order.
+- Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = TWO orders for that bot: {"bot":"<name>","cmd":"go travel <the zone's table destination>"} then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
 - Broadcast: use "bot": "ALL" to apply one cmd to EVERY watched unit at once (never hand-play toons, never Leo) - e.g. {"bot":"ALL","cmd":"nc +new rpg,+grind,-follow"} or {"bot":"ALL","cmd":"go travel Barrens"}. The system expands it to one order per unit and validates each individually.
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
-- The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST)}
+- The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST),
+        "zones": "\n".join("  %-22s -> %-20s (%s)" % (z, d[0], d[1])
+                           for z, d in sorted(ZONE_DESTINATIONS.items())),
+        "abbr": ", ".join("%s=%s" % (a, z) for a, z in sorted(ZONE_ABBREVIATIONS.items()))}
 
 SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
           "The human gives marching orders as natural language, JSON, or pasted lists.\n" + ORDER_RULES + "\n"
