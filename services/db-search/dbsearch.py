@@ -149,6 +149,170 @@ CATALOG = {
     "fill": lambda p: {"toon": _p("get_quest_log", p, "toon")},
   },
 
+  "get_equipped_gear": {
+    # equipped gear sits at bag=255, slot 0-18 (director.py:530 audit: bags are
+    # bag=255 slot 19-22, backpack is bag=0 slot 23-38); items are GUIDs into
+    # item_instance, resolved to templates in acore_world (needs its grant).
+    "sql": ("SELECT ci.slot, "
+            "CASE ci.slot WHEN 0 THEN 'head' WHEN 1 THEN 'neck' "
+            "WHEN 2 THEN 'shoulders' WHEN 3 THEN 'shirt' WHEN 4 THEN 'chest' "
+            "WHEN 5 THEN 'waist' WHEN 6 THEN 'legs' WHEN 7 THEN 'feet' "
+            "WHEN 8 THEN 'wrists' WHEN 9 THEN 'hands' WHEN 10 THEN 'finger1' "
+            "WHEN 11 THEN 'finger2' WHEN 12 THEN 'trinket1' WHEN 13 THEN 'trinket2' "
+            "WHEN 14 THEN 'back' WHEN 15 THEN 'mainhand' WHEN 16 THEN 'offhand' "
+            "WHEN 17 THEN 'ranged' WHEN 18 THEN 'tabard' "
+            "ELSE 'slot' || ci.slot END, "
+            "it.name, it.Quality, it.ItemLevel, it.RequiredLevel "
+            "FROM acore_characters.character_inventory ci "
+            "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
+            "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
+            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "AND ci.bag = 255 AND ci.slot BETWEEN 0 AND 18 "
+            "ORDER BY ci.slot"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "what a toon has equipped, per slot (slot id + name: head..tabard) with item name, quality, item level and required level",
+    "cannot": "bag contents (separate); enchants/gems (not joined); what was equipped seconds ago mid-session before the save",
+    "caveat": "equipment rows flush with the character save - a just-equipped or just-swapped item can lag by minutes. Empty slots simply mean nothing equipped at last save.",
+    "fill": lambda p: {"toon": _p("get_equipped_gear", p, "toon")},
+  },
+
+  "get_leveling_progress": {
+    "sql": ("SELECT name, level, xp, leveltime, totaltime, logout_time, online, "
+            "COALESCE(ROUND(xp * 3600.0 / leveltime), 0) AS xp_per_hour "
+            "FROM acore_characters.characters c "
+            "JOIN acore_auth.account a ON a.id = c.account "
+            "WHERE a.username LIKE '{account}%' "
+            "ORDER BY level DESC, name"),
+    "params": {"account": "required - account name prefix (pass the bare prefix)"},
+    "timeout": 10,
+    "can": "per-toon leveling KPIs on a set of accounts: level, current-level xp, time spent THIS level (leveltime), total time, last logout, DB online, and derived xp/hour for the current level (xp / leveltime); logout_time shows who has not been played in days",
+    "cannot": "xp gained over past days (point-in-time only - trends need snapshots, deliberately not built); whether a toon is leveling right now",
+    "caveat": "xp/leveltime/totaltime/logout_time flush with the character save - current-level progress can lag by minutes; xp_per_hour is 0 until leveltime accumulates. online is boot-reset/async (A5).",
+    "fill": lambda p: {"account": _p("get_leveling_progress", p, "account")},
+  },
+
+  "get_group_xp_penalty": {
+    # A7: in a group of >=5 the mod converts to RAID, kill XP is x1.4 then
+    # split across members in range - so grouping 5+ hurts leveling.
+    "sql": ("SELECT COUNT(*) AS members, "
+            "COALESCE(MAX(g.groupType & 2), 0) AS is_raid "
+            "FROM acore_characters.group_member gm "
+            "JOIN acore_characters.`groups` g ON g.guid = gm.guid "
+            "WHERE gm.guid = (SELECT guid FROM acore_characters.group_member "
+            "WHERE memberGuid = "
+            "(SELECT guid FROM acore_characters.characters WHERE name = '{toon}')) "
+            "HAVING COUNT(*) > 0"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "one row: how many members the toon's group has and whether it is a raid (groupType bit 0x02) - the two facts behind the A7 XP penalty; 0 rows = not in a group",
+    "cannot": "the exact XP multiplier per kill (depends on member levels and in-range members, which the DB does not store); battleground groups (not persisted)",
+    "caveat": "group rows are live-written but async login/logout (A3) and the login auto-join (A6) can leave them briefly stale; a members count of >=5 means raid XP splitting applies (A7).",
+    "fill": lambda p: {"toon": _p("get_group_xp_penalty", p, "toon")},
+  },
+
+  "get_quest_difficulty": {
+    "sql": ("SELECT cqs.quest, qt.LogTitle, qt.QuestLevel, c.level, "
+            "qt.QuestLevel - c.level AS level_diff, cqs.status, "
+            "CASE WHEN qt.QuestLevel - c.level >= 4 THEN 'red' "
+            "WHEN qt.QuestLevel - c.level = 3 THEN 'orange' "
+            "WHEN qt.QuestLevel - c.level BETWEEN -2 AND 2 THEN 'yellow' "
+            "WHEN qt.QuestLevel - c.level BETWEEN -5 AND -3 THEN 'green' "
+            "ELSE 'gray' END AS band "
+            "FROM acore_characters.character_queststatus cqs "
+            "JOIN acore_characters.characters c "
+            "ON c.guid = cqs.guid "
+            "LEFT JOIN acore_world.quest_template qt ON qt.ID = cqs.quest "
+            "WHERE c.name = '{toon}' "
+            "ORDER BY level_diff DESC, cqs.quest"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "the toon's quest log with each quest's level vs the toon's level, the difference, and an approximate color band (red >= +4, orange +3, yellow -2..+2, green -3..-5, gray <= -6) - answers 'are Locke's quests all gray, should we move zones'",
+    "cannot": "quest availability from givers (not DB-truth); whether the rpg engine accepts it (needs a POI, A8); exact XP per quest",
+    "caveat": "quest rows flush with the character save and LogTitle/QuestLevel need the acore_world.quest_template grant (without it those columns are NULL but the band still computes). Band thresholds are approximate WoW conventions, not per-quest XP math.",
+    "fill": lambda p: {"toon": _p("get_quest_difficulty", p, "toon")},
+  },
+
+  "get_skills": {
+    "sql": ("SELECT cs.skill, "
+            "CASE cs.skill WHEN 129 THEN 'firstaid' WHEN 148 THEN 'riding' WHEN 164 THEN 'bs' "
+            "WHEN 165 THEN 'lw' WHEN 171 THEN 'alchemy' WHEN 182 THEN 'herb' "
+            "WHEN 185 THEN 'cook' WHEN 186 THEN 'mine' WHEN 197 THEN 'tailor' "
+            "WHEN 333 THEN 'enchant' WHEN 356 THEN 'fish' WHEN 393 THEN 'skin' "
+            "WHEN 755 THEN 'jewel' WHEN 762 THEN 'eng' WHEN 773 THEN 'scribe' "
+            "ELSE 'skill' || cs.skill END AS name, "
+            "cs.value, cs.max "
+            "FROM acore_characters.character_skills cs "
+            "WHERE cs.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "ORDER BY cs.skill"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "the toon's profession/secondary skills with the repo's short names (firstaid, bs, lw, alchemy, herb, cook, mine, tailor, enchant, fish, skin, jewel, eng, scribe) and value/max - answers 'can Gau gather while grinding'",
+    "cannot": "weapon skills vs class miss chance (weapon skill ids exist but are not named here); live skill-ups mid-session",
+    "caveat": "skill values flush with the character save - a just-leveled skill can lag by minutes.",
+    "fill": lambda p: {"toon": _p("get_skills", p, "toon")},
+  },
+
+  "get_bag_space": {
+    # director.py:528-540 audit: capacity = 16 backpack slots +
+    # ContainerSlots of equipped bags (bag=255 slot 19-22); used = backpack
+    # items (bag=0 slot 23-38) + items inside equipped bags.
+    "sql": ("SELECT t.capacity, t.used, t.capacity - t.used AS free_slots "
+            "FROM (SELECT "
+            "16 + (SELECT COALESCE(SUM(it.ContainerSlots), 0) "
+            "FROM acore_characters.character_inventory ci "
+            "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
+            "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
+            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "AND ci.bag = 255 AND ci.slot BETWEEN 19 AND 22) AS capacity, "
+            "(SELECT COUNT(*) FROM acore_characters.character_inventory "
+            "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "AND ((bag = 0 AND slot BETWEEN 23 AND 38) OR bag IN "
+            "(SELECT item FROM acore_characters.character_inventory "
+            "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "AND bag = 255 AND slot BETWEEN 19 AND 22))) AS used) t"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "one row: bag capacity (16 + equipped bags' ContainerSlots, needs the acore_world.item_template grant), used slots, and free slots",
+    "cannot": "what the items ARE (this is a count only); bank/vault space",
+    "caveat": "inventory flushes with the character save - loot gained seconds ago may not be counted; without the item_template grant capacity falls back to 16 and undercounts.",
+    "fill": lambda p: {"toon": _p("get_bag_space", p, "toon")},
+  },
+
+  "get_mount_items": {
+    # mount ITEMS: item_template class 15 (Misc) subclass 5 (Mount) per the
+    # 3.3.5 item class table - NEEDS LIVE CONFIRMATION on this build (first
+    # live run should eyeball the class/subclass of a known mount).
+    "sql": ("SELECT ci.bag, ci.slot, it.name, it.Quality, it.ItemLevel, "
+            "it.RequiredLevel "
+            "FROM acore_characters.character_inventory ci "
+            "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
+            "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
+            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "AND it.class = 15 AND it.subclass = 5 "
+            "ORDER BY it.name"),
+    "params": {"toon": "required - exact toon name"},
+    "timeout": 10,
+    "can": "mount ITEMS the toon is carrying (bag/slot, name, quality, required level) - the chestnut/brown horse you shoved in the bags shows here; needs the acore_world.item_template grant",
+    "cannot": "mounts LEARNED as spells (character_spell) - spell names are not in the world DB (DBC-only), so learned mounts can only be counted as raw spell ids, deliberately not exposed; riding skill level comes from get_skills (id 148)",
+    "caveat": "inventory flushes with the character save - a just-looted mount can lag by minutes. The class 15 / subclass 5 mount mapping is the 3.3.5 standard, not yet live-verified on this build.",
+    "fill": lambda p: {"toon": _p("get_mount_items", p, "toon")},
+  },
+
+  "get_wallets": {
+    "sql": ("SELECT c.name, a.username AS account, c.level, c.money "
+            "FROM acore_characters.characters c "
+            "JOIN acore_auth.account a ON a.id = c.account "
+            "WHERE a.username LIKE '{account}%' "
+            "ORDER BY c.money DESC, c.name"),
+    "params": {"account": "required - account name prefix (pass the bare prefix)"},
+    "timeout": 10,
+    "can": "money (copper) per toon on a set of accounts, richest first - answers 'can everyone afford training/repair'",
+    "cannot": "mail with COD attached (character_mail not joined); guild bank money; pending vendor sales",
+    "caveat": "money flushes with the character save - recent purchases/loot can lag by minutes.",
+    "fill": lambda p: {"account": _p("get_wallets", p, "account")},
+  },
+
   "get_guild_members": {
     "sql": ("SELECT c.name, g_r.rname AS `rank`, c.level, c.class, c.online "
             "FROM acore_characters.guild g "

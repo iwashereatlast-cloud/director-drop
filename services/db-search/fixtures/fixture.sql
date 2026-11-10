@@ -30,16 +30,17 @@ INSERT INTO acore_auth.account VALUES
 CREATE TABLE acore_characters.characters (
   guid INTEGER PRIMARY KEY, account INTEGER, name TEXT, race INTEGER,
   class INTEGER, level INTEGER, map INTEGER, zone INTEGER, money INTEGER,
-  totaltime INTEGER, online INTEGER);
+  xp INTEGER, leveltime INTEGER, logout_time INTEGER, totaltime INTEGER,
+  online INTEGER);
 INSERT INTO acore_characters.characters VALUES
-  (10, 1, 'Leo',     1, 5, 80, 0,   12, 1000000, 99999, 1),   -- shell toon, online
-  (11, 2, 'Cecil',   1, 1, 42, 0,   12,   50000,  5000,  0),  -- G1, offline
-  (12, 2, 'Rydia',   4, 8, 40, 1,   14,   20000,  4000,  0),
-  (13, 2, 'Vivi',   7, 9, 35, 530,  12,   10000,  3000,  0),
-  (20, 3, 'Ayla',    2, 2, 30, 0,   12,    5000,  2000,  1),  -- ritual bots, online
-  (21, 4, 'Gau',     8, 7, 28, 1,   14,    3000,  1500,  1),
-  (22, 5, 'Locke',  2, 4, 32, 0,   12,    7000,  2500,  0),  -- async logout in flight (A3)
-  (23, 6, 'Golbez',  1, 6, 55, 0,   12,   80000,  6000,  1);  -- extra bot, online
+  (10, 1, 'Leo',     1, 5, 80, 0,   12, 1000000, 0,     0,      1731000000, 99999, 1),  -- shell toon, online
+  (11, 2, 'Cecil',   1, 1, 42, 0,   12,   50000, 3100,  7200,   1730900000,  5000,  0), -- G1, offline days
+  (12, 2, 'Rydia',   4, 8, 40, 1,   14,   20000, 5400,  9000,   1730950000,  4000,  0),
+  (13, 2, 'Vivi',   7, 9, 35, 530,  12,   10000, 2200,  3600,   1730990000,  3000,  0),
+  (20, 3, 'Ayla',    2, 2, 30, 0,   12,    5000, 4100,  5400,   1731000100,  2000,  1),  -- ritual bots, online
+  (21, 4, 'Gau',     8, 7, 28, 1,   14,    3000, 1800,  2700,   1731000050,  1500,  1),
+  (22, 5, 'Locke',  2, 4, 32, 0,   12,    7000, 7300, 10800,   1731000200,  2500,  0),  -- async logout in flight (A3)
+  (23, 6, 'Golbez',  1, 6, 55, 0,   12,   80000, 9500, 14400,   1731000300,  6000,  1);  -- extra bot, online
 
 CREATE TABLE acore_characters.`groups` (
   guid INTEGER PRIMARY KEY, leaderGuid INTEGER, groupType INTEGER,
@@ -93,9 +94,52 @@ INSERT INTO acore_playerbots.playerbots_account_links VALUES
   (9,  1, 6, '2026-11-05 22:12:47'), (10, 6, 1, '2026-11-05 22:12:47');
 
 CREATE TABLE acore_world.quest_template (
-  ID INTEGER PRIMARY KEY, LogTitle TEXT);
+  ID INTEGER PRIMARY KEY, LogTitle TEXT, QuestLevel INTEGER);
 INSERT INTO acore_world.quest_template VALUES
-  (12, 'The Fargatome'),
-  (25, 'A Legend of the Fall'),
-  (36, 'Brotherhood of Thieves'),
-  (153, 'The Everlasting Mirage');
+  (12, 'The Fargatome', 30),
+  (25, 'A Legend of the Fall', 26),
+  (36, 'Brotherhood of Thieves', 12),
+  (153, 'The Everlasting Mirage', 38);
+
+CREATE TABLE acore_characters.character_inventory (
+  guid INTEGER, bag INTEGER, slot INTEGER, item INTEGER);
+CREATE TABLE acore_characters.item_instance (
+  guid INTEGER PRIMARY KEY, itemEntry INTEGER);
+CREATE TABLE acore_world.item_template (
+  entry INTEGER PRIMARY KEY, name TEXT, Quality INTEGER,
+  ItemLevel INTEGER, RequiredLevel INTEGER, ContainerSlots INTEGER,
+  class INTEGER, subclass INTEGER);
+-- Ayla's paperdoll (guid 20): bag=255, equipment slots 0-18 per the
+-- director.py:530 audit; two slots empty to prove sparse output.
+INSERT INTO acore_characters.item_instance VALUES
+  (9001, 2901), (9002, 2902), (9003, 2903);
+INSERT INTO acore_world.item_template VALUES
+  (2901, 'Linen Robe', 1, 15, 5, 0, 4, 1),
+  (2902, 'Brawler Boots', 2, 18, 7, 0, 4, 8),
+  (2903, 'Worn Shortsword', 0, 5, 1, 0, 2, 8),
+  (2950, 'Small Brown Pouch', 1, 5, 1, 8, 1, 0),
+  (2951, 'Rough Stone', 0, 1, 1, 0, 7, 1),
+  (2952, 'Linen Cloth', 0, 1, 1, 0, 7, 1),
+  (2953, 'Chestnut Mare Bridle', 3, 30, 30, 0, 15, 5);
+INSERT INTO acore_characters.character_inventory VALUES
+  (20, 255, 4, 9001),   -- chest: Linen Robe
+  (20, 255, 7, 9002),   -- feet: Brawler Boots
+  (20, 255, 15, 9003);  -- mainhand: Worn Shortsword
+
+CREATE TABLE acore_characters.character_skills (
+  guid INTEGER, skill INTEGER, value INTEGER, max INTEGER);
+-- Ayla (guid 20): herbalist/miner - the gather-preset match
+INSERT INTO acore_characters.character_skills VALUES
+  (20, 182, 150, 150),  -- herb
+  (20, 186, 75, 150),   -- mine
+  (20, 129, 40, 75),    -- firstaid
+  (20, 148, 150, 150);  -- riding
+-- Ayla's bags: an 8-slot pouch equipped (bag=255 slot 19), 3 items in the
+-- backpack (bag=0 slots 23-25) -> capacity 24, used 3, free 21.
+INSERT INTO acore_characters.item_instance VALUES
+  (9004, 2950), (9005, 2951), (9006, 2952), (9007, 2953);
+INSERT INTO acore_characters.character_inventory VALUES
+  (20, 255, 19, 9004),  -- equipped bag: Small Brown Pouch (8 slots)
+  (20, 0, 23, 9005),    -- backpack: Rough Stone
+  (20, 0, 24, 9006),    -- backpack: Linen Cloth
+  (20, 0, 25, 9007);    -- backpack: Chestnut Mare Bridle (mount item)
