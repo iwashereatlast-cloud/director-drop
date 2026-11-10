@@ -13,7 +13,6 @@ direct FIFO/log access, no `tail` in director.py.
 
 Run: python3 tests/test_services_wiring.py   (no worldserver needed)
 """
-import json
 import os
 import socket
 import sqlite3
@@ -153,6 +152,11 @@ def main():
         os.environ["DIRECTOR_DBSEARCH_SOCK"] = sock_path
         os.environ["DIRECTOR_TUNNEL_URL"] = tunnel_url
         import director
+        # the AUDIT constant must exist at MODULE level (a live run crashed on
+        # this exact gap while the test's reassignment masked it)
+        check("AUDIT constant defined at module level",
+              isinstance(director.AUDIT, str) and director.AUDIT.endswith("audit.log"),
+              getattr(director, "AUDIT", None))
         director.AUDIT = os.path.join(tmp, "audit.log")
 
         print("== 1. raw paths are gone from director.py ==")
