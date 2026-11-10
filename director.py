@@ -96,6 +96,13 @@ STILL_WORKING = float(os.environ.get("DIRECTOR_STILL_WORKING", "45"))
 #   whisper the master a heads-up so slow is never mistaken for a hang
 STILL_WORKING_MSG = os.environ.get("DIRECTOR_STILL_WORKING_MSG",
                                    "still with you - the model is thinking...")
+TURN_MAX = float(os.environ.get("DIRECTOR_TURN_MAX", "240"))
+# ^ hard cap on ONE whole turn (roster + LLM + queries + sends), not just the
+#   LLM call: live 2026-11-10 a turn sat silent for ~2 min because the nudge
+#   only covered the LLM calls - a stall in census/queries/sends got NO
+#   indication. Past this the turn is abandoned: the master is told WHICH
+#   stage stuck and for how long, and the loop moves on (all service calls
+#   carry finite timeouts, so the abandoned worker dies on its own).
 _ACK_DEFAULT = ";".join([
     "one moment...", "stand by...", "aye...", "on it...", "give me a second...",
     "checking the ledgers...", "plotting a course...", "rallying the units...",
@@ -1016,6 +1023,9 @@ def send_order(bot, cmd):
         mark = "BOAT"
     elif low.startswith("carriage "):
         mark = "CARRIAGE"
+    if _turn_aborted():
+        print("daemon: send dropped - turn was aborted: %r" % ((bot, cmd),))
+        return {"line": "(aborted turn - not sent)"}
     res = tunnel("send_command", bot=bot,
                 cmd=(cmd if order_line(bot, cmd).startswith("/w")
                      else order_line(bot, cmd)))
@@ -1030,6 +1040,9 @@ def say(recipient, msg):
     msg = (msg or "").strip()
     if not msg:
         return
+    if _turn_aborted():
+        print("daemon: whisper dropped - turn was aborted: %r" % ((recipient, msg[:80]),))
+        return
     for i in range(0, len(msg), 200):
         send_order(recipient, msg[i:i + 200])
 
@@ -1038,10 +1051,10 @@ def _llm_fail_say(sender, e, channel):
     """Whisper the master why the LLM turn failed (timeout gets the GPU hint).
     One place, so both daemon call sites stay identical."""
     if "timed out" in str(e).lower():
-        say(sender, "llm error: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
-            % (MODEL, LLM_TIMEOUT))
+        say(sender, "llm error at %s: %s did not answer within %ss (cold model or busy GPU - check `ollama ps`); try again"
+            % (_STAGE["name"], MODEL, LLM_TIMEOUT))
     else:
-        say(sender, "llm error: %s" % e)
+        say(sender, "llm error at %s: %s" % (_STAGE["name"], e))
 
 
 def expand_orders(orders, all_bots):
@@ -1159,6 +1172,76 @@ BOT_ERROR_RE = re.compile(
 
 BOTFB = []      # ring of recent bot error whispers, shown in the roster system message
 BOTFB_SEQ = [0]  # monotonic counter: lets the presence thread detect NEW errors
+
+# ---- turn watchdog: stage tracking + hard abort -------------------------
+# A whisper-triggered turn has MANY stages (roster -> llm -> queries -> llm
+# -> sends -> reply) and any of them can stall. The old nudge only covered
+# the LLM calls (live 2026-11-10: 75s of silence between the nudge and the
+# 120s fail whisper). The worker thread updates _STAGE as it goes; the
+# listener-side watchdog whispers progress naming the stage + elapsed time
+# every STILL_WORKING seconds and abandons the turn at TURN_MAX.
+_STAGE = {"name": "idle"}
+_TOK = [0]           # turn token counter
+_ABORTED = set()     # tokens of abandoned turns
+_TL = threading.local()   # worker thread sets .token; say/send_order check it
+
+
+def _stage(name):
+    _STAGE["name"] = name
+
+
+def _turn_aborted():
+    tok = getattr(_TL, "token", None)
+    return tok is not None and tok in _ABORTED
+
+
+def _run_turn(worker, sender):
+    """Run one turn's worker thread under the watchdog: repeating progress
+    whispers (stage + elapsed) every STILL_WORKING, hard abort at TURN_MAX.
+    The worker is a daemon thread with finite timeouts everywhere, so an
+    abandoned turn dies on its own; its late whispers/sends are dropped by
+    the token gate in say()/send_order()."""
+    _TOK[0] += 1
+    tok = _TOK[0]
+    _ABORTED.discard(tok)
+
+    def _wrap():
+        _TL.token = tok
+        try:
+            worker()
+        except Exception as e:
+            print("daemon: turn crashed at stage %r: %s" % (_STAGE["name"], e))
+            try:
+                say(sender, "error at %s: %s" % (_STAGE["name"], e))
+            except Exception:
+                pass
+
+    w = threading.Thread(target=_wrap, daemon=True)
+    w.start()
+    t0 = time.time()
+    nxt = STILL_WORKING if STILL_WORKING > 0 else None
+    while w.is_alive():
+        w.join(1.0)
+        if not w.is_alive():
+            break
+        el = time.time() - t0
+        if TURN_MAX > 0 and el >= TURN_MAX:
+            _ABORTED.add(tok)
+            print("daemon: turn aborted - stuck at %r for %.0fs" % (_STAGE["name"], el))
+            try:
+                say(sender, "I'm stuck at '%s' (%.0fs) - dropping this one; "
+                            "whisper me again." % (_STAGE["name"], el))
+            except Exception:
+                pass
+            _stage("idle")
+            return
+        if nxt is not None and el >= nxt:
+            try:
+                say(sender, "still on it: %s (%.0fs)..." % (_STAGE["name"], el))
+            except Exception:
+                pass
+            nxt += STILL_WORKING
+    _stage("idle")
 
 
 def _note_bot_error(sender, text):
@@ -1381,6 +1464,97 @@ def presence_loop(interval=30.0):
             print("presence: poll error: %s" % e)
         time.sleep(interval)
 
+def _turn(sender, channel, text, convs, pending):
+    """One whisper-triggered LLM turn (roster -> llm -> queries -> llm ->
+    orders -> reply). Runs inside _run_turn's worker thread: _STAGE names
+    the current step for the watchdog's progress/abort whispers."""
+    conv = convs.setdefault(sender, [])
+    # rebuild each turn: persona first, last 10 history turns, then a
+    # FRESH full roster (online+offline) as its own system message
+    # right before the user text so the model cannot miss it
+    history = [m2 for m2 in conv if m2["role"] != "system"][-10:]
+    conv[:] = [{"role": "system", "content": GENERAL}]
+    conv.extend(history)
+    conv.append({"role": "user", "content": text})
+    _stage("roster")
+    try:
+        t0 = time.time()
+        roster_msg = ("Live roster (name, account, level, map, status): "
+                      + roster_text(census(online_only=False)))
+        try:
+            roster_msg += "\nLeo's group: " + group_text(LEO)
+        except Exception as e:
+            roster_msg += "\nLeo's group: lookup failed (%s)" % e
+        if BOTFB:
+            roster_msg += "\nRecent bot error whispers: " + "; ".join(BOTFB[-5:])
+        conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
+        _stage("llm")
+        reply = llm_retry(_with_fewshot(conv))
+        print("daemon: llm answered in %.1fs" % (time.time() - t0))
+        if DEBUG:
+            print("daemon: raw llm reply: %r" % reply[:800])
+    except Exception as e:
+        conv.pop()
+        _llm_fail_say(sender, e, channel)
+        return
+    conv.append({"role": "assistant", "content": reply})
+    obj = parse_orders(reply)
+    qs = [q for q in (obj.get("queries") or []) if isinstance(q, dict)][:3]
+    if qs:
+        # one read-only DB round: results go back to the LLM, whose
+        # NEXT reply (final text + orders) is the one acted on
+        say(sender, "one moment, checking the ledgers.")
+        _stage("queries")
+        results = run_queries(qs, census(online_only=False))
+        conv.append({"role": "system", "content":
+                     "DB query results (read-only):\n" + results +
+                     "\nGive your final reply now, with orders if any. "
+                     "(Further queries this turn are ignored.)"})
+        _stage("llm (final)")
+        try:
+            reply = llm_retry(_with_fewshot(conv))
+            if DEBUG:
+                print("daemon: raw llm reply (post-queries): %r" % reply[:800])
+        except Exception as e:
+            conv.pop()
+            _llm_fail_say(sender, e, channel)
+            return
+        conv.append({"role": "assistant", "content": reply})
+        obj = parse_orders(reply)
+    msg = (obj.get("reply") or reply).strip()
+    if not msg:
+        # gemma sometimes returns empty output; never suffer silence
+        print("daemon: empty LLM reply from %s for %s" % (MODEL, sender))
+        msg = "(the model returned an empty reply - raw: %r)" % reply
+    orders = obj.get("orders") or []
+    sent, skips = [], []
+    if orders:
+        _stage("orders")
+        orders = expand_orders(orders, census(online_only=False))
+        bots = census()
+        for o in orders:
+            err = validate(o, bots)
+            (skips.append(err) if err else sent.append(o))
+        if skips:
+            msg += " | " + "; ".join(skips)
+        if sent:
+            if CONFIRM:
+                pending[sender] = sent
+                msg += (" | plan: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
+                        + " - whisper me 'go' to execute, 'skip' to drop.")
+            else:
+                # auto-execute: validation is the safety net, no ritual
+                for o in sent:
+                    try:
+                        res = send_order(str(o["bot"]), str(o["cmd"]))
+                        msg += " | executed: " + res["line"]
+                    except Exception as e:
+                        msg += " | send FAILED: %s" % e
+    print("daemon -> %s: %s (turn %.1fs)" % (sender, msg, time.time() - t0))
+    _stage("reply")
+    say(sender, msg)
+
+
 def daemon():
     # single-instance guard: a second daemon would double-answer every whisper
     lock_fd = os.open(os.path.join(HERE, "daemon.lock"), os.O_CREAT | os.O_WRONLY, 0o600)
@@ -1471,87 +1645,8 @@ def daemon():
                     pending.pop(sender)
                     say(sender, "plan discarded.")
                     continue
-                conv = convs.setdefault(sender, [])
-                # rebuild each turn: persona first, last 10 history turns, then a
-                # FRESH full roster (online+offline) as its own system message
-                # right before the user text so the model cannot miss it
-                history = [m2 for m2 in conv if m2["role"] != "system"][-10:]
-                conv[:] = [{"role": "system", "content": GENERAL}]
-                conv.extend(history)
-                conv.append({"role": "user", "content": text})
-                try:
-                    t0 = time.time()
-                    roster_msg = ("Live roster (name, account, level, map, status): "
-                                  + roster_text(census(online_only=False)))
-                    try:
-                        roster_msg += "\nLeo's group: " + group_text(LEO)
-                    except Exception as e:
-                        roster_msg += "\nLeo's group: lookup failed (%s)" % e
-                    if BOTFB:
-                        roster_msg += "\nRecent bot error whispers: " + "; ".join(BOTFB[-5:])
-                    conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
-                    reply = llm_retry(_with_fewshot(conv),
-                                      notify=lambda: say(sender, STILL_WORKING_MSG))
-                    print("daemon: llm answered in %.1fs" % (time.time() - t0))
-                    if DEBUG:
-                        print("daemon: raw llm reply: %r" % reply[:800])
-                except Exception as e:
-                    conv.pop()
-                    _llm_fail_say(sender, e, channel)
-                    continue
-                conv.append({"role": "assistant", "content": reply})
-                obj = parse_orders(reply)
-                qs = [q for q in (obj.get("queries") or []) if isinstance(q, dict)][:3]
-                if qs:
-                    # one read-only DB round: results go back to the LLM, whose
-                    # NEXT reply (final text + orders) is the one acted on
-                    say(sender, "one moment, checking the ledgers.")
-                    results = run_queries(qs, census(online_only=False))
-                    conv.append({"role": "system", "content":
-                                 "DB query results (read-only):\n" + results +
-                                 "\nGive your final reply now, with orders if any. "
-                                 "(Further queries this turn are ignored.)"})
-                    try:
-                        reply = llm_retry(_with_fewshot(conv),
-                                          notify=lambda: say(sender, STILL_WORKING_MSG))
-                        if DEBUG:
-                            print("daemon: raw llm reply (post-queries): %r" % reply[:800])
-                    except Exception as e:
-                        conv.pop()
-                        _llm_fail_say(sender, e, channel)
-                        continue
-                    conv.append({"role": "assistant", "content": reply})
-                    obj = parse_orders(reply)
-                msg = (obj.get("reply") or reply).strip()
-                if not msg:
-                    # gemma sometimes returns empty output; never suffer silence
-                    print("daemon: empty LLM reply from %s for %s" % (MODEL, sender))
-                    msg = "(the model returned an empty reply - raw: %r)" % reply
-                orders = obj.get("orders") or []
-                sent, skips = [], []
-                if orders:
-                    orders = expand_orders(orders, census(online_only=False))
-                    bots = census()
-                    for o in orders:
-                        err = validate(o, bots)
-                        (skips.append(err) if err else sent.append(o))
-                    if skips:
-                        msg += " | " + "; ".join(skips)
-                    if sent:
-                        if CONFIRM:
-                            pending[sender] = sent
-                            msg += (" | plan: " + "; ".join(order_line(str(o["bot"]), str(o["cmd"])) for o in sent)
-                                    + " - whisper me 'go' to execute, 'skip' to drop.")
-                        else:
-                            # auto-execute: validation is the safety net, no ritual
-                            for o in sent:
-                                try:
-                                    res = send_order(str(o["bot"]), str(o["cmd"]))
-                                    msg += " | executed: " + res["line"]
-                                except Exception as e:
-                                    msg += " | send FAILED: %s" % e
-                print("daemon -> %s: %s (turn %.1fs)" % (sender, msg, time.time() - t0))
-                say(sender, msg)
+                _run_turn(lambda: _turn(sender, channel, text, convs, pending),
+                          sender)
             except Exception as e:
                 print("daemon event error: %s" % e)
                 if sender:
