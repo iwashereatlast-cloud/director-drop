@@ -106,7 +106,11 @@ class Tunnel:
             f.write(line + "\n")
 
     def reply(self, bot, text):
-        self.append_log("[%s] [whisper]: %s" % (bot, text))
+        # A14-confirmed live shape: loguru envelope around the display line
+        self.append_log(
+            "2026-11-09 19:26:21.153 | MESSAGES |"
+            " headless.world.chat.chat:display:124 - [%s] [whisper]: %s"
+            % (bot, text))
 
     def sync(self, text, timeout=5):
         """Wait until the tailer has ingested a reply line with this text.

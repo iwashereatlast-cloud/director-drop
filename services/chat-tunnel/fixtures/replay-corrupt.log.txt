@@ -1,11 +1,12 @@
 # Garbled / out-of-band lines that MUST NOT consume a pending command's match.
-# The headless client occasionally emits truncated or interleaved junk; the
-# tailer's parser ignores every line below, and a well-formed reply line that
-# follows still binds to the exact command that is still pending.
-[Gau] [whisper
-] [whisper]: Strategies: - (truncated head)
-[Gau] [guild]: === Inventory ===
-[Gau] [whisper]:
-[garbled
-[System] [whisper]: server console noise
-Gau] [whisper]: unbalanced bracket
+# Shape is the CONFIRMED live format (A14, 2026-11-09): loguru envelope around
+# a display line, DEBUG noise lines with no chat, and malformed display lines.
+# Every line below must be ignored by the matcher; a well-formed display line
+# that follows still binds to the command that is still pending.
+2026-11-09 19:26:21.153 | DEBUG    | headless.world.chat.chat:add_message:67 - message=<headless.world.chat.message.ChatMessage object at 0x7346d29396a0>
+2026-11-09 19:26:36.931 | MESSAGES | headless.world.chat.chat:display:124 - [System]: Locke|cfff00000: My inventory is full
+2026-11-09 19:26:21.153 | MESSAGES | headless.world.chat.chat:display:124 - [Gau] [whisper
+2026-11-09 19:26:21.153 | MESSAGES | headless.world.chat.chat:display:124 - [Gau] [guild]: === Inventory ===
+2026-11-09 19:26:21.153 | MESSAGES | headless.world.chat.chat:display:124 - [Gau] [whisper]:
+no envelope, just a bare [Gau] [whisper]: line - the client never emits this
+2026-11-09 19:26:21.153 | MESSAGES | headless.world.chat.chat:add_message:67 - [Gau] [whisper]: wrong logger name

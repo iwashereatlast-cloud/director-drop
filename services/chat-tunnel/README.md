@@ -1,7 +1,10 @@
 # chat-tunnel (service 1 of 4)
 
 Single owner of the Leo client chat log. Tails `/tmp/leo.log`, parses whisper
-traffic (`[Name] [whisper]: text`, assumption A14) into structured events in
+traffic (A14, confirmed live: chat rides a loguru envelope —
+`... | MESSAGES | headless.world.chat.chat:display:124 - [Name] [whisper]: text` —
+the parser anchors on the `display:` wrapper so DEBUG noise can never
+false-match) into structured events in
 SQLite (WAL, retention-purged so the DB never grows unbounded), sends commands
 through the Leo FIFO (`/tmp/leo.in`) with a unique `correlation_id` per sent
 command, and binds each bot reply to the exact command that triggered it.
@@ -97,9 +100,17 @@ python3 services/chat-tunnel/liveprobe.py --bots Ayla,Locke --rounds 2
 ```
 
 It tabulates every probe as OK / WRONG-SENDER / SILENT / PENDING, prints the
-`stats` parse truth (dropped-line count vs the raw log = the A14 check), and
-an evidence-based `CHAT_TUNNEL_WINDOW` figure from measured reply latencies.
-Exit 0 = every probe OK.
+`stats` parse truth (`lines_garbled` = display lines that failed to parse,
+the A14 check; `lines_noise` = DEBUG/loguru lines with no chat, expected),
+and an evidence-based `CHAT_TUNNEL_WINDOW` figure from measured reply
+latencies. Exit 0 = every probe OK.
+
+Probe bots that are actually online and whispering (check the raw log or the
+roster first) — a SILENT verdict for a bot that never appears in the log means
+the bot never answered, not that the tunnel lost it. `nc ?` needs mastership
+(A1); to separate a mastership problem from a transport problem, cross-check
+with an unsecured command (A10) that every online bot answers regardless of
+master: `liveprobe.py --cmd "who"`.
 
 ### When we call it stable
 
