@@ -35,7 +35,7 @@ Validated orders are HELD for a whisper-'go' confirm by default (set
 DIRECTOR_CONFIRM=0 to auto-execute immediately). Run daemon with
 python3 -u for live logs.
 """
-import argparse, fcntl, json, os, random, re, socket, subprocess, sys, threading, time, urllib.request
+import argparse, fcntl, json, os, random, re, socket, subprocess, sys, threading, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUDIT = os.path.join(HERE, "audit.log")
@@ -96,6 +96,18 @@ STILL_WORKING = float(os.environ.get("DIRECTOR_STILL_WORKING", "45"))
 #   whisper the master a heads-up so slow is never mistaken for a hang
 STILL_WORKING_MSG = os.environ.get("DIRECTOR_STILL_WORKING_MSG",
                                    "still with you - the model is thinking...")
+MAX_TOKENS = int(os.environ.get("DIRECTOR_MAX_TOKENS", "4096"))
+# ^ runaway BRAKE, not a budget (num_predict). Live evidence 2026-11-10: a
+#   healthy Leo turn is ~4.2k prompt + ~740 thinking + ~200 answer tokens and
+#   lands in well under 30s (trace: stv -> Booty Bay translation, correct
+#   JSON) - but ONE turn spiralled to 16,938 generated tokens at 144 t/s and
+#   ate the whole 120s LLM timeout (journalctl task 31796). 4096 (~28s of
+#   pure generation) lets real turns breathe and stops a spiral cold. 0 = off.
+THINKING = os.environ.get("DIRECTOR_THINKING", "1") not in ("0", "no", "off")
+# ^ gemma4:12b is a thinking model and the reasoning IS the product (owner:
+#   "the whole point of the LLM is the LLM") - thinking stays ON by default.
+#   DIRECTOR_THINKING=0 sends "think": false for deployments that want raw
+#   speed; if the Ollama build rejects the field, llm() retries once without.
 TURN_MAX = float(os.environ.get("DIRECTOR_TURN_MAX", "240"))
 # ^ hard cap on ONE whole turn (roster + LLM + queries + sends), not just the
 #   LLM call: live 2026-11-10 a turn sat silent for ~2 min because the nudge
@@ -758,6 +770,11 @@ def roster_text(bots):
 
 
 def llm(messages):
+    """One Ollama chat call. Output carries a runaway brake (num_predict):
+    live 2026-11-10 one turn spiralled to 16,938 generated tokens at 144 t/s
+    and ate the whole 120s timeout, while a healthy trace is ~940 tokens.
+    Thinking stays ON by default (DIRECTOR_THINKING=0 opts out via
+    "think": false); if the server rejects the field, retry once without it."""
     # keep_alive keeps the model resident on the GPU between whispers -
     # default Ollama unloads after 5m idle, and the reload is most of the
     # 20s first-reply latency. DIRECTOR_KEEP_ALIVE=-1 = never unload.
@@ -766,10 +783,32 @@ def llm(messages):
         keep_alive = int(_ka)          # "-1"/"3600" -> JSON number (Ollama: negative = forever)
     except ValueError:
         keep_alive = _ka               # "60m"/"24h" -> duration string
-    body = json.dumps({"model": MODEL, "messages": messages, "stream": False,
-                       "options": {"temperature": 0.2},
-                       "keep_alive": keep_alive}).encode()
-    req = urllib.request.Request(OLLAMA + "/api/chat", data=body,
+    opts = {"temperature": 0.2}
+    if MAX_TOKENS > 0:
+        opts["num_predict"] = MAX_TOKENS
+    body = {"model": MODEL, "messages": messages, "stream": False,
+            "options": opts, "keep_alive": keep_alive}
+    if not THINKING:
+        body["think"] = False
+    try:
+        return _ollama_chat(body)
+    except urllib.error.HTTPError as e:
+        detail = b""
+        try:
+            detail = e.read()
+        except Exception:
+            pass
+        if "think" in body and b"think" in detail.lower():
+            print("daemon: ollama rejected the think flag (%s) - retrying without it"
+                  % detail[:120])
+            del body["think"]
+            return _ollama_chat(body)
+        raise
+
+
+def _ollama_chat(body):
+    req = urllib.request.Request(OLLAMA + "/api/chat",
+                                 data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
         return json.loads(r.read())["message"]["content"]
