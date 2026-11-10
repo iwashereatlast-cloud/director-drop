@@ -30,6 +30,10 @@ Codes: `unknown_op`, `wrong_service` (with `route_hint`), `bad_params`,
 
 ### `pinfo` — live position of one bot
 - params: `name` (toon name)
+- REACH (A19, source-pinned): the command server's registry is the
+  RANDOM-bot pool — guild-invited RNDBOTs answer; master-owned playerbots
+  answer `invalid guid` (→ offline fallback, db-search is their position
+  source).
 - returns ONLINE: `{name, online: true, guid, map, position: [x, y, z],
   zone, reply}`
 - returns OFFLINE: `{name, online: false, caveat}` — never an error. The

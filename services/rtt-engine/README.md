@@ -85,6 +85,14 @@ Live-confirmed reply shapes (serverpc 2026-11-10, A19): `position,<guid>`
 answers a raw `"<x> <y> <z> <map> <orientation> |<Zone>|"` line for a live
 bot and `invalid guid` for a dead guid.
 
+**Reach (source-pinned, A19):** every 8888 request is forwarded to
+`RandomPlayerbotMgr::HandleRemoteCommand` (PlayerbotCommandServer.cpp:49
+on the live build) — the registry is the RANDOM-bot pool. Guild-invited
+RNDBOTs are served (on the watch list AND in the registry); master-owned
+playerbots answer `invalid guid` even with live AI, and their position
+source is db-search (last flushed, honestly labeled). Extending the reach
+to playerbots is the A22 mod-change proposal (OPEN).
+
 ### Watch-list guard (structural)
 
 Live ops resolve a name → GUID ONLY through the watch list (guild
