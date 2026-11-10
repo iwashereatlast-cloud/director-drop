@@ -52,6 +52,17 @@ Contracts live here so a change is visible to every conversation:
   true delivery receipt — but it needs a mod-playerbots change (new verb
   in `PlayerbotCommandServer.cpp`), so it needs an assumptions-row +
   evidence before anyone builds it. Not agreed yet; nothing depends on it.
+- **Chat log in DB (db-search owns, PROPOSED 2026-11-10):** AC core can log
+  chat natively via the DB appender (`Appender.DB=3,5,0` +
+  `Logger.chat.whisper=4,DB` etc. in worldserver.conf, `logs` table) — no
+  module change. Gives EVERY whisper in the world, both directions:
+  delivery receipts for chat-tunnel sends (Leo's outgoing whispers appear)
+  plus bot-to-bot/other-channel chatter leo.log never sees. Gates: it is a
+  live worldserver config change (assumption row + pasted evidence first,
+  incl. the known encoding issue azerothcore#17519), a world-thread write
+  per chat line (needs retention from day one), and it is POLLED — a
+  db-search catalog query with the staleness caveat, never a replacement
+  for the tunnel's real-time feed. Not enabled yet; nothing depends on it.
 - **rtt-engine interface (rtt-engine owns):** `rtt-engine/1` — unix socket
   (default `/tmp/rtt-engine.sock`), one JSON request per line → one envelope
   per line: `{interface, ok, op, backend, queried_at, latency_ms, result,
