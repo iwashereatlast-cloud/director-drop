@@ -225,8 +225,15 @@ def handle_reply_line(raw_line, t):
         return None
     m = LINE_RE.search(raw_line)
     if not m:
-        STATS["lines_garbled"] += 1
-        return None                  # garbled/foreign line: ignored, never matched
+        # a display line that is NOT chat-shaped. "[System]: <bot>|cff...:
+        # inventory full" is a legitimate non-chat display line (counted as
+        # noise); only lines that START the chat shape but fail to parse
+        # (e.g. "[Gau] [whisper" truncated) are garbled - the A14 red flag.
+        if "] [" in raw_line:
+            STATS["lines_garbled"] += 1
+        else:
+            STATS["lines_noise"] += 1
+        return None                  # never matched either way
     sender, channel, text = m.group(1), m.group(2), m.group(3).strip()
     if not text:
         STATS["lines_garbled"] += 1
