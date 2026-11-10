@@ -153,6 +153,27 @@ CATALOG = {
   },
 }
 
+# ------------------------------------------------------------- redirects ----
+# Deliberately NOT here: names the LLM is likely to reach for that belong to
+# service 3 (rtt-engine, "8.8.8.8") or the live whisper path. Instead of a
+# bare "unknown tool", these answer code=redirect with the owning service and
+# the reason - so the caller learns the routing rule instead of guessing again
+# (or worse, falling back to whisper-probing for something the DB can answer).
+REDIRECTS = {
+  "get_current_position": {
+    "service": "rtt-engine",
+    "reason": "live position is tick-time state; the DB only has the last flushed map/zone (get_character) - use rtt-engine for where a toon is RIGHT NOW"},
+  "get_live_status": {
+    "service": "rtt-engine",
+    "reason": "live HP/mana/combat state never lives in the DB; use rtt-engine"},
+  "get_bot_master": {
+    "service": "rtt-engine",
+    "reason": "who a bot's AI master is right now is live session state (SetMaster runs at bot login); the DB has no mastership row - use rtt-engine / a live nc? probe"},
+  "is_bot_responding": {
+    "service": "rtt-engine",
+    "reason": "session liveness is proven by a live probe (chat-tunnel correlation), never by DB flags (A5: online is boot-reset/async)"},
+}
+
 META_TOOLS = ("catalog",)
 
 class ToolError(Exception):
@@ -230,13 +251,21 @@ def run_tool(adapter, tool, params):
         return {"ok": True, "tool": "catalog",
                 "queried_at": _now(),
                 "caveat": "static catalog - no DB query, no staleness",
-                "rows": [{"name": n, "params": s["params"], "timeout": s["timeout"],
-                          "can": s["can"], "cannot": s["cannot"], "caveat": s["caveat"]}
-                         for n, s in sorted(CATALOG.items())],
-                "row_count": len(CATALOG), "duration_ms": 0}
+                "rows": ([{"name": n, "params": s["params"], "timeout": s["timeout"],
+                           "can": s["can"], "cannot": s["cannot"], "caveat": s["caveat"]}
+                          for n, s in sorted(CATALOG.items())]
+                         + [{"name": n, "redirect_to": r["service"], "reason": r["reason"]}
+                          for n, r in sorted(REDIRECTS.items())]),
+                "row_count": len(CATALOG) + len(REDIRECTS), "duration_ms": 0}
+    if tool in REDIRECTS:
+        r = REDIRECTS[tool]
+        return {"ok": False, "tool": tool, "queried_at": _now(), "code": "redirect",
+                "redirect_to": r["service"], "error": r["reason"],
+                "caveat": "no DB query - this is a routing redirect, not a result"}
     if tool not in CATALOG:
-        raise ToolError("unknown tool %r - allowed: %s" %
-                        (tool, ", ".join(sorted(CATALOG) + list(META_TOOLS))), "unknown_tool")
+        raise ToolError("unknown tool %r - allowed: %s (redirects: %s)" %
+                        (tool, ", ".join(sorted(CATALOG) + list(META_TOOLS)),
+                         ", ".join(sorted(REDIRECTS))), "unknown_tool")
     spec = CATALOG[tool]
     values = spec["fill"](params or {})
     sql = spec["sql"]
@@ -310,8 +339,8 @@ def serve():
         os.chmod(SOCKET_PATH, 0o600)
         where = SOCKET_PATH
     srv.adapter = adapter
-    sys.stderr.write("db-search: serving %d tools on %s (adapter=%s)\n" %
-                     (len(CATALOG) + len(META_TOOLS), where, ADAPTER))
+    sys.stderr.write("db-search: serving %d tools (+%d redirects) on %s (adapter=%s)\n" %
+                     (len(CATALOG) + len(META_TOOLS), len(REDIRECTS), where, ADAPTER))
     srv.serve_forever()
 
 def one_shot(tool, kv):
