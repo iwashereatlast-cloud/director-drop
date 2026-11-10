@@ -469,6 +469,58 @@ def main():
         director.llm = real_llm
         director.STILL_WORKING = 45.0
 
+        print("== 8b. turn watchdog: stage tracking + hard abort (live 2026-11-10) ==")
+        real_say, real_sw, real_tm = director.say, director.STILL_WORKING, director.TURN_MAX
+        said = []
+        director.say = lambda who, what: said.append(what)
+        director.STILL_WORKING, director.TURN_MAX = 0.5, 2.0
+
+        def hang_worker():
+            director._stage("queries")
+            time.sleep(30)          # a stalled stage: past TURN_MAX, must be abandoned
+
+        director._run_turn(hang_worker, "Cecil")
+        check("hard abort fires at TURN_MAX and names the stuck stage",
+              any("stuck at 'queries'" in s for s in said), said)
+        check("progress whispers fired before the abort and name the stage",
+              any(s.startswith("still on it: queries") for s in said)
+              and said.index("I'm stuck at 'queries' (2s) - dropping this one; "
+                             "whisper me again.") >= 0, said)
+        check("stage resets to idle after an aborted turn",
+              director._STAGE["name"] == "idle", director._STAGE)
+
+        # token gate: the abandoned worker's late output is dropped by
+        # say()/send_order() - they call _turn_aborted(), so prove THAT flips
+        # (the test's say monkeypatch bypasses the real gate)
+        gate = []
+
+        def gated_check_worker():
+            director._stage("reply")
+            gate.append(director._turn_aborted())
+            time.sleep(2.5)          # outlasts TURN_MAX, then checks the gate
+            gate.append(director._turn_aborted())
+
+        said.clear()
+        director._run_turn(gated_check_worker, "Cecil")
+        time.sleep(1.5)             # let the abandoned worker take its second sample
+        check("late whispers from an aborted turn are dropped",
+              gate == [False, True], gate)
+        check("a fresh turn is never gated by the previous abort",
+              not director._turn_aborted(), director._ABORTED)
+
+        # a normal turn: no progress whispers, worker's whisper goes through
+        def ok_worker():
+            director._stage("llm")
+            director.say("Cecil", "all done")
+
+        said.clear()
+        director._run_turn(ok_worker, "Cecil")
+        check("healthy turn whispers normally (gate only bites aborted turns)",
+              said == ["all done"], said)
+
+        director.say, director.STILL_WORKING, director.TURN_MAX = \
+            real_say, real_sw, real_tm
+
         print("== 9. presence facts (heartbeat hands, never decides) ==")
         director._svc_state = lambda: "active"
         cfg = director._wd_conf()
