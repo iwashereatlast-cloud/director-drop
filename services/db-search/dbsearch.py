@@ -39,6 +39,62 @@ MYCNF = os.path.expanduser(os.environ.get("DBSEARCH_MYCNF", "~/.my.cnf-director"
 FIXTURE_DB = os.environ.get("DBSEARCH_FIXTURE_DB", os.path.join(HERE, "fixtures", "fixture.db"))
 DEFAULT_TIMEOUT = float(os.environ.get("DBSEARCH_TIMEOUT", "10"))
 
+# ------------------------------------------------------------- toon scope ----
+# Subject-level gate (the function allowlist bounds HOW the LLM can call;
+# this bounds WHO the queries can be about): a toon is queryable only if it
+# is on the watched account family OR a member of the watched guild (the
+# census watch rule - covers Leo and G1 via guild membership, the bots via
+# accounts). Guild queries are limited to the watched guild; account-prefix
+# params must be a prefix of the configured family. Set DBSEARCH_SCOPE=0 to
+# disable (e.g. for one-off admin lookups).
+SCOPE = os.environ.get("DBSEARCH_SCOPE", "1") not in ("0", "no", "off")
+WATCH_GUILD = os.environ.get("DBSEARCH_WATCH_GUILD", "Special FXc")
+ACCOUNT_PREFIX = os.environ.get("DBSEARCH_ACCOUNT_PREFIX", "i_was_here")
+SHELL_ACCOUNT = os.environ.get("DBSEARCH_SHELL_ACCOUNT", "i_was_cmd")
+
+def _sqlq(s):
+    return s.replace("'", "''")
+
+# One fixed SELECT (same single-SELECT audit as the catalog).
+SCOPE_SQL = ("SELECT COUNT(*) FROM acore_characters.characters c "
+             "JOIN acore_auth.account a ON a.id = c.account "
+             "LEFT JOIN acore_characters.guild_member gm ON gm.guid = c.guid "
+             "WHERE c.name = '{toon}' "
+             "AND (a.username LIKE '{prefix}%' "
+             "OR gm.guildid = (SELECT guildid FROM acore_characters.guild "
+             "WHERE name = '{guild}'))")
+
+def assert_scope_toon(adapter, toon):
+    if not SCOPE:
+        return
+    sql = (SCOPE_SQL.replace("{toon}", _sqlq(toon))
+                     .replace("{prefix}", _sqlq(ACCOUNT_PREFIX))
+                     .replace("{guild}", _sqlq(WATCH_GUILD)))
+    if adapter.run(sql, DEFAULT_TIMEOUT).strip() != "1":
+        raise ToolError("toon %r is out of scope: not on the %s%% account family "
+                        "and not a member of the guild '%s' (DBSEARCH_SCOPE=0 "
+                        "disables this gate)" % (toon, ACCOUNT_PREFIX, WATCH_GUILD),
+                        "out_of_scope")
+
+def assert_scope_account(account):
+    if not SCOPE:
+        return
+    a = account.lower()
+    ok = any(p.lower().startswith(a) or a.startswith(p.lower())
+             for p in (ACCOUNT_PREFIX, SHELL_ACCOUNT))
+    if not ok:
+        raise ToolError("account prefix %r is out of scope: must be within the "
+                        "configured family '%s' or the shell account '%s'"
+                        % (account, ACCOUNT_PREFIX, SHELL_ACCOUNT),
+                        "out_of_scope")
+
+def assert_scope_guild(guild):
+    if not SCOPE:
+        return
+    if guild.lower() != WATCH_GUILD.lower():
+        raise ToolError("guild %r is out of scope: only the watched guild '%s' "
+                        "is queryable" % (guild, WATCH_GUILD), "out_of_scope")
+
 # ---------------------------------------------------------------- params ----
 # Every interpolable param is allowlisted per tool AND regex-validated here;
 # there is no code path that puts client text into SQL unvalidated.
@@ -445,9 +501,8 @@ def make_adapter():
 SELECT_ONLY_RE = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
 
 def assert_readonly_catalog():
-    """Every registered statement is exactly one SELECT - checked at startup."""
-    for name, spec in CATALOG.items():
-        sql = spec["sql"]
+    """Every registered statement (incl. the scope gate) is one SELECT."""
+    for name, sql in [(n, s["sql"]) for n, s in CATALOG.items()] + [("scope_gate", SCOPE_SQL)]:
         if not SELECT_ONLY_RE.match(sql) or ";" in sql[7:]:
             raise SystemExit("db-search: catalog entry %s is not a single SELECT" % name)
 
@@ -474,6 +529,13 @@ def run_tool(adapter, tool, params):
                          ", ".join(sorted(REDIRECTS))), "unknown_tool")
     spec = CATALOG[tool]
     values = spec["fill"](params or {})
+    if "toon" in values:
+        assert_scope_toon(adapter, values["toon"])
+    if "guild" in values:
+        assert_scope_guild(values["guild"])
+    for key in ("account", "account_like"):
+        if key in values:
+            assert_scope_account(values[key].rstrip("%"))
     sql = spec["sql"]
     for k, v in values.items():
         sql = sql.replace("{%s}" % k, v)
