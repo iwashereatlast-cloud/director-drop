@@ -35,14 +35,23 @@ if ! [ -S "$SOCK" ]; then
   [ -S "$SOCK" ] || { fail "service did not come up (see live-check.log)"; exit 1; }
 fi
 
-# pick bots: args, else up to 3 online toons from the RO census
+# pick bots: args, else up to 3 online watched toons from the RO census
+# (same watch list as director.py census: bot accounts by username LIKE, plus
+# the watched guild - characters.account is a numeric ID, the name lives in
+# acore_auth.account)
 if [ $# -gt 0 ]; then
   BOTS="$*"
 else
   BOTS=$(mysql --defaults-file="$MYCNF" -N -B -e \
-    "SELECT name FROM acore_characters.characters WHERE online=1 AND account LIKE 'i_was_here%' LIMIT 3" \
+    "SELECT c.name FROM acore_characters.characters c "
+    "JOIN acore_auth.account a ON a.id=c.account "
+    "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
+    "WHERE c.online=1 AND (a.username LIKE 'i_was_here%' "
+    "OR gm.guildid IN (SELECT guildid FROM acore_characters.guild "
+    "WHERE name='Special FXc')) LIMIT 3" \
     2>/dev/null | tr '\n' ' ')
-  [ -n "$BOTS" ] || { fail "no online bots found (census empty - pass bot names as args)"; exit 1; }
+  [ -n "$BOTS" ] || { fail "no online watched toons found (census empty "
+    "- is the DB reachable via $MYCNF? or pass bot names as args)"; exit 1; }
   say "auto-picked online bots: $BOTS"
 fi
 
