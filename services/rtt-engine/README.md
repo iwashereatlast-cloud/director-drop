@@ -77,9 +77,22 @@ the DB already knows.
 
 The command server answers **online bots only**. An offline bot, a
 non-bot toon, or a name with no GUID resolves to
-`{"online": false, "caveat": "... offline truth is db-search"}` — never an
-error, and never a guess: db-search owns the offline truth (logout flushes
-the final position to `characters`).
+`{"online": false, "caveat": "..."}` — never an error, and never a guess:
+db-search owns the offline truth (logout flushes the final position to
+`characters`).
+
+Live-confirmed reply shapes (serverpc 2026-11-10, A19): `position,<guid>`
+answers a raw `"<x> <y> <z> <map> <orientation> |<Zone>|"` line for a live
+bot and `invalid guid` for a dead guid.
+
+### Watch-list guard (structural)
+
+Live ops resolve a name → GUID ONLY through the watch list (guild
+`Special FXc` — the main filter, `RTT_WATCH_GUILD` — plus bot-account
+toons, `RTT_ACCOUNT_LIKE`, mirroring director.py's census). Names outside
+the roster answer `{online: false, caveat: "not on the watch list ..."}` and
+are never probed — a caller cannot sweep every toon on the server (live
+finding 2026-11-10: an ungated lookup did exactly that).
 
 ## Backend: pbcmd
 

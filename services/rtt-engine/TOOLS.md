@@ -33,8 +33,9 @@ Codes: `unknown_op`, `wrong_service` (with `route_hint`), `bad_params`,
 - returns ONLINE: `{name, online: true, guid, map, position: [x, y, z],
   zone, reply}`
 - returns OFFLINE: `{name, online: false, caveat}` — never an error. The
-  caveat names db-search as the offline truth (logout flushes the final
-  position to `characters`).
+  caveat names why (`invalid guid` = not a live bot session) and that
+  db-search is the offline truth (logout flushes the final position to
+  `characters`).
 - does NOT answer: anything about an offline toon (db-search
   `get_character` has the last flushed map/zone); gear, quests, money
   (db-search).
@@ -67,3 +68,7 @@ Codes: `unknown_op`, `wrong_service` (with `route_hint`), `bad_params`,
 3. Never whisper-probe a bot to learn something this service or db-search
    can answer (the routing rule).
 4. `backend` in the envelope is display metadata; never branch on it.
+5. The service only serves the WATCH LIST — members of the guild
+   (`Special FXc`) plus bot-account toons. A name outside it answers
+   `{online: false, caveat: "not on the watch list ..."}` and is never
+   probed. Never try to live-query toons outside the roster.

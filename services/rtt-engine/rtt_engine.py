@@ -59,6 +59,12 @@ GUID_FIXTURE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "fixtures", "guid-fixture.json"))
 GUID_TTL = float(os.environ.get("RTT_GUID_TTL", "300"))  # cache seconds
+# The watch list (mirrors director.py's census): every live op resolves a
+# name ONLY if the toon is on it. The GUILD is the main filter (add an alt
+# bot to the guild and it is watched automatically); the bot-account arm
+# keeps ritual bots that are not guilded (e.g. Golbez).
+WATCH_GUILD = os.environ.get("RTT_WATCH_GUILD", "Special FXc")
+ACCOUNT_LIKE = os.environ.get("RTT_ACCOUNT_LIKE", "i_was_here%")
 
 # The routing rule, made structural. DB-answerable asks are refused with a
 # route_hint to db-search (names mirror director.py's DB_QUERIES catalog);
@@ -114,11 +120,22 @@ class PbCmdBackend:
     # ---- name -> GUID (read-only, cached) ----
 
     def _guid_from_db(self, name):
+        """GUID for a name ONLY if the toon is on the watch list (guild
+        members + bot accounts - director.py's census shape). Non-watched
+        names answer None, so the service never probes toons outside the
+        roster (live finding 2026-11-10: an ungated lookup let a caller
+        iterate every toon on the server)."""
         try:
             out = subprocess.run(
                 ["mysql", "--defaults-file=" + MYCNF, "-N", "-B", "-e",
-                 "SELECT guid FROM acore_characters.characters "
-                 "WHERE name='%s'" % name.replace("'", "")],
+                 "SELECT c.guid FROM acore_characters.characters c "
+                 "JOIN acore_auth.account a ON a.id=c.account "
+                 "LEFT JOIN acore_characters.guild_member gm ON gm.guid=c.guid "
+                 "WHERE c.name='%s' AND (a.username LIKE '%s' "
+                 "OR gm.guildid IN (SELECT guildid FROM acore_characters.guild "
+                 "WHERE name='%s'))"
+                 % (name.replace("'", ""), ACCOUNT_LIKE,
+                    WATCH_GUILD.replace("'", ""))],
                 capture_output=True, text=True, timeout=TIMEOUT)
             row = (out.stdout or "").strip().splitlines()
             return int(row[0]) if row and row[0].isdigit() else None
@@ -224,9 +241,35 @@ def op_ping(backend):
                                       "message": detail}}
 
 
-POS_RE = re.compile(
-    r"map\s+(\d+)\s+at\s+(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)"
-    r"(?:\s+in\s+(.+?))?\s*$", re.I)
+# LIVE-CONFIRMED reply shape (serverpc 2026-11-10, A19): the command server
+# answers 'position,<guid>' with a RAW line
+#   "<x> <y> <z> <map> <orientation> |<Zone>|"
+# (e.g. "-7391.83 -3013.58 10.3561 1 0.557952 |Tanaris|") and 'invalid guid'
+# for a guid that is not a live bot session.
+RAWPOS_RE = re.compile(
+    r"(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(\d+)\s+(-?[\d.]+)"
+    r"\s*\|([^|]*)\|")
+INVALID_GUID = "invalid guid"
+
+
+def _offline(name, text):
+    """Command-server reply that is not a live position: offline / not a
+    live bot session. Offline truth is db-search."""
+    why = ("invalid guid on the command server (not a live bot session)"
+           if text.strip().lower() == INVALID_GUID else
+           "not answering on the command server (offline or not an online "
+           "bot)")
+    return {"ok": True, "result": {"name": name, "online": False,
+            "reply": text,
+            "caveat": "%s - offline truth is db-search" % why}, "error": None}
+
+
+def _not_watched(name):
+    return {"ok": True, "result": {
+        "name": name, "online": False,
+        "caveat": "%r is not on the watch list (guild '%s' or a bot "
+                  "account) - the service never probes toons outside the "
+                  "roster" % (name, WATCH_GUILD)}, "error": None}
 
 
 def op_pinfo(backend, name):
@@ -237,33 +280,26 @@ def op_pinfo(backend, name):
                           "message": "param 'name' must be a toon name"}}
     guid = backend.guid(name)
     if guid is None:
-        return {"ok": True, "result": {
-            "name": name, "online": False,
-            "caveat": "no GUID for %r in the characters DB - offline truth "
-                      "is db-search" % name}, "error": None}
+        return _not_watched(name)
     ok, text = backend.ask("position", guid)
     if not ok:
         return {"ok": False, "result": None,
                 "error": {"code": ERR_BACKEND_DOWN, "message": text}}
-    m = POS_RE.search(text)
+    m = RAWPOS_RE.search(text)
     if not m:
-        # command server answered but the bot is not live (offline / not a
-        # bot / empty reply) - offline truth is db-search
-        return {"ok": True, "result": {
-            "name": name, "online": False, "reply": text,
-            "caveat": "not answering on the command server (offline or not "
-                      "an online bot) - offline truth is db-search"},
-            "error": None}
-    zone = m.group(5).strip() if m.group(5) else None
+        return _offline(name, text)
     return {"ok": True, "result": {
         "name": name, "online": True, "guid": guid,
-        "map": int(m.group(1)),
-        "position": [float(m.group(i)) for i in (2, 3, 4)],
-        "zone": zone, "reply": text}, "error": None}
+        "map": int(m.group(4)),
+        "position": [float(m.group(i)) for i in (1, 2, 3)],
+        "zone": m.group(6).strip() or None, "reply": text}, "error": None}
 
 
 HP_RE = re.compile(r"(\d+)\s*%", re.I)
-STATE_RE = re.compile(r"status\s*\(live\)\s*:\s*([^;]+)", re.I)
+# NOTE: the 'status' verb's exact reply shape is NOT yet live-sampled (A19);
+# parsing is deliberately tolerant - raw position via RAWPOS_RE, HP from any
+# percent token, state from a leading non-numeric word.
+STATE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z -]{0,30}?)\s*(?:;|\||\d|-)", re.I)
 
 
 def op_status(backend, name):
@@ -276,31 +312,23 @@ def op_status(backend, name):
                           "message": "param 'name' must be a toon name"}}
     guid = backend.guid(name)
     if guid is None:
-        return {"ok": True, "result": {
-            "name": name, "online": False,
-            "caveat": "no GUID for %r in the characters DB - offline truth "
-                      "is db-search" % name}, "error": None}
+        return _not_watched(name)
     ok, text = backend.ask("status", guid)
     if not ok:
         return {"ok": False, "result": None,
                 "error": {"code": ERR_BACKEND_DOWN, "message": text}}
-    m = POS_RE.search(text)
+    m = RAWPOS_RE.search(text)
     if not m:
-        return {"ok": True, "result": {
-            "name": name, "online": False, "reply": text,
-            "caveat": "not answering on the command server (offline or not "
-                      "an online bot) - offline truth is db-search"},
-            "error": None}
+        return _offline(name, text)
     ms = STATE_RE.search(text)
     mh = HP_RE.search(text)
-    zone = m.group(5).strip() if m.group(5) else None
     return {"ok": True, "result": {
         "name": name, "online": True, "guid": guid,
         "state": ms.group(1).strip() if ms else None,
         "hp_pct": int(mh.group(1)) if mh else None,
-        "map": int(m.group(1)),
-        "position": [float(m.group(i)) for i in (2, 3, 4)],
-        "zone": zone, "reply": text}, "error": None}
+        "map": int(m.group(4)),
+        "position": [float(m.group(i)) for i in (1, 2, 3)],
+        "zone": m.group(6).strip() or None, "reply": text}, "error": None}
 
 
 OPS = {"catalog": op_catalog, "ping": op_ping, "pinfo": op_pinfo,
