@@ -19,7 +19,7 @@ ExecStart=/usr/bin/python3 %h/downloads/director-drop/services/web-gui/web_gui.p
 #   Then firewall 8766 to the trusted segment. NOTE: no TLS - the login crosses
 #   the LAN in cleartext; the query browser executes real DB reads.
 Environment=WEBGUI_PORT=8766
-Environment=WEBGUI_CENSUS=i_was_here
+Environment=WEBGUI_CENSUS=acct_
 Restart=on-failure
 RestartSec=5
 

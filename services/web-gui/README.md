@@ -74,7 +74,7 @@ default; the wildcard `0.0.0.0` is ALWAYS refused), `WEB_GUI_USER`
 `WEB_GUI_AUTH` (auto | on | off — `off` is refused on non-loopback
 binds), `WEBGUI_TUNNEL` (http://127.0.0.1:8765), `WEBGUI_DBSEARCH_SOCK`
 (/tmp/db-search.sock), `WEBGUI_RTT_SOCK` (/tmp/rtt-engine.sock),
-`WEBGUI_CENSUS` (i_was_here — account prefix for the bot table),
+`WEBGUI_CENSUS` (acct_ — account prefix for the bot table),
 `WEBGUI_TIMEOUT` (15 s per backend call).
 
 ## Run

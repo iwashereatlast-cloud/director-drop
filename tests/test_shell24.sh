@@ -31,7 +31,7 @@ check "header states no-mutating contract" "$(grep -c 'NEVER sends a mutating ga
 check "assumptions.md exists" "$([ -s "$REPO/docs/assumptions.md" ] && echo ok)" "ok"
 check "assumptions.md has 18 rows" "$(grep -c '^| A' "$REPO/docs/assumptions.md")" "18"
 check "assumptions.md evidence rule" "$(grep -c 'only. ticket for changing behavior' "$REPO/docs/assumptions.md")" "1"
-check "assumptions.md A13 pre-confirmed" "$(grep -c 'i_was_cmd gmlevel=3 RealmID=-1' "$REPO/docs/assumptions.md")" "1"
+check "assumptions.md A13 pre-confirmed" "$(grep -c 'shellacct gmlevel=3 RealmID=-1' "$REPO/docs/assumptions.md")" "1"
 check "outline.md exists" "$([ -s "$REPO/docs/outline.md" ] && echo ok)" "ok"
 check "outline.md proof protocol" "$(grep -c 'Proof protocol' "$REPO/docs/outline.md")" "1"
 check "functions doc lists doctor" "$(grep -c 'botcmd doctor' "$REPO/docs/botcmd-functions.md")" "2"

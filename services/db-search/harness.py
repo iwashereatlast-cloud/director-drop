@@ -56,7 +56,7 @@ def main():
         adapter = SqliteAdapter(os.path.join(tmp, "fixture_acore_characters.db"))
 
         print("== 1. catalog answers against the fixture ==")
-        r = handle(adapter, {"tool": "get_online_census", "params": {"account_like": "i_was_here"}})
+        r = handle(adapter, {"tool": "get_online_census", "params": {"account_like": "acct_"}})
         check("census envelope (queried_at + caveat)", envelope_ok(r, "get_online_census"), json.dumps(r)[:200])
         names = {row[0] for row in r["rows"]}
         check("census: every bot-account toon present",
@@ -80,16 +80,16 @@ def main():
 
         r = handle(adapter, {"tool": "get_character", "params": {"toon": "Locke"}})
         check("character envelope", envelope_ok(r, "get_character"))
-        check("character: Locke row", r["rows"] and r["rows"][0][1] == "i_was_here4th"
+        check("character: Locke row", r["rows"] and r["rows"][0][1] == "acct_bot4"
               and r["rows"][0][2] == "32", r["rows"])
         check("character: caveat warns flushed fields lag",
               "flush" in r["caveat"].lower(), r["caveat"])
 
-        r = handle(adapter, {"tool": "get_account_links", "params": {"account": "i_was_cmd"}})
+        r = handle(adapter, {"tool": "get_account_links", "params": {"account": "shellacct"}})
         check("links envelope", envelope_ok(r, "get_account_links"))
         linked = {row[1] for row in r["rows"]}
         check("links: all four ritual accounts linked (5th included, live 2026-11-10)",
-              linked == {"i_was_here2nd", "i_was_here3rd", "i_was_here4th", "i_was_here5th"}, linked)
+              linked == {"acct_bot2", "acct_bot3", "acct_bot4", "acct_bot5"}, linked)
 
         r = handle(adapter, {"tool": "get_quest_log", "params": {"toon": "Locke"}})
         check("quest envelope", envelope_ok(r, "get_quest_log"))
@@ -143,7 +143,7 @@ def main():
         con = sqlite3.connect(os.path.join(tmp, "fixture_acore_characters.db"))
         before = con.execute("SELECT COUNT(*) FROM characters").fetchone()[0]
         con.close()
-        handle(adapter, {"tool": "get_online_census", "params": {"account_like": "i_was_here"}})
+        handle(adapter, {"tool": "get_online_census", "params": {"account_like": "acct_"}})
         con = sqlite3.connect(os.path.join(tmp, "fixture_acore_characters.db"))
         after = con.execute("SELECT COUNT(*) FROM characters").fetchone()[0]
         con.close()

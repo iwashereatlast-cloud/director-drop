@@ -52,7 +52,7 @@ botcmd - Chazbot control
   botcmd roster link                  list account links (RO DB acore_playerbots.playerbots_account_links) + ritual-account link check
   botcmd roster link check <ACCT>     is <ACCT> linked to the shell account? (if not, addaccount refuses its toons - PlayerbotMgr.cpp:110-116,747)
   botcmd roster link <ACCT> <KEY>     from Leo: .playerbots account link <ACCT> <KEY> (KEY must be setKey'd on <ACCT> first; SHA-256)
-  botcmd roster link setkey <KEY>     setKey on Leo's own account (lets other accounts link into I_WAS_CMD)
+  botcmd roster link setkey <KEY>     setKey on Leo's own account (lets other accounts link into SHELLACCT)
   botcmd roster link unlink <ACCT>    remove the link (both directions)
   botcmd go <toon> <zone...>          walk one bot to a zone now (go travel; G1 refused)
   botcmd states show                  state layout: conf + online + live

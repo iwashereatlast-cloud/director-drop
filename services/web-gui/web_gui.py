@@ -35,7 +35,7 @@ Env knobs (all optional):
   WEBGUI_TUNNEL         http://127.0.0.1:8765     (chat-tunnel base URL)
   WEBGUI_DBSEARCH_SOCK  /tmp/db-search.sock       (db-search unix socket)
   WEBGUI_RTT_SOCK       /tmp/rtt-engine.sock     (rtt-engine unix socket)
-  WEBGUI_CENSUS         i_was_here  (account prefix for the bot status table)
+  WEBGUI_CENSUS         acct_  (account prefix for the bot status table)
   WEBGUI_TIMEOUT        15          (seconds, per backend call)
 
 Run: python3 web_gui.py serve
@@ -60,7 +60,7 @@ BIND = (os.environ.get("WEB_GUI_BIND") or os.environ.get("WEBGUI_ADDR")
 TUNNEL = os.environ.get("WEBGUI_TUNNEL", "http://127.0.0.1:8765").rstrip("/")
 DB_SOCK = os.environ.get("WEBGUI_DBSEARCH_SOCK", "/tmp/db-search.sock")
 RTT_SOCK = os.environ.get("WEBGUI_RTT_SOCK", "/tmp/rtt-engine.sock")
-CENSUS = os.environ.get("WEBGUI_CENSUS", "i_was_here")
+CENSUS = os.environ.get("WEBGUI_CENSUS", "acct_")
 TIMEOUT = float(os.environ.get("WEBGUI_TIMEOUT", "15"))
 
 AUTH_USER = os.environ.get("WEB_GUI_USER", "director")

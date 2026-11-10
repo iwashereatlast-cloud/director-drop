@@ -10,7 +10,7 @@ session ("Director Thread" of the LLM controller) should read this file +
 
 On the private era server (AzerothCore + mod-playerbots @ `405f8119`, AC @
 `e7e2e288e`), command a roster of guild bots through one GM toon (**Leo**, shell
-account `i_was_cmd`) — by in-game chat (LLM director, `director.py`) or by shell
+account `shellacct`) — by in-game chat (LLM director, `director.py`) or by shell
 (`botcmd`) — and nothing unsafe can happen by accident.
 
 ### Invariants (rails)
@@ -94,9 +94,9 @@ botcmd states verify Ayla               # GREEN = one-row table, verdict not NO 
   → `botcmd states verify` (expect all OK) → `botcmd raid clear` if a group formed.
 - Open: Aeri*/Aerith spelling unverified —
   `SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';`
-- Open: link I_WAS_HERE5TH — on that account `.playerbots account setKey <KEY>`,
-  then `botcmd roster link I_WAS_HERE5TH <KEY>`; check `botcmd roster link check I_WAS_HERE5TH`.
-- Confirmed: `i_was_cmd` gmlevel=3, RealmID=-1 (= all realms, NOT a bug) — assumptions A13.
+- Open: link ACCT_BOT5 — on that account `.playerbots account setKey <KEY>`,
+  then `botcmd roster link ACCT_BOT5 <KEY>`; check `botcmd roster link check ACCT_BOT5`.
+- Confirmed: `shellacct` gmlevel=3, RealmID=-1 (= all realms, NOT a bug) — assumptions A13.
 - Known gap (evidence-gated candidate fix): presets toggle only what they name;
   default strategies (pvp, duel, pull, force, tank assist — seen in a screenshot of
   Ayla's `nc ?` reply) stay ON. Strip them in presets/conf only after

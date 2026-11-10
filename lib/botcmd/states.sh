@@ -778,7 +778,7 @@ states_verify() {  # args: [bot|all] [force] [remaster]
       if [ -n "$force" ] && [ "${t_on[$n]:-}" != "1" ]; then
         verdict="db:offline - no reply expected unless the toon is actually online as a bot"
       else
-        verdict="NO REPLY [no-ai] bot AI off / not added / shell down - try: botcmd roster ritual; if it answered whispers before it is a master/level issue: botcmd roster fix (or gmlevel 3 on I_WAS_CMD)"
+        verdict="NO REPLY [no-ai] bot AI off / not added / shell down - try: botcmd roster ritual; if it answered whispers before it is a master/level issue: botcmd roster fix (or gmlevel 3 on SHELLACCT)"
       fi
     else
       case "$conf" in
@@ -819,7 +819,7 @@ states_verify() {  # args: [bot|all] [force] [remaster]
   warn "           bot's MASTER (PlayerbotAI.cpp:3170) - a 'Strategies:' reply also proves Leo is that bot's master."
   warn "tags: [no-ai] no bot AI attached (add/addaccount refuse online toons - PlayerbotMgr.cpp:733; bot remove works online - PlayerbotMgr.cpp:756); a bot that"
   warn "      answered whispers before but is silent now = master/level issue (PlayerbotSecurity.cpp LevelFor; silent erase PlayerbotAI.cpp:642-647; deny suppressed :190)"
-  warn "fix: botcmd roster fix to re-master via ritual, and/or gmlevel 3 on I_WAS_CMD (CanBeGameMaster -> ALLOW_ALL, PlayerbotSecurity.cpp:31)"
+  warn "fix: botcmd roster fix to re-master via ritual, and/or gmlevel 3 on SHELLACCT (CanBeGameMaster -> ALLOW_ALL, PlayerbotSecurity.cpp:31)"
   if [ "${BOTCMD_VERIFY_DEBUG:-0}" = "1" ]; then
     echo
     warn "DEBUG - all new '[name] [whisper]:' lines since the probe started:"

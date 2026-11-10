@@ -36,7 +36,7 @@ off-hours.
    ln -sf $HOME/downloads/director-drop/leo/leo-watchdog.service $HOME/.config/systemd/user/leo-watchdog.service
    ln -sf $HOME/downloads/director-drop/leo/leo-watchdog.timer $HOME/.config/systemd/user/leo-watchdog.timer
 3. systemctl --user daemon-reload
-4. sudo loginctl enable-linger iwashere      # user units survive boot without a login
+4. sudo loginctl enable-linger <user>      # user units survive boot without a login
 5. systemctl --user enable --now leo-watchdog.timer
 
 Do NOT enable leo.service itself - the daemon's presence manager owns when
@@ -55,10 +55,10 @@ OFF_H=22                                        # server-local hour to go offlin
 GROUP="Cecil Rydia Shadow Vivi Aeris Aerith"  # space-separated toon names (both Aeri* spellings until verified in the DB: SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%')
 AUTORITUAL=1                                    # 1 = ritual after Leo logs in
 AUTORITUAL_CLEAR=1                              # 1 = on the next tick after the auto-ritual, /w 'leave' every non-G1 member of Leo's auto-formed group (the mod auto-joins bots on login - see "Auto raid" below)
-RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
+RITUAL_ACCOUNTS="ACCT_BOT2 ACCT_BOT3 ACCT_BOT4 ACCT_BOT5"
 RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUAL_ACCOUNTS account (covered bots are skipped automatically)
 # NEVER add the account you hand-play on to RITUAL_ACCOUNTS - hand-play toons
-# are never bots. (Default master account is I_WAS_HERE1ST - see 'botcmd master'.)
+# are never bots. (Default master account is ACCT_MASTER - see 'botcmd master'.)
 
 ## Receipts
 
@@ -96,8 +96,8 @@ RITUAL_BOTS="Golbez"                              # only for bots NOT on a RITUA
   the console end-of-life pass, docs/services-roadmap.md); log it out by hand.
   `botcmd roster fix` = down all -> ritual -> verify, one command.
 - director.py daemon (Leo's brain) runs as leo-director.service (see below).
-- Bot-sender gate (2026-11-05 fix): senders on bot accounts (i_was_here% except
-  the master account) or on Leo's shell account (i_was_cmd) are dropped by a
+- Bot-sender gate (2026-11-05 fix): senders on bot accounts (acct_% except
+  the master account) or on Leo's shell account (shellacct) are dropped by a
   read-only DB account check, and bot master-report lines ("Selling |c...",
   "=== ... ===") are dropped on sight. Only DIRECTOR_HANDPLAY toons on the
   master account plus guild members on non-bot accounts are authed. This does
@@ -165,9 +165,9 @@ Removing someone from the raid Leo leads:
 - HUMAN member: the same order is sent as the server command
   `.group remove <name>` from Leo's own session (FIFO line). '.group remove'
   is Console::No in AzerothCore, so no remote path can run it. Leo's
-  account (I_WAS_CMD) needs the RBAC perm
+  account (SHELLACCT) needs the RBAC perm
   rbac_perm_command_group_remove - gmlevel 3 (Administrator) has all perms:
-      mysql> SELECT id FROM acore_auth.account WHERE username='I_WAS_CMD';
+      mysql> SELECT id FROM acore_auth.account WHERE username='SHELLACCT';
       mysql> UPDATE acore_auth.account_access SET gmlevel=3 WHERE id=<id> AND RealmID=-1;
       -- or if no row exists:
       mysql> INSERT INTO acore_auth.account_access (id, gmlevel, RealmID) VALUES (<id>, 3, -1);
@@ -227,7 +227,7 @@ stays with `botcmd roster fix`. Manual teardown stays `botcmd raid clear`.
 
 ## Master account rotation (botcmd master)
 
-Which i_was_here* account is the HUMAN account is a runtime setting. One-time
+Which acct_* account is the HUMAN account is a runtime setting. One-time
 install of the env plumbing:
 
     cp leo/director.env.example ~/.director.env && chmod 600 ~/.director.env
@@ -235,16 +235,16 @@ install of the env plumbing:
     cp leo/leo-director.service.d/override.conf ~/.config/systemd/user/leo-director.service.d/
     systemctl --user daemon-reload && systemctl --user restart leo-director
 
-Then rotate with:  botcmd -> 9. Master   (or one-shot: `botcmd master set I_WAS_HERE5TH`)
+Then rotate with:  botcmd -> 9. Master   (or one-shot: `botcmd master set ACCT_BOT5`)
 
 It shows a table like:
 
-     current: I_WAS_HERE1ST   (env file: /home/iwashere/.director.env)
-      1. [X] I_WAS_HERE1ST    toons: Aeris Cecil* Rydia Shadow* Vivi
-      2. [ ] I_WAS_HERE2ND    toons: ...
-      3. [ ] I_WAS_HERE3RD    toons: ...
-      4. [ ] I_WAS_HERE4TH    toons: ...
-      5. [ ] I_WAS_HERE5TH    toons: Golbez*
+     current: ACCT_MASTER   (env file: /home/<user>/.director.env)
+      1. [X] ACCT_MASTER    toons: Aeris Cecil* Rydia Shadow* Vivi
+      2. [ ] ACCT_BOT2    toons: ...
+      3. [ ] ACCT_BOT3    toons: ...
+      4. [ ] ACCT_BOT4    toons: ...
+      5. [ ] ACCT_BOT5    toons: Golbez*
 
 Selecting one writes DIRECTOR_MASTER_ACCOUNT + DIRECTOR_HUMANS +
 DIRECTOR_HANDPLAY (auto-filled from that account's toons, minus
@@ -252,23 +252,23 @@ BOTCMD_BOT_TOONS in ~/.botcmd.conf) into ~/.director.env, mirrors them into
 ~/.botcmd.conf, and restarts leo-director. So the "never command / never
 bot-add the group I'm hand-playing" rule follows the rotation automatically.
 
-RULE: only select a HUMAN-ONLY account. Every other i_was_here% account is a
+RULE: only select a HUMAN-ONLY account. Every other acct_% account is a
 bot account - the daemon drops its toons as senders (DB account check,
 no console credentials) and never auths them.
 
-## Moving a toon to another account (e.g. Golbez -> I_WAS_HERE5TH)
+## Moving a toon to another account (e.g. Golbez -> ACCT_BOT5)
 
 One-time admin steps - YOU run these against the DB; the tools stay read-only:
 
     # 1. create the account (worldserver console, or first client login):
-    .account create I_WAS_HERE5TH <password>
+    .account create ACCT_BOT5 <password>
     # 2. make sure the toon is OFFLINE.
     # 3. point the character at the new account:
-    mysql> SELECT id FROM acore_auth.account WHERE username='I_WAS_HERE5TH';
+    mysql> SELECT id FROM acore_auth.account WHERE username='ACCT_BOT5';
     mysql> UPDATE acore_characters.characters SET account=<id> WHERE name='Golbez';
-    # 4. I_WAS_HERE5TH is already in RITUAL_ACCOUNTS defaults now; if you keep
+    # 4. ACCT_BOT5 is already in RITUAL_ACCOUNTS defaults now; if you keep
     #    a ~/.leo-watchdog.conf, add it there too. Verify:
-    python3 director.py census        # Golbez listed under I_WAS_HERE5TH
+    python3 director.py census        # Golbez listed under ACCT_BOT5
 
 ## Account linking (trusted accounts) - required before addaccount of another account
 - Cross-account altbots need a LINK: `add`/`addaccount` of a toon on ANOTHER
@@ -285,7 +285,7 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
 - In-game commands, SEC_PLAYER + Console::No (PlayerbotCommandScript.cpp:29-32),
   run from ANY toon in a client:
     .playerbots account setKey <key>           # on a toon of the account TO BE linked
-    .playerbots account link <ACCOUNT> <key>   # from Leo (I_WAS_CMD): links ACCOUNT in
+    .playerbots account link <ACCOUNT> <key>   # from Leo (SHELLACCT): links ACCOUNT in
     .playerbots account linkedAccounts         # list (system message to the issuer)
     .playerbots account unlink <ACCOUNT>       # removes both directions (:2011-2020)
 - botcmd wrappers (queued to Leo's FIFO): `botcmd roster link` (list),
@@ -293,11 +293,11 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   `roster link unlink <ACCT>` (Roster menu -> 8). The ritual warns per
   RITUAL_ACCOUNT when it is not linked to the shell account. Read-only DB view:
   acore_playerbots.playerbots_account_links.
-- Typical fix for "Golbez (on I_WAS_HERE5TH) never gets bot AI":
-    1) client-login any I_WAS_HERE5TH toon -> `.playerbots account setKey mykey` -> logout
-    2) `botcmd roster link I_WAS_HERE5TH mykey`      (queued to Leo)
-    3) `botcmd roster link check I_WAS_HERE5TH`      -> IS linked
-    4) `botcmd roster ritual`                        -> addaccount I_WAS_HERE5TH attaches AI
+- Typical fix for "Golbez (on ACCT_BOT5) never gets bot AI":
+    1) client-login any ACCT_BOT5 toon -> `.playerbots account setKey mykey` -> logout
+    2) `botcmd roster link ACCT_BOT5 mykey`      (queued to Leo)
+    3) `botcmd roster link check ACCT_BOT5`      -> IS linked
+    4) `botcmd roster ritual`                        -> addaccount ACCT_BOT5 attaches AI
 
 ## botcmd UI: states picker, zone travel, blank-Enter-back
 
@@ -405,7 +405,7 @@ One-time admin steps - YOU run these against the DB; the tools stay read-only:
   gives Leo ALLOW_ALL only as the bot's master; under-level queued commands
   are erased silently (PlayerbotAI.cpp:642-647) and bot senders get no deny
   whisper (PlayerbotSecurity.cpp:190). Fix: `botcmd roster fix` to re-master
-  via the ritual, and/or grant gmlevel 3 on `I_WAS_CMD` (CanBeGameMaster ->
+  via the ritual, and/or grant gmlevel 3 on `SHELLACCT` (CanBeGameMaster ->
   ALLOW_ALL from every bot, PlayerbotSecurity.cpp:31). Master churn:
   Leo's logout nulls his bots' master (RandomPlayerbotMgr.cpp:2677) and a
   human logging into their group takes master (RandomPlayerbotMgr.cpp:2748).

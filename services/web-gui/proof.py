@@ -194,7 +194,7 @@ def main():
                      WEBGUI_TUNNEL="http://127.0.0.1:%d" % tunnel_port,
                      WEBGUI_DBSEARCH_SOCK=db_sock,
                      WEBGUI_RTT_SOCK=rtt_sock,
-                     WEBGUI_CENSUS="i_was_here"),
+                     WEBGUI_CENSUS="acct_"),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         check("web-gui came up", wait_port(port))
 

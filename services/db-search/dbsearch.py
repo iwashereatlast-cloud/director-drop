@@ -68,7 +68,7 @@ CATALOG = {
             "LEFT JOIN acore_characters.guild_member gm ON gm.guid = c.guid "
             "WHERE a.username LIKE '{account_like}' "
             "ORDER BY a.username, c.name"),
-    "params": {"account_like": "required - account name prefix, e.g. i_was_here% is not allowed; pass the bare prefix (e.g. i_was_here)"},
+    "params": {"account_like": "required - account name prefix, e.g. acct_% is not allowed; pass the bare prefix (e.g. acct_)"},
     "timeout": 10,
     "can": "which toons exist on a set of accounts, their level/class/map/zone, the DB `online` flag, and guild membership",
     "cannot": "whether a bot actually has AI / a master right now (live nc? probe, service 3); whether an online=1 row is truly logged in (A5)",

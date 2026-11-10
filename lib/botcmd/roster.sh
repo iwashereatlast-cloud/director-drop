@@ -67,7 +67,7 @@ _ritual_settle_clear() {  # $1 = toon name (default Leo)
 roster_ritual() {
   hdr "Summon full roster (ritual)"
   warn "G1 baked in: accounts $BOTCMD_RITUAL_ACCOUNTS"
-  warn "             plus bots: $BOTCMD_RITUAL_BOTS - account I_WAS_HERE1ST is never touched"
+  warn "             plus bots: $BOTCMD_RITUAL_BOTS - account ACCT_MASTER is never touched"
   local a b on
   on=$(_roster_online_watched)
   if [ -n "$on" ]; then
@@ -212,7 +212,7 @@ _roster_link_ok() {
 #   PlayerbotMgr.cpp:1957-1963) and playerbots_account_keys (SHA-256 hex, :1894-1913).
 #   In-game commands are SEC_PLAYER + Console::No (PlayerbotCommandScript.cpp:29-32):
 #     .playerbots account setKey <key>           - run on a toon of the account TO BE linked
-#     .playerbots account link <ACCOUNT> <key>   - run from Leo; links ACCOUNT into I_WAS_CMD
+#     .playerbots account link <ACCOUNT> <key>   - run from Leo; links ACCOUNT into SHELLACCT
 #     .playerbots account linkedAccounts         - list (PSendSysMessage to issuer)
 #     .playerbots account unlink <ACCOUNT>       - deletes both directions (:2011-2020)
 roster_link() {  # botcmd roster link [list] | check <ACCT> | <ACCT> <KEY> | setkey <KEY> | unlink <ACCT>
@@ -335,7 +335,7 @@ EOF
          pause ;;
       6) printf '%s' "toon to take down (or 'all'): "; IFS= read -r n; roster_down "$n"; pause ;;
       7) roster_fix; pause ;;
-      8) printf '%s' "link args (list | check I_WAS_HERE5TH | I_WAS_HERE5TH mykey | setkey mykey | unlink I_WAS_HERE5TH): "; IFS= read -r lnk
+      8) printf '%s' "link args (list | check ACCT_BOT5 | ACCT_BOT5 mykey | setkey mykey | unlink ACCT_BOT5): "; IFS= read -r lnk
          roster_link $lnk; pause ;;
       9) return 0 ;;
       *) warn "invalid choice" ;;

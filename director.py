@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""director - LLM <-> altbot command interface for Chazbot (I_WAS_CMD / Leo shell).
+"""director - LLM <-> altbot command interface for Chazbot (SHELLACCT / Leo shell).
 
 Transport: writes chat lines to the Leo shell FIFO (/tmp/leo.in) as /w <bot> <cmd>.
 Eyes: read-only SQL census (auth_socket RO account via ~/.my.cnf-director) + human
@@ -16,7 +16,7 @@ Modes:
 orders.json schema: {"orders": [{"bot": "<name>", "cmd": "<whisper command>"}], "pace_sec": 2}
 
 Daemon auth: ONLY the toons in DIRECTOR_HUMANS (default the G1 five) on the
-master account (default i_was_here1st, rotatable via 'botcmd master') PLUS
+master account (default acct_master, rotatable via 'botcmd master') PLUS
 members of the watched
 guild (DIRECTOR_GUILD) on non-bot, non-shell accounts - bot-account toons and
 Leo's shell account never get auth, because their automatic "Using X"
@@ -39,7 +39,7 @@ MODEL = os.environ.get("DIRECTOR_MODEL", "gemma4:12b")
 FIFO = os.environ.get("LEO_FIFO", "/tmp/leo.in")
 LOG = os.environ.get("DIRECTOR_LOG", "/tmp/leo.log")
 AUDIT = os.path.join(HERE, "audit.log")
-ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "i_was_here%")
+ACCOUNT_LIKE = os.environ.get("DIRECTOR_ACCOUNT_LIKE", "acct_%")
 WATCH_GUILD = os.environ.get("DIRECTOR_GUILD", "Special FXc")
 # ^ the ONE guild whose members Leo watches (census unions them with the bot
 # accounts). Add an alt bot to THIS guild and Leo watches it automatically;
@@ -59,8 +59,8 @@ HUMANS = set(n.strip().lower() for n in os.environ.get(
 # the G1 five. 'botcmd master set <ACCOUNT>' rewrites this together with
 # DIRECTOR_MASTER_ACCOUNT when you rotate which account you hand-play on, so a
 # bot that shares the master account is still NOT authed (not in HUMANS).
-MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "i_was_here1st")
-SHELL_ACCOUNT = os.environ.get("DIRECTOR_SHELL_ACCOUNT", "i_was_cmd")
+MASTER_ACCOUNT = os.environ.get("DIRECTOR_MASTER_ACCOUNT", "acct_master")
+SHELL_ACCOUNT = os.environ.get("DIRECTOR_SHELL_ACCOUNT", "shellacct")
 LEO = os.environ.get("DIRECTOR_LEO", "Leo")
 # ^ Leo's own toon (the headless shell character) - used for group/raid lookups
 #   ("who is in MY raid / who leads it") and for the group-remove target rail.
@@ -307,8 +307,8 @@ def masters():
 # SELECT-only identity. "quest" and "bags" also read acore_world
 # (quest_template, item_template); until those two grants exist those two
 # queries fail audibly instead of hanging:
-#   GRANT SELECT ON acore_world.quest_template TO 'iwashere'@'localhost';
-#   GRANT SELECT ON acore_world.item_template TO 'iwashere'@'localhost';
+#   GRANT SELECT ON acore_world.quest_template TO 'director_ro'@'localhost';
+#   GRANT SELECT ON acore_world.item_template TO 'director_ro'@'localhost';
 # ---------------------------------------------------------------------------
 
 def _mysql(sql):
@@ -1013,7 +1013,7 @@ def _wd_conf():
     cfg = {"ON_H": "8", "OFF_H": "22",
            "GROUP": "Cecil Rydia Shadow Vivi Aeris Aerith",
            "AUTORITUAL": "1", "AUTORITUAL_CLEAR": "1",
-           "RITUAL_ACCOUNTS": "I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH",
+           "RITUAL_ACCOUNTS": "ACCT_BOT2 ACCT_BOT3 ACCT_BOT4 ACCT_BOT5",
            "RITUAL_BOTS": "Golbez"}
     try:
         with open(WATCHDOG_CONF) as f:

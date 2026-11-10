@@ -1,4 +1,4 @@
-# Master account selector: which i_was_here* account is the HUMAN account.
+# Master account selector: which acct_* account is the HUMAN account.
 #
 # director.py reads DIRECTOR_MASTER_ACCOUNT + DIRECTOR_HUMANS from
 # ~/.director.env via the leo-director.service systemd drop-in
@@ -6,13 +6,13 @@
 # file, mirrors the values into ~/.botcmd.conf, and restarts leo-director.
 #
 # Invariant: the selected master account must be HUMAN-ONLY. Every other
-# i_was_here% account is a bot account - its toons are never authed and are
+# acct_% account is a bot account - its toons are never authed and are
 # dropped by the daemon's DB sender gate. Toons named in BOTCMD_BOT_TOONS are
 # excluded from the auto human list even if they sit on the selected account.
 
 DIRECTOR_ENV="${DIRECTOR_ENV:-$HOME/.director.env}"
 
-_master_accounts() {  # one i_was_here* account per line, from acore_auth
+_master_accounts() {  # one acct_* account per line, from acore_auth
   db_ro -N -B -e "SELECT username FROM acore_auth.account WHERE username LIKE '$BOTCMD_ACCOUNT_LIKE' ORDER BY username" 2>/dev/null
 }
 
@@ -45,14 +45,14 @@ master_show() {
     printf '%2d. %s %-16s toons: %s\n' "$i" "$mark" "$acct" "$(_master_toons "$acct")"
   done < <(_master_accounts)
   echo
-  warn "rule: select only a HUMAN-ONLY account. All other i_was_here% accounts are"
+  warn "rule: select only a HUMAN-ONLY account. All other acct_% accounts are"
   warn "bot accounts - their toons are never authed (daemon DB sender gate drops them)."
   warn "BOTCMD_BOT_TOONS in ~/.botcmd.conf excludes known bots from the auto human list."
 }
 
 master_set() {  # $1 = account name (case-insensitive) or menu number
   local want="${1:-}" acct="" humans tmp
-  [ -n "$want" ] || { errmsg "usage: botcmd master set I_WAS_HERE5TH   (or a menu number)"; return 1; }
+  [ -n "$want" ] || { errmsg "usage: botcmd master set ACCT_BOT5   (or a menu number)"; return 1; }
   if [ "$want" -eq "$want" ] 2>/dev/null; then
     acct=$(_master_accounts | sed -n "${want}p")
   else

@@ -11,15 +11,15 @@ BOTCMD_SHELL_LOG="${BOTCMD_SHELL_LOG:-/tmp/leo.log}"
 BOTCMD_DIRECTOR_LOG="$BOTCMD_REPO/daemon.log"
 BOTCMD_WATCHDOG_CONF="${BOTCMD_WATCHDOG_CONF:-$HOME/.leo-watchdog.conf}"
 BOTCMD_MYCNF="${BOTCMD_MYCNF:-$HOME/.my.cnf-director}"
-BOTCMD_ACCOUNT_LIKE="${BOTCMD_ACCOUNT_LIKE:-i_was_here%}"
-BOTCMD_MASTER_ACCOUNT="${BOTCMD_MASTER_ACCOUNT:-I_WAS_HERE1ST}"
+BOTCMD_ACCOUNT_LIKE="${BOTCMD_ACCOUNT_LIKE:-acct_%}"
+BOTCMD_MASTER_ACCOUNT="${BOTCMD_MASTER_ACCOUNT:-ACCT_MASTER}"
 # ^ the account currently treated as the HUMAN/master account (rotated via
 #   'botcmd master'). Mirror of DIRECTOR_MASTER_ACCOUNT in ~/.director.env.
 BOTCMD_BOT_TOONS="${BOTCMD_BOT_TOONS:-}"
 # ^ space-separated toon names that are BOTS even if they sit on the selected
 #   master account - excluded from the auto human list when rotating (e.g. "Golbez")
 BOTCMD_WATCH_GUILD="${BOTCMD_WATCH_GUILD:-Special FXc}"
-BOTCMD_SHELL_ACCOUNT="${BOTCMD_SHELL_ACCOUNT:-i_was_cmd}"
+BOTCMD_SHELL_ACCOUNT="${BOTCMD_SHELL_ACCOUNT:-shellacct}"
 # ^ Leo's headless-shell account - its toons (Leo) are excluded from bot pickers.
 BOTCMD_STATES_CONF="${BOTCMD_STATES_CONF:-$HOME/.botcmd-states.conf}"
 # Post-ritual auto-group clear: on EVERY bot login the mod pulls the bot into
@@ -39,9 +39,9 @@ BOTCMD_RITUAL_SETTLE="${BOTCMD_RITUAL_SETTLE:-60}"
 # Both Aeris/Aerith spellings are listed until verified in the DB:
 #   SELECT name FROM acore_characters.characters WHERE name LIKE 'Aeri%';
 BOTCMD_HANDPLAY="Cecil Rydia Shadow Vivi Aeris Aerith"
-# Summon ritual (mirrors the watchdog AUTORITUAL): account I_WAS_HERE1ST is
+# Summon ritual (mirrors the watchdog AUTORITUAL): account ACCT_MASTER is
 # deliberately absent. Do not add it.
-BOTCMD_RITUAL_ACCOUNTS="I_WAS_HERE2ND I_WAS_HERE3RD I_WAS_HERE4TH I_WAS_HERE5TH"
+BOTCMD_RITUAL_ACCOUNTS="ACCT_BOT2 ACCT_BOT3 ACCT_BOT4 ACCT_BOT5"
 # single extra bots for the ritual - ONLY needed for bots on an account NOT in
 # BOTCMD_RITUAL_ACCOUNTS (e.g. a bot on the 1ST/master account, which is never
 # addaccount'd). roster_ritual skips any bot already covered by addaccount.

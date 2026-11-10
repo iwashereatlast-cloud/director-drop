@@ -46,7 +46,7 @@ What every `botcmd` area does, and how we know it works. Status legend:
 | `botcmd roster add/remove` | one bot up/down | LIVE via ritual/down flow |
 | `botcmd roster down <toon\|all>` | `bot remove` first; a still-online non-bot plain session is an accepted gap (force-kick retired with the console end-of-life pass) | **REMOVED** (kick branch) — historical LIVE evidence in serverpc logs; gap accepted per docs/services-roadmap.md |
 | `botcmd roster fix` | down all + ritual + verify | **LIVE** (run on serverpc) |
-| `botcmd roster link ...` | trusted-account linking (I_WAS_HERE5TH) | HARNESS (#30); needed live for Golbez's account |
+| `botcmd roster link ...` | trusted-account linking (ACCT_BOT5) | HARNESS (#30); needed live for Golbez's account |
 | `botcmd go <toon> <zone>` | `/w <toon> go travel <zone>` | HARNESS |
 
 ## States (`states`)
