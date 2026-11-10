@@ -834,7 +834,25 @@ def _ollama_chat(body):
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        return json.loads(r.read())["message"]["content"]
+        resp = json.loads(r.read())
+    m = resp["message"]
+    content = (m.get("content") or "").strip()
+    if content:
+        return content
+    # thinking models sometimes put the whole answer in the thinking channel
+    # and emit no content (live 2026-11-10: empty content, done_reason=stop,
+    # while the CoT held the planned JSON). Recover the fenced JSON instead of
+    # reporting an empty reply to the master.
+    th = m.get("thinking") or ""
+    fence = re.search(r"```json\s*(.*?)\s*```", th, re.S)
+    if fence:
+        print("daemon: empty content but the thinking held the answer - "
+              "extracting the fenced JSON")
+        return fence.group(1)
+    if resp.get("done_reason") == "length":
+        print("daemon: llm hit the %s-token brake mid-generation "
+              "(done_reason=length) - a spiral, capped" % MAX_TOKENS)
+    return ""
 
 
 def llm_retry(messages, notify=None):
@@ -1564,7 +1582,7 @@ def _turn(sender, channel, text, convs, pending):
         if BOTFB:
             roster_msg += "\nRecent bot error whispers: " + "; ".join(BOTFB[-5:])
         conv.insert(len(conv) - 1, {"role": "system", "content": roster_msg})
-        _stage("llm")
+        _stage("thinking")
         reply = llm_retry(_with_fewshot(conv))
         print("daemon: llm answered in %.1fs" % (time.time() - t0))
         if DEBUG:
@@ -1586,7 +1604,7 @@ def _turn(sender, channel, text, convs, pending):
                      "DB query results (read-only):\n" + results +
                      "\nGive your final reply now, with orders if any. "
                      "(Further queries this turn are ignored.)"})
-        _stage("llm (final)")
+        _stage("thinking (final)")
         try:
             reply = llm_retry(_with_fewshot(conv))
             if DEBUG:

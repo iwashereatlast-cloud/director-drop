@@ -599,6 +599,32 @@ def main():
         director.THINKING, director.MAX_TOKENS = real_thinking, real_max
         urllib.request.urlopen = real_urlopen
 
+        # empty content but the thinking channel holds the fenced answer
+        def thinking_answer_urlopen(req, timeout=None):
+            bodies.append(_json.loads(req.data.decode()))
+            return io.BytesIO(_json.dumps({"message": {
+                "content": "",
+                "thinking": "plan the JSON... ```json\n{\"reply\": \"aye\", "
+                             "\"orders\": []}\n``` done",
+            }, "done_reason": "stop"}).encode())
+
+        def empty_spiral_urlopen(req, timeout=None):
+            bodies.append(_json.loads(req.data.decode()))
+            return io.BytesIO(_json.dumps({"message": {
+                "content": "", "thinking": "loop loop loop",
+            }, "done_reason": "length"}).encode())
+
+        urllib.request.urlopen = thinking_answer_urlopen
+        out = director.llm([{"role": "user", "content": "x"}])
+        check("empty content recovered from the thinking channel's JSON fence",
+              out.strip().startswith('{"reply": "aye"'), out)
+
+        urllib.request.urlopen = empty_spiral_urlopen
+        out = director.llm([{"role": "user", "content": "x"}])
+        check("capped spiral (done_reason=length) stays empty, not hallucinated",
+              out == "", out)
+        urllib.request.urlopen = real_urlopen
+
         print("== 9. presence facts (heartbeat hands, never decides) ==")
         director._svc_state = lambda: "active"
         cfg = director._wd_conf()
