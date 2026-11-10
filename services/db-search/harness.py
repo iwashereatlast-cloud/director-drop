@@ -306,14 +306,18 @@ def main():
         check("fixture unchanged after queries (no writes)", before == after)
 
         print("== 5. per-query timeout fires ==")
+        # the sqlite fixture adapter DETECTS timeouts post-hoc (deadline checked
+        # after the query completes - the real mysql adapter ENFORCES by killing
+        # the subprocess), so the bound is machine-speed independent: the query
+        # must overrun the 0.05s deadline everywhere but not stall the harness.
         t0 = time.monotonic()
         try:
             adapter.run("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c "
-                        "LIMIT 40000000) SELECT COUNT(*) FROM c", 0.05)
+                        "LIMIT 20000000) SELECT COUNT(*) FROM c", 0.05)
             check("slow query killed as code=timeout", False, "no ToolError raised")
         except ToolError as e:
             check("slow query killed as code=timeout", e.code == "timeout", str(e))
-        check("timeout decided fast (<5s)", time.monotonic() - t0 < 5)
+        check("timeout decided without stalling (<30s)", time.monotonic() - t0 < 30)
 
         print("== 6. socket server end-to-end (unix socket, local-only) ==")
         import threading

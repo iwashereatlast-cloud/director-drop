@@ -432,15 +432,18 @@ REDIRECTS = {
     "route_hint": _CT + ': {"tool": "inspect", "args": {"bot": "<name>", "query": "position"}} -> '
       '{"ok": true, "result": {"correlation_id": "..."}}; then '
       '{"tool": "get_reply", "args": {"correlation_id": "..."}} -> {sent, reply} '
-      'with the raw inspect answer (coordinates + zone). A live inspect is '
-      '"as of the inspect, seconds fresh".',
+      'with the raw inspect answer (coordinates + zone); a pending reply '
+      '(reply: null) is normal within the first seconds - poll get_reply '
+      'again. A live inspect is "as of the inspect, seconds fresh".',
     "db_fallback": "get_character (map/zone are the LAST-FLUSHED values, minutes-to-logout stale - say so, never present them as live)"},
   "get_live_status": {
     "service": "chat-tunnel",
     "reason": "live HP/combat state never lives in the DB",
     "route_hint": _CT + ': {"tool": "inspect", "args": {"bot": "<name>", "query": "hp"}} '
       '(or "state"/"movement"/"target"/"action"), then get_reply with the '
-      'correlation_id - reply is the raw inspect answer, seconds fresh.',
+      'correlation_id - a pending reply (reply: null) is normal within the '
+      'first seconds, poll again; the matched reply is the raw inspect '
+      'answer, seconds fresh.',
     "db_fallback": "get_character (online flag is boot-reset/async, A5 - a hint, never ground truth)"},
   "get_bot_master": {
     "service": "chat-tunnel",
