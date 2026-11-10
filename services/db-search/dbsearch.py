@@ -131,7 +131,7 @@ CATALOG = {
     "params": {"account_like": "required - account name prefix, e.g. i_was_here% is not allowed; pass the bare prefix (e.g. i_was_here)"},
     "timeout": 10,
     "can": "which toons exist on a set of accounts, their level/class/map/zone, the DB `online` flag, and guild membership",
-    "cannot": "whether a bot actually has AI / a master right now (live nc? probe, service 3); whether an online=1 row is truly logged in (A5)",
+    "cannot": "whether a bot actually has AI / a master right now (live mastership probe via chat-tunnel); whether an online=1 row is truly logged in (A5)",
     "caveat": "characters.online is reset to 0 at worldserver boot and set asynchronously on login (A5), and bot logins/logouts are queued async (A3): online flags can lag reality by tens of seconds either way. Treat online as a hint; live whisper probes are ground truth for session state.",
     "fill": lambda p: {"account_like": _p("get_online_census", p, "account_like") + "%"},
   },
@@ -380,7 +380,7 @@ CATALOG = {
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
     "can": "the toon's learned talents as (spell id, specMask) rows - talent COUNT and spec spread (how many points per specMask bit); useful for 'has X spent talents / how deep in each spec'",
-    "cannot": "talent NAMES or tree positions - spell names and talent trees are DBC-only on this build (no acore_world.talent table, confirmed live 2026-11-10); use the bot's live 'talents' whisper (rtt-engine) for a named list; what specMask bits mean exactly (raw bitmask, live-unverified)",
+    "cannot": "talent NAMES or tree positions - spell names and talent trees are DBC-only on this build (no acore_world.talent table, confirmed live 2026-11-10); use the bot's live 'talents' whisper via chat-tunnel for a named list; what specMask bits mean exactly (raw bitmask, live-unverified)",
     "caveat": "talents flush with the character save - a just-spent point can lag by minutes. Rows are raw spell ids; do not treat them as game-object ids for anything else.",
     "fill": lambda p: {"toon": _p("get_talents", p, "toon")},
   },
@@ -417,23 +417,48 @@ CATALOG = {
 
 # ------------------------------------------------------------- redirects ----
 # Deliberately NOT here: names the LLM is likely to reach for that belong to
-# service 3 (rtt-engine, "8.8.8.8") or the live whisper path. Instead of a
-# bare "unknown tool", these answer code=redirect with the owning service and
-# the reason - so the caller learns the routing rule instead of guessing again
-# (or worse, falling back to whisper-probing for something the DB can answer).
+# chat-tunnel's live-read path (.playerbots inspect, A23 - rtt-engine retired
+# 2026-11-10). Instead of a bare "unknown tool", these answer code=redirect
+# with the owning service and a route_hint - a SUGGESTION to the caller, never
+# an auto-executed read (single-brain: db-search is a hand, the LLM decides).
+# A timed-out inspect means offline truth is db-search: fall back to the
+# db_fallback tool and say so via its caveat - never guess (A21: a missing
+# transcript row is not proof of anything either).
+_CT = "POST http://127.0.0.1:8765/ (local-only JSON, one request per call)"
 REDIRECTS = {
   "get_current_position": {
-    "service": "rtt-engine",
-    "reason": "live position is tick-time state; the DB only has the last flushed map/zone (get_character) - use rtt-engine for where a toon is RIGHT NOW"},
+    "service": "chat-tunnel",
+    "reason": "live position is tick-time state; the DB only has the last flushed map/zone",
+    "route_hint": _CT + ': {"tool": "inspect", "args": {"bot": "<name>", "query": "position"}} -> '
+      '{"ok": true, "result": {"correlation_id": "..."}}; then '
+      '{"tool": "get_reply", "args": {"correlation_id": "..."}} -> {sent, reply} '
+      'with the raw inspect answer (coordinates + zone). A live inspect is '
+      '"as of the inspect, seconds fresh".',
+    "db_fallback": "get_character (map/zone are the LAST-FLUSHED values, minutes-to-logout stale - say so, never present them as live)"},
   "get_live_status": {
-    "service": "rtt-engine",
-    "reason": "live HP/mana/combat state never lives in the DB; use rtt-engine"},
+    "service": "chat-tunnel",
+    "reason": "live HP/combat state never lives in the DB",
+    "route_hint": _CT + ': {"tool": "inspect", "args": {"bot": "<name>", "query": "hp"}} '
+      '(or "state"/"movement"/"target"/"action"), then get_reply with the '
+      'correlation_id - reply is the raw inspect answer, seconds fresh.',
+    "db_fallback": "get_character (online flag is boot-reset/async, A5 - a hint, never ground truth)"},
   "get_bot_master": {
-    "service": "rtt-engine",
-    "reason": "who a bot's AI master is right now is live session state (SetMaster runs at bot login); the DB has no mastership row - use rtt-engine / a live nc? probe"},
+    "service": "chat-tunnel",
+    "reason": "who a bot's AI master is right now is live session state (SetMaster runs at bot login); the DB has no mastership row",
+    "route_hint": _CT + ': send a mastership-proving whisper (e.g. "nc ?") via '
+      'chat-tunnel with a correlation id and read the reply - a reply proves '
+      'the sender is the bot\'s master; silence is ambiguous (A21: bot-originated '
+      'reply types are partially chat-logged, so a missing transcript row '
+      'proves nothing).',
+    "db_fallback": "none - the DB has no mastership row; report unknown rather than guess"},
   "is_bot_responding": {
-    "service": "rtt-engine",
-    "reason": "session liveness is proven by a live probe (chat-tunnel correlation), never by DB flags (A5: online is boot-reset/async)"},
+    "service": "chat-tunnel",
+    "reason": "session liveness is proven by a live probe with correlation, never by DB flags (A5: online is boot-reset/async)",
+    "route_hint": _CT + ': send any whitelisted whisper to the bot via chat-tunnel, '
+      'then get_reply / verify the correlation_id - "delivered but silent" '
+      '(bot not answering) vs "never sent" (transport down). A21: a missing '
+      'transcript row is not proof of anything.',
+    "db_fallback": "get_online_census (online flag is a hint only, A5 - and a DB-offline bot may still answer)"},
 }
 
 META_TOOLS = ("catalog",)
@@ -515,14 +540,20 @@ def run_tool(adapter, tool, params):
                 "rows": ([{"name": n, "params": s["params"], "timeout": s["timeout"],
                            "can": s["can"], "cannot": s["cannot"], "caveat": s["caveat"]}
                           for n, s in sorted(CATALOG.items())]
-                         + [{"name": n, "redirect_to": r["service"], "reason": r["reason"]}
+                         + [{"name": n, "redirect_to": r["service"],
+                             "reason": r["reason"], "route_hint": r["route_hint"],
+                             "db_fallback": r["db_fallback"]}
                           for n, r in sorted(REDIRECTS.items())]),
                 "row_count": len(CATALOG) + len(REDIRECTS), "duration_ms": 0}
     if tool in REDIRECTS:
         r = REDIRECTS[tool]
         return {"ok": False, "tool": tool, "queried_at": _now(), "code": "redirect",
-                "redirect_to": r["service"], "error": r["reason"],
-                "caveat": "no DB query - this is a routing redirect, not a result"}
+                "redirect_to": r["service"], "route_hint": r["route_hint"],
+                "db_fallback": r["db_fallback"], "error": r["reason"],
+                "caveat": "no DB query - a route hint to the caller (single-brain: "
+                          "db-search suggests, the LLM executes); on an inspect "
+                          "timeout the offline truth is this catalog's "
+                          "db_fallback - use it and its caveat, never guess"}
     if tool not in CATALOG:
         raise ToolError("unknown tool %r - allowed: %s (redirects: %s)" %
                         (tool, ", ".join(sorted(CATALOG) + list(META_TOOLS)),

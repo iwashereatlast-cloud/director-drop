@@ -211,14 +211,19 @@ def main():
               and len(real) == len(CATALOG)
               and all("cannot" in row and "caveat" in row for row in real), r)
         check("catalog meta-tool lists the redirects with routes",
-              any(row.get("redirect_to") == "rtt-engine" for row in r["rows"]), r["rows"])
+              any(row.get("redirect_to") == "chat-tunnel"
+                  and "route_hint" in row and "db_fallback" in row
+                  for row in r["rows"]), r["rows"])
         r = handle(adapter, {"tool": "get_current_position"})
-        check("redirect: live position -> rtt-engine with reason",
+        check("redirect: live position -> chat-tunnel inspect with reason",
               r.get("ok") is False and r.get("code") == "redirect"
-              and r.get("redirect_to") == "rtt-engine" and "flushed" in r.get("error", ""), r)
+              and r.get("redirect_to") == "chat-tunnel"
+              and "inspect" in r.get("route_hint", "")
+              and "flushed" in r.get("error", ""), r)
         r = handle(adapter, {"tool": "get_bot_master"})
-        check("redirect: mastership -> rtt-engine", r.get("code") == "redirect"
-              and r.get("redirect_to") == "rtt-engine", r)
+        check("redirect: mastership -> chat-tunnel, no DB fallback",
+              r.get("code") == "redirect" and r.get("redirect_to") == "chat-tunnel"
+              and "no mastership row" in r.get("db_fallback", ""), r)
         r = handle(adapter, {"tool": "get_current_position", "id": "z9"})
         check("redirect: correlation id echoed", r.get("id") == "z9", r)
         r = handle(adapter, {"tool": "get_equipped_gear", "params": {"toon": "Cecil"}, "id": "abc"})
@@ -228,7 +233,64 @@ def main():
         check("scope: nonexistent toon reads as out_of_scope (no existence leak)",
               r.get("ok") is False and r.get("code") == "out_of_scope", r)
 
-        print("== 3. read-only by construction ==")
+        print("== 3. redirect flip: chat-tunnel route hints + offline fallback ==")
+        import re as _re
+        blob = json.dumps(dbsearch.REDIRECTS)
+        check("no rtt-engine references left in the redirects",
+              "rtt" not in blob.lower(), [k for k in dbsearch.REDIRECTS])
+        check("all redirects point at chat-tunnel with the inspect interface",
+              all(r["service"] == "chat-tunnel" and "inspect" in r["route_hint"]
+                  or "whisper" in r["route_hint"]
+                  for r in dbsearch.REDIRECTS.values()),
+              [r["service"] for r in dbsearch.REDIRECTS.values()])
+        check("hints name the local endpoint + correlation flow",
+              all("127.0.0.1:8765" in r["route_hint"]
+                  and "correlation" in r["route_hint"]
+                  for r in dbsearch.REDIRECTS.values()))
+
+        class MockChatTunnel:
+            """Mock of chat-tunnel's documented interface (A23): inspect ->
+            correlation_id; get_reply -> raw answer, or status timeout with
+            the offline-truth note for a bot the DB shows offline."""
+            def __init__(self, db_adapter):
+                self.db = db_adapter
+                self.pending = {}
+            def call(self, tool, args):
+                if tool == "inspect":
+                    row = handle(self.db, {"tool": "get_character",
+                                           "params": {"toon": args["bot"]}})
+                    online = row["rows"][0][9] if row["rows"] else "0"
+                    cid = "c-%s" % args["bot"]
+                    self.pending[cid] = ("-9307.99 -3048.59 127.369 0 -0.361657 |Redridge Mountains|"
+                                         if online == "1" else
+                                         {"status": "timeout",
+                                          "note": "offline truth is db-search"})
+                    return {"ok": True, "result": {"correlation_id": cid}}
+                if tool == "get_reply":
+                    return self.pending[args["correlation_id"]]
+                raise AssertionError("unknown mock tool " + tool)
+
+        ct = MockChatTunnel(adapter)
+        red = handle(adapter, {"tool": "get_current_position"})
+        check("redirect carries route_hint + db_fallback",
+              red.get("code") == "redirect" and red.get("redirect_to") == "chat-tunnel"
+              and "inspect" in red.get("route_hint", "")
+              and "get_character" in red.get("db_fallback", ""), red)
+        online = ct.call("inspect", {"bot": "Ayla", "query": "position"})
+        reply = ct.call("get_reply", online["result"])
+        check("online bot: live inspect answers (seconds fresh, no DB guess)",
+              "Redridge Mountains" in reply and "timeout" not in reply, reply)
+        offline = ct.call("inspect", {"bot": "Locke", "query": "position"})
+        reply = ct.call("get_reply", offline["result"])
+        check("offline bot: inspect times out with the offline-truth note",
+              reply.get("status") == "timeout"
+              and "db-search" in reply.get("note", ""), reply)
+        fb = handle(adapter, {"tool": "get_character", "params": {"toon": "Locke"}})
+        check("offline fallback: DB answer with queried_at + last-logout caveat",
+              fb.get("ok") is True and fb["row_count"] == 1
+              and "logout" in fb["caveat"].lower(), fb.get("caveat"))
+
+        print("== 4. read-only by construction ==")
         try:
             dbsearch.assert_readonly_catalog()
             check("every catalog statement is a single SELECT", True)
@@ -243,7 +305,7 @@ def main():
         con.close()
         check("fixture unchanged after queries (no writes)", before == after)
 
-        print("== 4. per-query timeout fires ==")
+        print("== 5. per-query timeout fires ==")
         t0 = time.monotonic()
         try:
             adapter.run("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c "
@@ -253,7 +315,7 @@ def main():
             check("slow query killed as code=timeout", e.code == "timeout", str(e))
         check("timeout decided fast (<5s)", time.monotonic() - t0 < 5)
 
-        print("== 5. socket server end-to-end (unix socket, local-only) ==")
+        print("== 6. socket server end-to-end (unix socket, local-only) ==")
         import threading
         sock_path = os.path.join(tmp, "dbsearch.sock")
         dbsearch.SOCKET_PATH = sock_path
