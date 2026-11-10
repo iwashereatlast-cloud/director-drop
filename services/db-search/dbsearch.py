@@ -138,7 +138,7 @@ CATALOG = {
   },
 
   "get_guild_members": {
-    "sql": ("SELECT c.name, g_r.rankName AS `rank`, c.level, c.class, c.online "
+    "sql": ("SELECT c.name, g_r.rname AS `rank`, c.level, c.class, c.online "
             "FROM acore_characters.guild g "
             "JOIN acore_characters.guild_member gm ON gm.guildid = g.guildid "
             "JOIN acore_characters.characters c ON c.guid = gm.guid "
@@ -315,7 +315,10 @@ class Handler(socketserver.StreamRequestHandler):
                 resp = {"ok": False, "error": "request is not JSON", "code": "bad_request"}
             else:
                 resp = handle(adapter, req)
-            self.wfile.write((json.dumps(resp) + "\n").encode())
+            try:
+                self.wfile.write((json.dumps(resp) + "\n").encode())
+            except (BrokenPipeError, ConnectionResetError):
+                return  # client hung up before reading the reply - not an error
 
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True

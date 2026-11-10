@@ -91,8 +91,8 @@ queries (no writes); the per-query timeout fires (`code=timeout`); the
 unix-socket path works end-to-end at mode 0600.
 The fixture (`fixtures/fixture.sql`) is a miniature of the four DBs with the
 repo's roster lore — including deliberate staleness traps: Locke is
-DB-offline but still in Leo's raid rows (A3), and `i_was_here5th` is unlinked
-(the A12 ritual warning case).
+DB-offline but still in Leo's raid rows (A3); all four ritual accounts are
+linked including `i_was_here5th` (matching live 2026-11-10).
 
 ## Deploy (serverpc)
 

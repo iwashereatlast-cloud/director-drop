@@ -6,9 +6,9 @@
 -- Cast (matches the repo's live roster lore):
 --   Leo (shell account i_was_cmd) leads a raid with bots Ayla, Gau, Locke.
 --   Cecil/Rydia/Shadow/Vivi/Aerith are the hand-play five (G1) on the master
---   account; Golbez is the extra bot on the master account.
---   Guild "Special" holds the watched members; account links cover the
---   ritual accounts (A12), I_WAS_HERE5TH deliberately unlinked.
+--   account; Golbez is the extra bot on I_WAS_HERE5TH (live census 2026-11-10).
+--   Guild "Special" holds the watched members; account links cover ALL the
+--   ritual accounts including I_WAS_HERE5TH (live: 5TH IS linked).
 
 ATTACH DATABASE 'fixture_acore_characters.db' AS acore_characters;
 ATTACH DATABASE 'fixture_acore_auth.db'       AS acore_auth;
@@ -33,11 +33,11 @@ INSERT INTO acore_characters.characters VALUES
   (10, 1, 'Leo',     1, 5, 80, 0,   12, 1000000, 99999, 1),   -- shell toon, online
   (11, 2, 'Cecil',   1, 1, 42, 0,   12,   50000,  5000,  0),  -- G1, offline
   (12, 2, 'Rydia',   4, 8, 40, 1,   14,   20000,  4000,  0),
-  (13, 2, 'Golbez',  1, 6, 55, 0,   12,   80000,  6000,  1),  -- extra bot, online
+  (13, 2, 'Vivi',   7, 9, 35, 530,  12,   10000,  3000,  0),
   (20, 3, 'Ayla',    2, 2, 30, 0,   12,    5000,  2000,  1),  -- ritual bots, online
   (21, 4, 'Gau',     8, 7, 28, 1,   14,    3000,  1500,  1),
   (22, 5, 'Locke',  2, 4, 32, 0,   12,    7000,  2500,  0),  -- async logout in flight (A3)
-  (23, 6, 'Vivi',   7, 9, 35, 530,  12,   10000,  3000,  0);
+  (23, 6, 'Golbez',  1, 6, 55, 0,   12,   80000,  6000,  1);  -- extra bot, online
 
 CREATE TABLE acore_characters.`groups` (
   guid INTEGER PRIMARY KEY, leaderGuid INTEGER, groupType INTEGER,
@@ -65,7 +65,7 @@ INSERT INTO acore_characters.guild_member VALUES
   (7, 23, 2);
 
 CREATE TABLE acore_characters.`guild_rank` (
-  guildid INTEGER, rid INTEGER, rankName TEXT);
+  guildid INTEGER, rid INTEGER, rname TEXT);
 INSERT INTO acore_characters.`guild_rank` VALUES
   (7, 0, 'Guild Master'), (7, 1, 'Officer'), (7, 2, 'Member');
 
@@ -82,8 +82,8 @@ CREATE TABLE acore_playerbots.playerbots_account_links (
 INSERT INTO acore_playerbots.playerbots_account_links VALUES
   ('i_was_cmd', 'i_was_here2nd', 1730000000),
   ('i_was_cmd', 'i_was_here3rd', 1730000001),
-  ('i_was_cmd', 'i_was_here4th', 1730000002);
-  -- i_was_here5th deliberately absent: the unlinked-ritual-account case.
+  ('i_was_cmd', 'i_was_here4th', 1730000002),
+  ('i_was_cmd', 'i_was_here5th', 1730000003);  -- live 2026-11-10: 5TH IS linked
 
 CREATE TABLE acore_world.quest_template (
   ID INTEGER PRIMARY KEY, LogTitle TEXT);
