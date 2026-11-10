@@ -521,6 +521,55 @@ def main():
         director.say, director.STILL_WORKING, director.TURN_MAX = \
             real_say, real_sw, real_tm
 
+        print("== 8c. LLM runaway brake (live 2026-11-10: 16,938-token spiral) ==")
+        import io, json as _json, urllib.error
+        real_urlopen = urllib.request.urlopen
+        bodies = []
+
+        class FakeResp(io.BytesIO):
+            pass
+
+        def ok_urlopen(req, timeout=None):
+            bodies.append(_json.loads(req.data.decode()))
+            return io.BytesIO(_json.dumps(
+                {"message": {"content": "aye"}}).encode())
+
+        def think_reject_urlopen(req, timeout=None):
+            bodies.append(_json.loads(req.data.decode()))
+            if "think" in bodies[-1]:
+                raise urllib.error.HTTPError(
+                    req.full_url, 400,
+                    "think is only supported by thinking models",
+                    {}, io.BytesIO(b"think is only supported by thinking models"))
+            return io.BytesIO(_json.dumps(
+                {"message": {"content": "aye"}}).encode())
+
+        urllib.request.urlopen = ok_urlopen
+        out = director.llm([{"role": "user", "content": "x"}])
+        check("llm request carries the runaway brake and leaves thinking on",
+              out == "aye" and bodies[-1]["options"].get("num_predict") == director.MAX_TOKENS
+              and "think" not in bodies[-1], bodies[-1])
+
+        real_thinking, real_max = director.THINKING, director.MAX_TOKENS
+        director.THINKING = False
+        bodies.clear()
+        urllib.request.urlopen = think_reject_urlopen
+        out = director.llm([{"role": "user", "content": "x"}])
+        check("DIRECTOR_THINKING=0 sends think:false and falls back on rejection",
+              out == "aye" and len(bodies) == 2
+              and bodies[0]["think"] is False and "think" not in bodies[1], bodies)
+        check("num_predict survives the fallback retry",
+              bodies[1]["options"].get("num_predict") == director.MAX_TOKENS, bodies[1])
+
+        director.THINKING, director.MAX_TOKENS = True, 0
+        bodies.clear()
+        urllib.request.urlopen = ok_urlopen
+        director.llm([{"role": "user", "content": "x"}])
+        check("MAX_TOKENS=0 drops the cap",
+              "num_predict" not in bodies[-1]["options"], bodies[-1])
+        director.THINKING, director.MAX_TOKENS = real_thinking, real_max
+        urllib.request.urlopen = real_urlopen
+
         print("== 9. presence facts (heartbeat hands, never decides) ==")
         director._svc_state = lambda: "active"
         cfg = director._wd_conf()
