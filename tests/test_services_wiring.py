@@ -220,6 +220,81 @@ def main():
         check("error counter bumps for the presence thread",
               director.BOTFB_SEQ[0] >= 1, director.BOTFB_SEQ)
 
+        print("== 1e. harbormaster: routes, boat/carriage rails, mats + live queries ==")
+        check("six shipping routes defined",
+              len(director.TRAVEL_ROUTES) == 6, director.TRAVEL_ROUTES)
+        harbors = sorted(set(h for r in director.TRAVEL_ROUTES for h in (r[0], r[1])))
+        missing = [h for h in harbors if director._tele_coords(h) is None]
+        check("every route harbor resolves in game_tele (db-search)",
+              not missing, missing)
+        check("harbormaster prompt rule present",
+              "Harbormaster travel" in director.ORDER_RULES
+              and "never mention teleporting" in director.ORDER_RULES)
+        check("farming prompt rule present", "farm <mat>" in director.ORDER_RULES)
+
+        bots = director.census()
+        # not at a dock (no live position at all -> SKIP, never a blind boat)
+        err = director.validate({"bot": "Gau", "cmd": "boat Ratchet"}, bots)
+        check("boat refused without a live position (no blind boarding)",
+              "SKIP" in str(err) and "live position" in str(err), err)
+        err = director.validate({"bot": "Ayla", "cmd": "boat Nowhereville"}, bots)
+        check("boat refused to a non-route destination", "not an arrival harbor" in str(err), err)
+        err = director.validate({"bot": "Leo", "cmd": "boat Undercity"}, bots)
+        check("boat refused for faction (Alliance toon, Horde zeppelin)",
+              "route" in str(err) and "SKIP" in str(err), err)
+        err = director.validate({"bot": "Ayla", "cmd": "carriage Booty Bay"}, bots)
+        check("carriage refused while DIRECTOR_CARRIAGE=0",
+              "carriage is disabled" in str(err), err)
+
+        # put Ayla at the Booty Bay dock: the position line must land AFTER
+        # validate's inspect goes out (reply-window discipline), so a delayed
+        # writer thread plays the fake worldserver mid-probe.
+        def fake_dock():
+            time.sleep(1.0)
+            with open(log_path, "a") as f:
+                f.write("2026-11-10 21:00:00.000 | MESSAGES | headless.world.chat.chat:display:124 - "
+                        "[System]: Ayla: -14420.0 480.0 26.0 0 0.5 |Stranglethorn Vale|\n")
+
+        threading.Thread(target=fake_dock, daemon=True).start()
+        o = {"bot": "Ayla", "cmd": "boat Ratchet"}
+        err = director.validate(o, bots)
+        check("boat validates when the bot is at the departure dock",
+              err is None and o["_route"] == ("Booty Bay", "Ratchet", "boat"), (err, o))
+        check("boat order line is a GM .tele name",
+              director.order_line("Ayla", "boat Ratchet") == ".tele name Ayla Ratchet",
+              director.order_line("Ayla", "boat Ratchet"))
+        def fake_dock_send():
+            time.sleep(1.0)
+            with open(log_path, "a") as f:
+                f.write("2026-11-10 21:00:30.000 | MESSAGES | headless.world.chat.chat:display:124 - "
+                        "[System]: Ayla: -14420.0 480.0 26.0 0 0.5 |Stranglethorn Vale|\n")
+
+        threading.Thread(target=fake_dock_send, daemon=True).start()
+        sent = director.execute([{"bot": "Ayla", "cmd": "boat Ratchet"}], bots,
+                                pace=0, dry=False)
+        time.sleep(0.5)
+        check("boat leg sent as .tele name via the tunnel",
+              ".tele name Ayla Ratchet" in fifo_lines, fifo_lines[-3:])
+        check("audit records it as a BOAT leg",
+              "BOAT" in open(director.AUDIT).read()
+              and ".tele name Ayla Ratchet" in open(director.AUDIT).read())
+
+        def fake_dock2():
+            time.sleep(1.0)
+            with open(log_path, "a") as f:
+                f.write("2026-11-10 21:01:00.000 | MESSAGES | headless.world.chat.chat:display:124 - "
+                        "[System]: Ayla: -14420.0 480.0 26.0 0 0.5 |Stranglethorn Vale|\n")
+
+        threading.Thread(target=fake_dock2, daemon=True).start()
+        digest = director.run_queries(
+            [{"query": "mats", "bot": "Ayla", "name": "Peacebloom"},
+             {"query": "live", "bot": "Ayla"}],
+            director.census(online_only=False))
+        check("mats query ranks teleport locations by spawn density",
+              "Goldshire" in digest and "spawns" in digest, digest)
+        check("live query returns the real-time position",
+              "live position" in digest and "-14420" in digest, digest)
+
         print("== 2. db-search facts: census, masters, sender gates ==")
         online = director.census()
         check("census (online): Ayla, Gau, Golbez, Leo",
