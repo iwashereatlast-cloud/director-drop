@@ -1133,10 +1133,14 @@ class _StampedStdout:
 
 
 def _extract_json(text):
-    """First JSON object in text: a fenced ```json block wins; otherwise the
-    first balanced {...} (string-aware, so braces inside strings don't count).
+    """First JSON object in text: a fenced ```json block wins (the model has
+    live-emitteed triple-DOUBLE-QUOTE fences too - 2026-11-11 'gather only in
+    stv' - so both fence spellings count); otherwise the first balanced {...}
+    (string-aware, so braces inside strings don't count).
     Returns the raw candidate string, or None."""
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
+    if not m:
+        m = re.search(r'"""(?:json)?\s*(\{.*?\})\s*"""', text, re.S | re.I)
     if m:
         return m.group(1)
     start = text.find("{")
@@ -1169,6 +1173,17 @@ def parse_orders(text):
     # emitted two JSON objects. Balanced extraction fixes that.
     cand = _extract_json(text)
     if not cand:
+        if re.search(r"```|\"\"\"|^\s*\{", text):
+            # a fence/brace with NO balanced object inside = the generation
+            # was capped mid-contract (live 2026-11-11: '"""json\n{"query":
+            # "recipes", "text": "ha"' - done_reason=length cut the query
+            # string in half). Whispering the truncation would only produce
+            # a tunnel refusal at the reply stage.
+            print("parse_orders: reply holds an unbalanced JSON contract "
+                  "(%d chars) - capped mid-generation, answering with a retry "
+                  "note instead" % len(text))
+            return {"reply": "I got tangled mid-thought - say that again and "
+                            "I'll retry.", "orders": [], "queries": []}
         return {"reply": text, "orders": []}
     try:
         obj = json.loads(cand)
@@ -1407,6 +1422,9 @@ def say(recipient, msg):
     # pipe in an outgoing whisper garbles the line so the client drops it
     # (live 2026-11-10: every short whisper delivered, both replies containing
     # " | executed: " vanished - tunnel verdicts garbled/not_found)
+    msg = msg.replace("\n", " ; ").replace("\r", "")   # multi-line whispers are
+    # refused by the tunnel's command gate (live 2026-11-11: the truncated
+    # '"""json\n{...}' reply died at 'chat-tunnel send_command refused')
     if _turn_aborted():
         print("daemon: whisper dropped - turn was aborted: %r" % ((recipient, msg[:80]),))
         return
@@ -1463,7 +1481,8 @@ def execute(orders, bots, pace, dry, master=None):
     for o in plan:
         if "_walk" in o:
             err2 = _start_walk(o, master or o["bot"])
-            print("  " + (err2 or "marching: %s -> %s" % (o["bot"], o["_walk"][1])))
+            verb = "travelling" if o.get("_travel") else "marching"
+            print("  " + (err2 or "%s: %s -> %s" % (verb, o["bot"], o["_walk"][1])))
             continue
         try:
             res = send_order(str(o["bot"]), str(o["cmd"]))
@@ -1918,8 +1937,12 @@ def _turn(sender, channel, text, convs, pending):
                 for o in sent:
                     if "_walk" in o:
                         err2 = _start_walk(o, sender)
-                        msg += (" | " + err2) if err2 else \
-                               " | marching: %s is on the way to %s" % (o["bot"], o["_walk"][1])
+                        if err2:
+                            msg += " | " + err2
+                        elif o.get("_travel"):
+                            msg += " | travelling: %s is on the way to %s" % (o["bot"], o["_walk"][1])
+                        else:
+                            msg += " | marching: %s is on the way to %s" % (o["bot"], o["_walk"][1])
                         continue
                     try:
                         res = send_order(str(o["bot"]), str(o["cmd"]))
