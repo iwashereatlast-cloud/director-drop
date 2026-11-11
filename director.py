@@ -337,7 +337,11 @@ FEWSHOT = [
     {"role": "user", "content": "send golbez to stv"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is travelling to Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel Booty Bay\"}]}\n```"},
     {"role": "user", "content": "send Golbez to the Barrens to grind"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"go -443.0;-2594.0\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel TheCrossroads\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "user", "content": "have golbez go to stv and gather herbs"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is off to Stranglethorn Vale to gather herbs.\", \"queries\": [{\"query\": \"skills\", \"bot\": \"Golbez\"}], \"orders\": []}\n```"},
+    {"role": "user", "content": "Golbez has the herb skill."},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is farming herbs in Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"farm Booty Bay\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "make everyone quest in Westfall"},
@@ -1342,13 +1346,16 @@ def validate(order, bots):
                 "never load - live 31/31 FAIL, A24); order "
                 "'travel <destination>' instead - the system runs the journey"
                 % bot)
-    if low.startswith("go ") and ";" in cmd:
-        # go x;y legs are MISSION-INTERNAL only (the travel mission issues them
-        # itself); a bare one from the LLM is a one-shot MoveTo that silent-
-        # fails past the 3s path search (live 2026-11-10) - refuse it so the
-        # brain must use the travel/walk orders
-        return ("SKIP %s: raw 'go x;y' legs are mission-internal; order "
-                "'travel <destination>' (teleport) or 'walk <destination>' "
+    if low == "go" or low.startswith("go "):
+        # ALL bare 'go' orders are MISSION-INTERNAL (the missions issue go
+        # x;y legs themselves); from the LLM they are broken one-shots -
+        # 'go x;y' silent-fails past the 3s path search (live 2026-11-10),
+        # and 'go <name>' is a no-op GoAction cannot parse (live 2026-11-11:
+        # 'go Booty Bay' was sent, Golbez never moved). The brain must use
+        # the mission orders.
+        return ("SKIP %s: bare 'go' orders are mission-internal; order "
+                "'travel <destination>' (teleport), 'farm <destination>' "
+                "(travel + keep gathering) or 'walk <destination>' "
                 "(ground) instead" % bot)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "

@@ -211,6 +211,18 @@ def main():
         err = director.validate({"bot": "Gau", "cmd": "go -14420.0;480.0;26.0"}, bots_c)
         check("validate: go x;y;z is refused too (mission-internal)",
               "mission-internal" in str(err), err)
+        err = director.validate({"bot": "Gau", "cmd": "go Booty Bay"}, bots_c)
+        check("validate: 'go <name>' is refused too (live 2026-11-11: it was "
+              "sent as a no-op and the bot never moved)",
+              "mission-internal" in str(err) and "farm" in str(err), err)
+        check("prompt: fewshot teaches gather -> skills query -> farm order",
+              any("gather herbs" in m["content"] for m in director.FEWSHOT)
+              and any("farm Booty Bay" in m["content"] for m in director.FEWSHOT),
+              [m["content"][:60] for m in director.FEWSHOT])
+        check("prompt: the Barrens grind fewshot uses travel, not raw go legs",
+              any("travel TheCrossroads" in m["content"] for m in director.FEWSHOT)
+              and not any("go -443" in m["content"] for m in director.FEWSHOT),
+              [m["content"][:60] for m in director.FEWSHOT])
         check("prompt: fewshot teaches stv -> travel Booty Bay",
               any("send golbez to stv" in m["content"] for m in director.FEWSHOT)
               and any("travel Booty Bay" in m["content"] for m in director.FEWSHOT),
