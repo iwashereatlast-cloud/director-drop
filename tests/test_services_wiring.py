@@ -169,19 +169,36 @@ def main():
         check("no log tailing", 'Popen(["tail"' not in src and '"-F"' not in src)
         check("no botcmd probe", '"states", "verify"' not in src and '"botcmd"' not in src)
 
-        print("== 1b. travel recipe follows the engine (go travel DEAD, dest query -> go x;y) ==")
+        print("== 1b. the recipe library: slim prompt, keyword sweep, exact structures ==")
         rules = director.ORDER_RULES
-        check("prompt: go travel marked DEAD with the live 31/31 evidence",
-              "go travel <name>\" is DEAD" in rules and "31/31" in rules, rules[:0])
-        check("prompt: the travel order is the one true travel path",
-              '"cmd":"travel <destination>"' in rules
-              and "go <x>;<y>" not in rules, rules[:0])
-        check("prompt: travel is the system-run journey (hop, taxi, last mile)",
-              '"cmd":"travel <destination>"' in rules
-              and "taxi ?" in rules and "last mile" in rules, rules[:0])
-        err = director.validate({"bot": "Gau", "cmd": "go travel Booty Bay"}, {})
+        check("prompt is slim (the library carries the recipes)",
+              len(rules) < 4000 and '"query":"recipes"' in rules, len(rules))
+        check("prompt: recipes sweep is the task path",
+              "attach query {\"query\":\"recipes\",\"text\":\"<the master's words>\"}" in rules)
         check("validate: go travel refused as a dead command",
-              "DEAD" in str(err) and "travel <destination>" in str(err), err)
+              "DEAD" in str(director.validate({"bot": "Gau", "cmd": "go travel Booty Bay"}, {})))
+        r1 = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "send golbez to stv"}],
+            director.census(online_only=False))
+        check("recipes sweep: 'send golbez to stv' loads the travel recipe",
+              "RECIPE travel" in r1 and "travel <destination>" in r1
+              and "Stranglethorn Vale -> Booty Bay" in r1 and "stv=Stranglethorn Vale" in r1, r1[:400])
+        r2 = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "have golbez come to you"}],
+            director.census(online_only=False))
+        check("recipes sweep: 'come to you' loads the follow recipe",
+              "RECIPE come_to_me" in r2 and '"cmd":"follow"' in r2
+              and "NO coordinates needed" in r2, r2[:300])
+        r3 = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "have gau farm peacebloom"}],
+            director.census(online_only=False))
+        check("recipes sweep: farming loads the 4-step structure",
+              "RECIPE farm_mat" in r3 and "STEP 4" in r3 and "rpg status do gather" in r3, r3[:300])
+        r4 = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "who is online"}],
+            director.census(online_only=False))
+        check("recipes sweep: no match says so (fall back to core rules)",
+              "no library match" in r4, r4)
         bots_c = director.census()
         err = director.validate({"bot": "Gau", "cmd": "go 12.3;abc"}, bots_c)
         check("validate: bare go x;y legs are mission-internal (refused)",
@@ -196,8 +213,12 @@ def main():
               any("send golbez to stv" in m["content"] for m in director.FEWSHOT)
               and any("travel Booty Bay" in m["content"] for m in director.FEWSHOT),
               [m["content"][:60] for m in director.FEWSHOT])
-        check("prompt: leveling rule uses the travel order",
-              'cmd":"travel <the zone\'s table destination>' in rules, rules[:0])
+        r5 = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "have golbez go level in stv"}],
+            director.census(online_only=False))
+        check("recipes sweep: leveling loads travel + grind orders",
+              "RECIPE level_in_zone" in r5 and "travel <the zone's table destination>" in r5
+              and "nc +new rpg,+grind,-follow" in r5, r5[:300])
         dig = director.run_queries(
             [{"query": "dest", "bot": "Gau", "name": "Booty Bay"}],
             director.census(online_only=False))
@@ -220,23 +241,25 @@ def main():
         check("abbreviations resolve to canonical zones",
               all(z in director.ZONE_DESTINATIONS
                   for z in director.ZONE_ABBREVIATIONS.values()))
-        check("prompt renders the full table",
-              all(d[0] in director.ORDER_RULES
-                  for d in director.ZONE_DESTINATIONS.values()))
-        check("prompt renders the abbreviations",
-              "stv=Stranglethorn Vale" in director.ORDER_RULES)
-        check("prompt has the leveling-in-zone recipe",
-              "level in <zone>" in director.ORDER_RULES)
+        check("library renders the full table (via the travel recipe)",
+              all(d[0] in r1 for d in director.ZONE_DESTINATIONS.values()), r1[:200])
+        check("library separates prompt data from prompt rules",
+              "stv=Stranglethorn Vale" in r1
+              and "Booty Bay" not in director.ORDER_RULES)
 
-        print("== 1d. agent layers: npc/mob travel, quest-by-name, silent-bot, zone names ==")
-        rules = director.ORDER_RULES
-        check("prompt: NPC/mob destinations rule",
-              "NPC/mob travel" in rules and "yetis" in rules)
-        check("prompt: quest-by-name via id lookup",
-              "Quest by name" in rules and "NEVER invent quest ids" in rules)
-        check("prompt: silent-bot procedure (A20)",
-              "Silent-bot procedure" in rules and "revive" in rules
-              and "bot remove" in rules)
+        print("== 1d. agent layers as recipes: quest-by-name, silent-bot, zone names ==")
+        rq = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "send ayla after the quest claws from the deep"}],
+            director.census(online_only=False))
+        check("recipes sweep: quest-by-name loads the id-lookup structure",
+              "RECIPE quest_by_name" in rq and "rpg do quest <id>" in rq
+              and "NEVER invent quest ids" in rq, rq[:300])
+        rs = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "cyan is silent and ignoring orders"}],
+            director.census(online_only=False))
+        check("recipes sweep: silent-bot loads the A20 procedure",
+              "RECIPE silent_bot" in rs and "revive" in rs
+              and "bot remove" in rs and "bot add" in rs, rs[:300])
         check("zone names sourced table present",
               director.ZONE_NAMES.get(46) == "Burning Steppes"
               and director.ZONE_NAMES.get(33) == "Stranglethorn Vale"
@@ -260,10 +283,14 @@ def main():
         missing = [h for h in harbors if director._tele_coords(h) is None]
         check("every route harbor resolves in game_tele (db-search)",
               not missing, missing)
-        check("harbormaster prompt rule present",
-              "Harbormaster travel" in director.ORDER_RULES
-              and "never mention teleporting" in director.ORDER_RULES)
-        check("farming prompt rule present", "farm <mat>" in director.ORDER_RULES)
+        rb = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "take the boat from booty bay to ratchet"}],
+            director.census(online_only=False))
+        check("recipes sweep: the boat recipe carries routes + narration rules",
+              "RECIPE harbormaster_boat" in rb and "Booty Bay->Ratchet" in rb
+              and "never mention teleporting" in rb, rb[:300])
+        check("farming rule lives in the library, not the prompt",
+              "RECIPE farm_mat" in r3 and "farm <mat>" not in director.ORDER_RULES)
 
         bots = director.census()
         # not at a dock (no live position at all -> SKIP, never a blind boat)

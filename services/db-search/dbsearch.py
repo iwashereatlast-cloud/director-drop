@@ -525,7 +525,7 @@ REDIRECTS = {
     "db_fallback": "get_online_census (online flag is a hint only, A5 - and a DB-offline bot may still answer)"},
 }
 
-META_TOOLS = ("catalog",)
+META_TOOLS = ("catalog", "get_recipes")
 
 class ToolError(Exception):
     def __init__(self, msg, code):
@@ -618,6 +618,8 @@ def run_tool(adapter, tool, params):
                           "db-search suggests, the LLM executes); on an inspect "
                           "timeout the offline truth is this catalog's "
                           "db_fallback - use it and its caveat, never guess"}
+    if tool == "get_recipes":
+        return _run_recipes(params or {})
     if tool not in CATALOG:
         raise ToolError("unknown tool %r - allowed: %s (redirects: %s)" %
                         (tool, ", ".join(sorted(CATALOG) + list(META_TOOLS)),
@@ -646,6 +648,50 @@ def run_tool(adapter, tool, params):
         rows.append(line.split("\t"))
     return {"ok": True, "tool": tool, "queried_at": _now(), "caveat": spec["caveat"],
             "rows": rows, "row_count": len(rows), "duration_ms": ms}
+
+# -------------------------------------------------------------- recipes ----
+# The recipe library lives in recipes.json (same directory as this file) -
+# premade command structures the LLM selects by keyword sweep and loads on
+# demand instead of carrying in every prompt. NOT SQL: static data served by
+# the fact layer, loaded once at serve start.
+RECIPES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes.json")
+TEXT_RE = re.compile(r"^[A-Za-z0-9 ,.!?:'-]{1,140}$")   # no ; - statement
+# separators refuse even though this tool never touches SQL (gate consistency)
+
+
+def _load_recipes():
+    try:
+        with open(RECIPES_PATH) as f:
+            data = json.load(f)
+        return data.get("recipes", [])
+    except Exception as e:                                   # noqa: BLE001
+        raise ToolError("recipe library unreadable: %s" % e, "internal")
+
+
+def _run_recipes(params):
+    """Keyword sweep over the master's raw words -> the top matching recipes
+    with their full command structures. The LLM does the selecting; this does
+    the scoring (substring hits, case-insensitive, multi-word keywords must
+    appear as phrases)."""
+    text = _p("get_recipes", params, "text", pattern=TEXT_RE).lower()
+    t0 = time.monotonic()
+    scored = []
+    for r in _load_recipes():
+        score = 0
+        for kw in r.get("keywords", []):
+            if kw.lower() in text:
+                score += len(kw.split())          # phrases weigh more
+        if score:
+            scored.append((score, r))
+    scored.sort(key=lambda t: -t[0])
+    top = [r for _, r in scored[:3]]
+    return {"ok": True, "tool": "get_recipes", "queried_at": _now(),
+            "caveat": "static library - no DB query, no staleness. A 0-row "
+                      "answer means no recipe matched: fall back to the core "
+                      "rules and say what you lack.",
+            "rows": [json.dumps(r) for r in top], "row_count": len(top),
+            "duration_ms": int((time.monotonic() - t0) * 1000)}
+
 
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

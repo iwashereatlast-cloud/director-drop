@@ -346,6 +346,23 @@ def main():
         check("flightmasters: SQL metacharacters refused at the param gate",
               r.get("ok") is False and r.get("code") == "bad_param", r)
 
+        print("== 4c. recipe library sweep (get_recipes) ==")
+        r = handle(adapter, {"tool": "get_recipes", "params": {"text": "have golbez come to you"}})
+        check("recipes: envelope", envelope_ok(r, "get_recipes"), json.dumps(r)[:200])
+        check("recipes: 'come to you' -> the follow recipe",
+              r.get("ok") and r["row_count"] == 1
+              and json.loads(r["rows"][0])["id"] == "come_to_me", r)
+        r = handle(adapter, {"tool": "get_recipes", "params": {"text": "send golbez to stv"}})
+        check("recipes: 'stv' -> the travel recipe with the zone table",
+              r.get("ok") and json.loads(r["rows"][0])["id"] == "travel"
+              and "Stranglethorn Vale" in r["rows"][0], r)
+        r = handle(adapter, {"tool": "get_recipes", "params": {"text": "who is online"}})
+        check("recipes: no match -> 0 rows, still ok",
+              r.get("ok") and r["row_count"] == 0, r)
+        r = handle(adapter, {"tool": "get_recipes", "params": {"text": "x'; DROP TABLE recipes; --"}})
+        check("recipes: SQL metacharacters refused at the param gate",
+              r.get("ok") is False and r.get("code") == "bad_param", r)
+
         print("== 5. per-query timeout fires ==")
         # the sqlite fixture adapter DETECTS timeouts post-hoc (deadline checked
         # after the query completes - the real mysql adapter ENFORCES by killing
