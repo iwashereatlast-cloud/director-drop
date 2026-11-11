@@ -207,16 +207,21 @@ INSERT INTO acore_world.game_tele VALUES
 -- Two on the fixture's Eastern Kingdoms: one near Goldshire (departure),
 -- one near the BootyBay tele point (arrival) - the offline travel proof
 -- hops to the first, reads a fake 'taxi ?' list, flies, walks the last mile.
+-- faction mirrors creature_template.faction (core ids): 1 = Alliance,
+-- 2 = Horde. A Horde FM also camps near Goldshire (fixture fiction): the
+-- faction gate keeps it out of every alliance query, and 'any' returns both.
 CREATE TABLE acore_world.creature_template (
-  entry INTEGER PRIMARY KEY, name TEXT, npcflag INTEGER);
+  entry INTEGER PRIMARY KEY, name TEXT, npcflag INTEGER, faction INTEGER);
 INSERT INTO acore_world.creature_template VALUES
-  (352, 'Fargas the FM', 8192),
-  (353, 'Booty Bay FM', 8192),
-  (354, 'Innkeeper', 65536);
+  (352, 'Fargas the FM', 8192, 1),
+  (353, 'Booty Bay FM', 8192, 1),
+  (354, 'Innkeeper', 65536, 1),
+  (355, 'Horde FM', 8192, 2);
 CREATE TABLE acore_world.creature (
   guid INTEGER PRIMARY KEY, id INTEGER, map INTEGER,
   position_x REAL, position_y REAL, position_z REAL);
 INSERT INTO acore_world.creature VALUES
   (1, 352, 0, -9500.0, 60.0, 56.0),
   (2, 353, 0, -14400.0, 500.0, 20.0),
-  (3, 354, 0, -9460.0, 90.0, 56.0);
+  (3, 354, 0, -9460.0, 90.0, 56.0),
+  (4, 355, 0, -9800.0, 60.0, 56.0);

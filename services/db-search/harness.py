@@ -333,16 +333,31 @@ def main():
         check("mat: unknown mat -> 0 rows, still ok",
               r.get("ok") and r["row_count"] == 0, r)
 
-        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0"}})
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0", "faction": "alliance"}})
         check("flightmasters envelope", envelope_ok(r, "get_flightmasters"), json.dumps(r)[:200])
-        check("flightmasters: nearest FM first (Goldshire area)",
+        check("flightmasters: nearest FM first (Goldshire area, alliance filter)",
               r.get("ok") and r["rows"] and r["rows"][0][0] == "Fargas the FM", r)
         check("flightmasters: non-FM npcs excluded (npcflag gate)",
               not any(row[0] == "Innkeeper" for row in r.get("rows", [])), r)
-        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "9"}})
+        check("flightmasters: horde FM excluded for an alliance bot",
+              not any(row[0] == "Horde FM" for row in r.get("rows", [])), r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0", "faction": "horde"}})
+        check("flightmasters: horde filter -> horde FM only",
+              r.get("ok") and r["row_count"] == 1 and r["rows"][0][0] == "Horde FM", r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0", "faction": "any"}})
+        check("flightmasters: any -> both Goldshire-area FMs returned (no faction gate)",
+              r.get("ok") and
+              {"Fargas the FM", "Horde FM"}.issubset({row[0] for row in r["rows"]}), r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0"}})
+        check("flightmasters: missing faction refused at the param gate",
+              r.get("ok") is False and r.get("code") == "bad_param", r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0", "faction": "gadgetzan"}})
+        check("flightmasters: bogus faction word refused",
+              r.get("ok") is False and r.get("code") == "bad_param", r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "9", "faction": "alliance"}})
         check("flightmasters: other map -> 0 rows, still ok",
               r.get("ok") and r["row_count"] == 0, r)
-        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "0; DROP", "y": "1", "map": "0"}})
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "0; DROP", "y": "1", "map": "0", "faction": "alliance"}})
         check("flightmasters: SQL metacharacters refused at the param gate",
               r.get("ok") is False and r.get("code") == "bad_param", r)
 

@@ -3,73 +3,247 @@
   "recipes": [
     {
       "id": "come_to_me",
-      "keywords": ["come to", "come here", "here", "summon", "to me", "to you", "my side", "bring him", "bring her", "bring them"],
+      "keywords": [
+        "come to",
+        "come here",
+        "here",
+        "summon",
+        "to me",
+        "to you",
+        "my side",
+        "bring him",
+        "bring her",
+        "bring them"
+      ],
       "when": "the master wants a bot at Leo's side",
-      "orders": [{"cmd": "follow", "note": "the bot comes to Leo and stays at his side - NO coordinates needed"}],
-      "release": {"cmd": "stay", "note": "or any task recipe frees the bot from following"},
+      "orders": [
+        {
+          "cmd": "follow",
+          "note": "the bot comes to Leo and stays at his side - NO coordinates needed"
+        }
+      ],
+      "release": {
+        "cmd": "stay",
+        "note": "or any task recipe frees the bot from following"
+      },
       "notes": "Do NOT compute Leo's coordinates - 'follow' needs none. Never order travel for this."
     },
     {
       "id": "travel",
-      "keywords": ["go to", "send to", "travel", "head to", "move to", "stv", "stranglethorn", "make for", "off to", "fly to", "fly"],
+      "keywords": [
+        "go to",
+        "send to",
+        "travel",
+        "head to",
+        "move to",
+        "stv",
+        "stranglethorn",
+        "make for",
+        "off to",
+        "fly to",
+        "fly"
+      ],
       "when": "the master wants a bot at a named destination (zone, town, NPC place)",
-      "orders": [{"cmd": "travel <destination>", "note": "the SYSTEM runs the whole journey: stands the bot down, walks it to the nearest flight master, reads its own 'taxi ?' list, flies the long leg if the network reaches it, walks the last mile, whispers the arrival"}],
+      "orders": [
+        {
+          "cmd": "travel <destination>",
+          "note": "the SYSTEM runs the whole journey: stands the bot down, moves it to the destination (Leo's carriage - never narrate the mechanism), confirms the arrival from a live position read, restores the bot, whispers the arrival"
+        }
+      ],
       "zone_table": {
         "_note": "the master speaks in zone names/abbreviations; the engine wants the town/subzone. Translate with this table (zone -> destination, level bracket):",
-        "Arathi Highlands": ["Refuge Point", "30-40"],
-        "Ashenvale": ["Astranaar", "20-30"],
-        "Azshara": ["Azshara", "45-55"],
-        "Badlands": ["Kargath", "40-50"],
-        "Burning Steppes": ["Flame Crest", "50-60"],
-        "Darkshore": ["Auberdine", "10-20"],
-        "Desolace": ["Nijel's Point", "30-40"],
-        "Dun Morogh": ["Kharanos", "1-12"],
-        "Duskwood": ["Darkshire", "18-30"],
-        "Dustwallow Marsh": ["Theramore", "35-45"],
-        "Eastern Plaguelands": ["Light's Hope Chapel", "45-60"],
-        "Elwynn Forest": ["Goldshire", "1-12"],
-        "Felwood": ["Felwood", "48-55"],
-        "Feralas": ["Feathermoon", "40-50"],
-        "Hillsbrad Foothills": ["Tarren Mill", "20-30"],
-        "Loch Modan": ["Thelsamar", "10-20"],
-        "Mulgore": ["Bloodhoof Village", "1-12"],
-        "Redridge Mountains": ["Lakeshire", "15-25"],
-        "Silithus": ["Cenarion Hold", "55-60"],
-        "Silverpine Forest": ["The Sepulcher", "10-20"],
-        "Stranglethorn Vale": ["Booty Bay", "30-40"],
-        "Swamp of Sorrows": ["Stonard", "35-45"],
-        "Tanaris": ["Gadgetzan", "40-50"],
-        "Teldrassil": ["Dolanaar", "1-12"],
-        "The Barrens": ["Crossroads", "10-25"],
-        "The Hinterlands": ["Aerie Peak", "40-50"],
-        "Thousand Needles": ["Freewind Post", "25-35"],
-        "Un'Goro Crater": ["Marshal's Refuge", "48-55"],
-        "Western Plaguelands": ["Andorhal", "40-50"],
-        "Westfall": ["Sentinel Hill", "10-20"],
-        "Wetlands": ["Menethil Harbor", "20-30"],
-        "Winterspring": ["Everlook", "55-60"]
+        "Arathi Highlands": [
+          "Refuge Point",
+          "30-40"
+        ],
+        "Ashenvale": [
+          "Astranaar",
+          "20-30"
+        ],
+        "Azshara": [
+          "Azshara",
+          "45-55"
+        ],
+        "Badlands": [
+          "Kargath",
+          "40-50"
+        ],
+        "Burning Steppes": [
+          "Flame Crest",
+          "50-60"
+        ],
+        "Darkshore": [
+          "Auberdine",
+          "10-20"
+        ],
+        "Desolace": [
+          "Nijel's Point",
+          "30-40"
+        ],
+        "Dun Morogh": [
+          "Kharanos",
+          "1-12"
+        ],
+        "Duskwood": [
+          "Darkshire",
+          "18-30"
+        ],
+        "Dustwallow Marsh": [
+          "Theramore",
+          "35-45"
+        ],
+        "Eastern Plaguelands": [
+          "Light's Hope Chapel",
+          "45-60"
+        ],
+        "Elwynn Forest": [
+          "Goldshire",
+          "1-12"
+        ],
+        "Felwood": [
+          "Felwood",
+          "48-55"
+        ],
+        "Feralas": [
+          "Feathermoon",
+          "40-50"
+        ],
+        "Hillsbrad Foothills": [
+          "Tarren Mill",
+          "20-30"
+        ],
+        "Loch Modan": [
+          "Thelsamar",
+          "10-20"
+        ],
+        "Mulgore": [
+          "Bloodhoof Village",
+          "1-12"
+        ],
+        "Redridge Mountains": [
+          "Lakeshire",
+          "15-25"
+        ],
+        "Silithus": [
+          "Cenarion Hold",
+          "55-60"
+        ],
+        "Silverpine Forest": [
+          "The Sepulcher",
+          "10-20"
+        ],
+        "Stranglethorn Vale": [
+          "Booty Bay",
+          "30-40"
+        ],
+        "Swamp of Sorrows": [
+          "Stonard",
+          "35-45"
+        ],
+        "Tanaris": [
+          "Gadgetzan",
+          "40-50"
+        ],
+        "Teldrassil": [
+          "Dolanaar",
+          "1-12"
+        ],
+        "The Barrens": [
+          "Crossroads",
+          "10-25"
+        ],
+        "The Hinterlands": [
+          "Aerie Peak",
+          "40-50"
+        ],
+        "Thousand Needles": [
+          "Freewind Post",
+          "25-35"
+        ],
+        "Un'Goro Crater": [
+          "Marshal's Refuge",
+          "48-55"
+        ],
+        "Western Plaguelands": [
+          "Andorhal",
+          "40-50"
+        ],
+        "Westfall": [
+          "Sentinel Hill",
+          "10-20"
+        ],
+        "Wetlands": [
+          "Menethil Harbor",
+          "20-30"
+        ],
+        "Winterspring": [
+          "Everlook",
+          "55-60"
+        ]
       },
-      "abbreviations": {"stv": "Stranglethorn Vale", "wpl": "Western Plaguelands", "epl": "Eastern Plaguelands"},
-      "notes": "Narrate as '<bot> is travelling to <destination>' and say HOW (on foot / via flight). The system whispers progress and the arrival; confirm movement only from its whispers, never from the order alone. If the master names a town directly, use it as-is. Cross-continent trips need a boat/zeppelin - the system refuses with a map note; then see the harbormaster recipe."
+      "abbreviations": {
+        "stv": "Stranglethorn Vale",
+        "wpl": "Western Plaguelands",
+        "epl": "Eastern Plaguelands"
+      },
+      "notes": "Narrate as '<bot> is travelling to <destination>' and say arrival only when the system whispers it. Confirm movement only from the system's whispers, never from the order alone. If the master names a town directly, use it as-is. Never narrate HOW the system moves the bot."
     },
     {
       "id": "walk",
-      "keywords": ["walk", "on foot", "march", "no flight", "ground"],
-      "when": "the master wants a bot to WALK to a destination (no flight)",
-      "orders": [{"cmd": "walk <destination>", "note": "ground-only variant of travel - the system hop-marches the whole way"}],
-      "notes": "Use only when the master explicitly wants no flight; otherwise 'travel' is faster."
+      "keywords": [
+        "walk",
+        "on foot",
+        "march",
+        "ground"
+      ],
+      "when": "the master explicitly wants the bot to WALK to a destination (ground march)",
+      "orders": [
+        {
+          "cmd": "walk <destination>",
+          "note": "ground-only variant of travel - the system hop-marches the whole way"
+        }
+      ],
+      "notes": "Use only when the master explicitly wants the bot to walk; otherwise 'travel' is faster."
     },
     {
       "id": "harbormaster_boat",
-      "keywords": ["boat", "zeppelin", "cross continent", "ratchet", "booty bay", "menethil", "theramore", "auberdine", "gromgol", "undercity", "orgrimmar"],
-      "when": "a bot must cross a continent (the taxi network does not span oceans)",
-      "orders": [{"cmd": "boat <arrival harbor>", "note": "ONLY along real routes: Booty Bay->Ratchet, Menethil Harbor->Theramore, Menethil Harbor->Auberdine (boats, any faction); Gromgol Base Camp->Undercity, Gromgol Base Camp->Orgrimmar, Undercity->Orgrimmar (zeppelins, HORDE only - never an Alliance bot)"}],
+      "keywords": [
+        "boat",
+        "zeppelin",
+        "cross continent",
+        "ratchet",
+        "booty bay",
+        "menethil",
+        "theramore",
+        "auberdine",
+        "gromgol",
+        "undercity",
+        "orgrimmar"
+      ],
+      "when": "the master explicitly wants the boat/zeppelin crossing (in-fiction travel); 'travel <destination>' already crosses continents on its own - do not use this recipe otherwise",
+      "orders": [
+        {
+          "cmd": "boat <arrival harbor>",
+          "note": "ONLY along real routes: Booty Bay->Ratchet, Menethil Harbor->Theramore, Menethil Harbor->Auberdine (boats, any faction); Gromgol Base Camp->Undercity, Gromgol Base Camp->Orgrimmar, Undercity->Orgrimmar (zeppelins, HORDE only - never an Alliance bot)"
+        }
+      ],
       "requirements": "the bot must be AT the departure dock (check with a live query); the system enforces routes and faction - a SKIP means not at the dock or wrong faction",
       "notes": "Narrate as travel: 'Gau is taking the boat from Menethil Harbor to Auberdine' - never mention teleporting. First the bot must travel/walk to the departure harbor."
     },
     {
       "id": "farm_mat",
-      "keywords": ["farm", "farming", "gather", "peacebloom", "herb", "herbs", "ore", "vein", "mining", "skin"],
+      "keywords": [
+        "farm",
+        "farming",
+        "gather",
+        "peacebloom",
+        "herb",
+        "herbs",
+        "ore",
+        "vein",
+        "mining",
+        "skin"
+      ],
       "when": "the master wants a bot to farm a material (herbs/ore)",
       "steps": [
         "check the unit can gather: query {\"query\":\"skills\",\"bot\":\"<name>\"} - it needs herb (plants) or mine (ore); if it lacks the skill, SAY SO and suggest a unit that has it",
@@ -81,17 +255,38 @@
     },
     {
       "id": "level_in_zone",
-      "keywords": ["level in", "grind in", "quest in", "xp in", "xp from"],
+      "keywords": [
+        "level in",
+        "grind in",
+        "quest in",
+        "xp in",
+        "xp from"
+      ],
       "when": "the master wants a bot to level/grind/quest in a zone",
       "orders": [
-        {"cmd": "travel <the zone's table destination>", "note": "the system flies/marches them there and whispers the arrival"},
-        {"cmd": "nc +new rpg,+grind,-follow", "note": "the grind recipe; for questing use +quest instead of +grind"}
+        {
+          "cmd": "travel <the zone's table destination>",
+          "note": "the system flies/marches them there and whispers the arrival"
+        },
+        {
+          "cmd": "nc +new rpg,+grind,-follow",
+          "note": "the grind recipe; for questing use +quest instead of +grind"
+        }
       ],
       "notes": "Match the unit's level to the zone's bracket (travel recipe's table); if the bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction."
     },
     {
       "id": "silent_bot",
-      "keywords": ["silent", "ignoring", "not moving", "unresponsive", "frozen", "stuck", "corpse", "no reply"],
+      "keywords": [
+        "silent",
+        "ignoring",
+        "not moving",
+        "unresponsive",
+        "frozen",
+        "stuck",
+        "corpse",
+        "no reply"
+      ],
       "when": "a bot ignores orders or a probe times out - never report it as fine",
       "steps": [
         "attach query {\"query\":\"strategies\",\"bot\":\"<name>\"} - a timeout means silent (offline truth is db-search)",
@@ -102,16 +297,33 @@
     },
     {
       "id": "stand_down",
-      "keywords": ["stand down", "idle", "stop grinding", "stop questing", "rest", "disengage"],
+      "keywords": [
+        "stand down",
+        "idle",
+        "stop grinding",
+        "stop questing",
+        "rest",
+        "disengage"
+      ],
       "when": "the master wants a bot to stop its task and return to idle",
       "orders": [
-        {"cmd": "nc -new rpg,-grind,-gather", "note": "strips the task strategies; the bot keeps following its master, which is desired here"},
-        {"cmd": "rpg status idle", "note": "returns the rpg engine to idle"}
+        {
+          "cmd": "nc -new rpg,-grind,-gather",
+          "note": "strips the task strategies; the bot keeps following its master, which is desired here"
+        },
+        {
+          "cmd": "rpg status idle",
+          "note": "returns the rpg engine to idle"
+        }
       ]
     },
     {
       "id": "quest_by_name",
-      "keywords": ["quest", "turn in", "quest id"],
+      "keywords": [
+        "quest",
+        "turn in",
+        "quest id"
+      ],
       "when": "the master names a SPECIFIC quest for a bot",
       "steps": [
         "attach query {\"query\":\"quest\",\"bot\":\"<name>\"} FIRST - the results carry quest ids",
@@ -121,26 +333,63 @@
     },
     {
       "id": "group_remove",
-      "keywords": ["kick", "remove from group", "leave group", "out of the raid", "out of the group"],
+      "keywords": [
+        "kick",
+        "remove from group",
+        "leave group",
+        "out of the raid",
+        "out of the group"
+      ],
       "when": "the master wants a member out of Leo's group/raid",
-      "orders": [{"cmd": "group remove", "note": "only CURRENT members of Leo's own group, never Leo himself, never hand-play toons; bot members are auto-rewritten to a plain 'leave'"}],
+      "orders": [
+        {
+          "cmd": "group remove",
+          "note": "only CURRENT members of Leo's own group, never Leo himself, never hand-play toons; bot members are auto-rewritten to a plain 'leave'"
+        }
+      ],
       "notes": "To see another toon's group: query {\"query\":\"raid\",\"bot\":\"<toon>\"}. Never try to GROW a group - invite/give leader are not whitelisted; the mod auto-pulls bots into Leo's group on login anyway."
     },
     {
       "id": "presence",
-      "keywords": ["log in", "log out", "bring online", "bring offline", "bot add", "bot remove", "shut down"],
+      "keywords": [
+        "log in",
+        "log out",
+        "bring online",
+        "bring offline",
+        "bot add",
+        "bot remove",
+        "shut down"
+      ],
       "when": "the master wants a unit's session changed",
       "orders": [
-        {"cmd": "bot add", "note": "logs an OFFLINE unit in (runs as a server command from Leo)"},
-        {"cmd": "bot remove", "note": "logs an ONLINE unit out"}
+        {
+          "cmd": "bot add",
+          "note": "logs an OFFLINE unit in (runs as a server command from Leo)"
+        },
+        {
+          "cmd": "bot remove",
+          "note": "logs an ONLINE unit out"
+        }
       ],
       "notes": "If the roster shows a unit OFFLINE, do not refuse - propose the bot add."
     },
     {
       "id": "cast",
-      "keywords": ["cast", "mooncloth", "transmute", "smelt", "titansteel", "spell"],
+      "keywords": [
+        "cast",
+        "mooncloth",
+        "transmute",
+        "smelt",
+        "titansteel",
+        "spell"
+      ],
       "when": "the master wants a unit to cast a craft spell",
-      "orders": [{"cmd": "cast <exact spell name>", "note": "ONLY these exact spell names are ever allowed: Mooncloth (tailors), Transmute: Titanium (alchemists), Smelt Titansteel (miners) - the system checks the unit's professions and refuses everything else"}],
+      "orders": [
+        {
+          "cmd": "cast <exact spell name>",
+          "note": "ONLY these exact spell names are ever allowed: Mooncloth (tailors), Transmute: Titanium (alchemists), Smelt Titansteel (miners) - the system checks the unit's professions and refuses everything else"
+        }
+      ],
       "notes": "Never invent spell names or spell ids."
     }
   ]
