@@ -423,8 +423,8 @@ CATALOG = {
     # 'taxi ?' list, and flies the long leg (the taxi graph itself lives in
     # the DBC stores, not SQL - the bot's live list IS the route data).
     "sql": ("SELECT ct.name, c.map, c.position_x, c.position_y, c.position_z, "
-            "CAST((c.position_x - {x}) * (c.position_x - {x}) "
-            "+ (c.position_y - {y}) * (c.position_y - {y}) AS INTEGER) AS dist "
+            "(c.position_x - {x}) * (c.position_x - {x}) "
+            "+ (c.position_y - {y}) * (c.position_y - {y}) AS dist "
             "FROM acore_world.creature c "
             "JOIN acore_world.creature_template ct ON ct.entry = c.id "
             "WHERE (ct.npcflag & 8192) != 0 AND c.map = {map} "
