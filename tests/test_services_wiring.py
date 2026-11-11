@@ -13,6 +13,7 @@ direct FIFO/log access, no `tail` in director.py.
 
 Run: python3 tests/test_services_wiring.py   (no worldserver needed)
 """
+import json
 import os
 import re
 import socket
@@ -767,6 +768,27 @@ def main():
         check("capped spiral (done_reason=length) stays empty, not hallucinated",
               out == "", out)
         urllib.request.urlopen = real_urlopen
+
+        print("== 8d. truncated contracts + narration wording (live 2026-11-11) ==")
+        out = director._extract_json('"""json\n{"query": "recipes", "text": "have golbez gather"}\n"""')
+        check("triple-double-quote fences extract like backtick fences",
+              out and json.loads(out)["query"] == "recipes", out)
+        out = director._extract_json('```json\n{"reply": "ok", "orders": []}\n```')
+        check("backtick fences still extract",
+              out and json.loads(out)["reply"] == "ok", out)
+        p = director.parse_orders('"""json\n{"query": "recipes", "text": "ha"')
+        check("capped mid-contract reply never reaches the tunnel raw",
+              "tangled" in p["reply"] and p["orders"] == [] and p["queries"] == [], p)
+        p = director.parse_orders("Golbez is heading out.")
+        check("plain-text replies pass through unchanged",
+              p["reply"] == "Golbez is heading out." and p["orders"] == [], p)
+        said = []
+        real_send = director.send_order
+        director.send_order = lambda who, cmd: said.append(cmd) or {"line": cmd}
+        director.say("Cecil", 'multi\nline ""json reply')
+        check("say() flattens newlines before the whisper",
+              len(said) == 1 and "\n" not in said[0] and " ; " in said[0], said)
+        director.send_order = real_send
 
         print("== 9. presence facts (heartbeat hands, never decides) ==")
         director._svc_state = lambda: "active"
