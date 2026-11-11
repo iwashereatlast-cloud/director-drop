@@ -537,11 +537,11 @@ def main():
         check("farm mission narrated the arrival",
               any("arrived at BootyBay and is gathering" in r for r in reported2), reported2)
         check("farm keeper registered the bot",
-              "Ayla" in director._FARMING, director._FARMING)
+              director._lease_kind("Ayla") == "farm", director._LEASES)
         err = director.validate({"bot": "Ayla", "cmd": "rpg status idle"},
                                 director.census())
         check("stand-down order cancels the keeper",
-              err is None and "Ayla" not in director._FARMING, (err, director._FARMING))
+              err is None and "Ayla" not in director._LEASES, (err, director._LEASES))
         time.sleep(3)
         g_before = farm_state["gathers"]
         time.sleep(4)
@@ -991,6 +991,18 @@ def main():
         p4 = director.parse_orders('[{"reply": "array not object"}]')
         check("boundary: an array-wrapped contract still yields text + no orders",
               p4["reply"] == "array not object" and p4["orders"] == [], p4)
+
+        director._LEASES["Gau"] = ("travel", "Ironforge")
+        err = director.validate({"bot": "Gau", "cmd": "farm Booty Bay"}, bots_c)
+        check("invariant: a leased bot refuses new missions with the live verb",
+              "already travelling to Ironforge" in str(err), err)
+        err = director.validate({"bot": "Gau", "cmd": "rpg status idle"}, bots_c)
+        check("invariant: stand-down cancels only farm leases",
+              "Gau" in director._LEASES, director._LEASES)
+        director._release_lease("Gau")
+        err = director.validate({"bot": "Gau", "cmd": "travel Booty Bay"}, bots_c)
+        check("invariant: a released lease accepts new missions",
+              err is None, err)
         return finish()
     finally:
         db_proc.terminate()

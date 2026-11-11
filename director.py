@@ -804,8 +804,49 @@ PATH_DIRECT = float(os.environ.get("DIRECTOR_PATH_DIRECT", "290"))
 #   straight-line hop point inside a city lands across canals and walks the
 #   bot the wrong way (live 2026-11-10: Stormwind bank -> FM sent Golbez to
 #   the flower shop side instead of up the ramp)
-_WALKING = {}      # bot -> destination name (one march per bot)
-_FARMING = {}       # bot -> zone name (one gather-keeper per bot)
+# ONE lease registry: bot -> (kind, name), kind in ("walk", "travel", "farm").
+# One mission per bot, ever - the missions and validate() all go through
+# this (the old _WALKING/_FARMING pair was the same concept split in two).
+_LEASES = {}
+
+# Mission order -> expected evidence (the doctrine: the bot's reply and
+# position are the only truth, never the order alone). Every mission leg
+# asserts its evidence before reporting success; bare strategy whispers
+# (nc/rpg status) remain fire-and-forget and are documented as such.
+def _lease_kind(bot):
+    return _LEASES[bot][0] if bot in _LEASES else None
+
+
+_LEASE_VERBS = {"farm": "farming in", "travel": "travelling to",
+                "walk": "marching to"}
+
+
+def _lease_busy(bot):
+    """The refusal message naming what the bot is actually doing, or None."""
+    if bot in _LEASES:
+        k, n = _LEASES[bot]
+        return "%s is already %s %s" % (bot, _LEASE_VERBS[k], n)
+    return None
+
+
+def _take_lease(bot, kind, name):
+    """One mission per bot: refuse if any lease is held."""
+    err = _lease_busy(bot)
+    if err:
+        return err
+    _LEASES[bot] = (kind, name)
+    return None
+
+
+def _release_lease(bot):
+    _LEASES.pop(bot, None)
+
+
+MISSION_EVIDENCE = {
+    "travel": "live position within 500yd of the game_tele point, right map",
+    "farm":   "same as travel, then the keeper's re-arm sends (3 failures stop)",
+    "walk":   "live position progressing toward the target on every tick",
+}
 
 
 def _next_hop(px, py, tx, ty):
@@ -879,7 +920,7 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
         except Exception:
             pass
     finally:
-        _WALKING.pop(bot, None)
+        _release_lease(bot)
 
 
 def _sidestep_probe(bot, pos, tx, ty):
@@ -905,6 +946,43 @@ def _sidestep_probe(bot, pos, tx, ty):
 
 
 
+def _stand_down(bot):
+    """Mission prologue: strip the engine's own agendas (follow-cling,
+    grind/gather/rpg wander) so the bot obeys the mission alone."""
+    for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
+        try:
+            send_order(bot, c)
+        except Exception:
+            pass
+        time.sleep(1)
+
+
+def _teleport_leg(bot, tx, ty, tmap, name, master, timeout=30):
+    """The shared tele leg: narrate, '.tele name', then CONFIRM from a live
+    position read (within 500yd of the game_tele point on the right map) -
+    the MISSION_EVIDENCE['travel'/'farm'] assertion. Returns True/False;
+    never trusts the order alone."""
+    t0 = time.time()
+    say(master, "%s is travelling to %s." % (bot, name))
+    send_order(bot, "travel %s" % name)
+    while time.time() - t0 < timeout:
+        time.sleep(3)
+        pos = _live_position(bot)
+        if pos and pos[3] == tmap and \
+                (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 500.0 ** 2:
+            return True
+    return False
+
+
+def _restore(bot, restore=None):
+    """Mission epilogue: hand the bot back to its normal engine life."""
+    for c in (restore or ("nc +new rpg,+grind,-follow",)):
+        try:
+            send_order(bot, c)
+        except Exception as e:
+            print("daemon: restore failed for %s: %s" % (bot, e))
+
+
 def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
     """Teleport travel (owner decision 2026-11-11): Leo (gmlevel 3) moves the
     bot with '.tele name <bot> <location>'. The stock 'taxi ?'/'taxi <n>'
@@ -917,28 +995,10 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
     teleports it to the game_tele point, confirms the arrival from a live
     position read, restores it, and reports."""
     try:
-        for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
-            try:
-                send_order(bot, c)
-            except Exception:
-                pass
-            time.sleep(1)
+        _stand_down(bot)
         t0 = time.time()
-        say(master, "%s is travelling to %s." % (bot, name))
-        send_order(bot, "travel %s" % name)
-        arrived = False
-        while time.time() - t0 < 30:
-            time.sleep(3)
-            pos = _live_position(bot)
-            if pos and pos[3] == tmap and \
-                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 500.0 ** 2:
-                arrived = True
-                break
-        for c in (restore or ("nc +new rpg,+grind,-follow",)):
-            try:
-                send_order(bot, c)
-            except Exception as e:
-                print("daemon: travel restore failed for %s: %s" % (bot, e))
+        arrived = _teleport_leg(bot, tx, ty, tmap, name, master)
+        _restore(bot, restore)
         if arrived:
             say(master, "%s has arrived at %s." % (bot, name))
             print("daemon: travel %s -> %s: arrived (%.0fs)"
@@ -952,7 +1012,7 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
         except Exception:
             pass
     finally:
-        _WALKING.pop(bot, None)
+        _release_lease(bot)
 
 
 def _farm_mission(bot, tx, ty, tmap, name, master):
@@ -967,24 +1027,9 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
     goes IDLE. A stand-down order (rpg status idle / nc -new rpg...) cancels
     the keeper via validate()."""
     try:
-        for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
-            try:
-                send_order(bot, c)
-            except Exception:
-                pass
-            time.sleep(1)
+        _stand_down(bot)
         t0 = time.time()
-        say(master, "%s is travelling to %s." % (bot, name))
-        send_order(bot, "travel %s" % name)
-        arrived = False
-        while time.time() - t0 < 30:
-            time.sleep(3)
-            pos = _live_position(bot)
-            if pos and pos[3] == tmap and \
-                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 500.0 ** 2:
-                arrived = True
-                break
-        if not arrived:
+        if not _teleport_leg(bot, tx, ty, tmap, name, master):
             say(master, "%s did not arrive at %s - the move did not land; "
                         "whisper me to retry." % (bot, name))
             return
@@ -998,9 +1043,9 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
         print("daemon: farm %s -> %s: gathering (keeper re-arms every %ds)"
               % (bot, name, FARM_REFRESH))
         misses = 0
-        while bot in _FARMING:
+        while _lease_kind(bot) == "farm":
             time.sleep(FARM_REFRESH)
-            if bot not in _FARMING:
+            if _lease_kind(bot) != "farm":
                 break
             if FARM_MAX and time.time() - t0 > FARM_MAX:
                 try:
@@ -1027,8 +1072,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
         except Exception:
             pass
     finally:
-        _FARMING.pop(bot, None)
-        _WALKING.pop(bot, None)
+        _release_lease(bot)
 
 
 def _start_walk(o, master):
@@ -1036,13 +1080,11 @@ def _start_walk(o, master):
     'travel' is the teleport mission; 'walk' is the ground march; 'farm' is
     the teleport + gather-keeper."""
     (tx, ty, tmap), name = o["_walk"]
-    if o["bot"] in _FARMING:
-        return "%s is already farming in %s" % (o["bot"], _FARMING[o["bot"]])
-    if o["bot"] in _WALKING:
-        return "%s is already marching to %s" % (o["bot"], _WALKING[o["bot"]])
-    _WALKING[o["bot"]] = name
-    if o.get("_farm"):
-        _FARMING[o["bot"]] = name
+    kind = "farm" if o.get("_farm") else ("travel" if o.get("_travel") else "walk")
+    err = _take_lease(o["bot"], kind, name)
+    if err:
+        return err
+    if kind == "farm":
         threading.Thread(target=_farm_mission,
                          args=(o["bot"], tx, ty, tmap, name, master),
                          daemon=True).start()
@@ -1468,9 +1510,9 @@ def validate(order, bots):
         order["cmd"] = "carriage %s" % canon
         order["_route"] = (dest, dest, "carriage")
         return None
-    if bot in _FARMING and (low == "rpg status idle" or
-                            (low.startswith("nc ") and "-new rpg" in low)):
-        _FARMING.pop(bot, None)
+    if _lease_kind(bot) == "farm" and (low == "rpg status idle" or
+                                      (low.startswith("nc ") and "-new rpg" in low)):
+        _release_lease(bot)
         print("daemon: farm keeper for %s cancelled by a stand-down order" % bot)
     if low == "farm" or low.startswith("farm "):
         dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
@@ -1482,10 +1524,9 @@ def validate(order, bots):
                     % (bot, dest))
         if bot not in bots:
             return "SKIP %s: not online (census)" % bot
-        if bot in _FARMING:
-            return "SKIP %s: already farming in %s" % (bot, _FARMING[bot])
-        if bot in _WALKING:
-            return "SKIP %s: already marching to %s" % (bot, _WALKING[bot])
+        err = _lease_busy(bot)
+        if err:
+            return "SKIP %s: %s" % (bot, err)
         order["_farm"] = True
         order["_walk"] = (coords, _tele_canonical(dest) or dest)
         return None
@@ -1499,8 +1540,9 @@ def validate(order, bots):
                     % (bot, dest))
         if bot not in bots:
             return "SKIP %s: not online (census)" % bot
-        if bot in _WALKING:
-            return "SKIP %s: already marching to %s" % (bot, _WALKING[bot])
+        err = _lease_busy(bot)
+        if err:
+            return "SKIP %s: %s" % (bot, err)
         if low.startswith("travel"):
             order["_travel"] = True
         order["_walk"] = (coords, _tele_canonical(dest) or dest)
