@@ -796,7 +796,7 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
     """March one bot to (tx, ty) on map tmap. Runs in its own thread and
     reports to the master through the normal whisper path."""
     try:
-        for c in ("nc -new rpg,-grind,-gather", "rpg status idle"):
+        for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
             try:
                 send_order(bot, c)
             except Exception:
@@ -946,7 +946,7 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                     return False
 
     try:
-        for c in ("nc -new rpg,-grind,-gather", "rpg status idle"):
+        for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
             try:
                 send_order(bot, c)
             except Exception:
