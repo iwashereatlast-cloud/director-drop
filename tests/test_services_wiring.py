@@ -418,6 +418,15 @@ def main():
                                 director.census())
         check("travel to an unknown location is refused",
               "not a known location" in str(err), err)
+        real_pd = director.PATH_DIRECT
+        director.PATH_DIRECT, director.WALK_HOP = 290.0, 200.0
+        hx, hy, d = director._next_hop(-9000.0, 100.0, -9100.0, 150.0)
+        check("final approach within the path budget is ordered DIRECTLY",
+              (hx, hy) == (-9100.0, 150.0), (hx, hy))
+        hx, hy, d = director._next_hop(-9000.0, 100.0, -9600.0, 100.0)
+        check("beyond the budget: straight-line hop capped at WALK_HOP",
+              abs((hx - -9000.0) - (-200.0)) < 0.01 and hy == 100.0, (hx, hy))
+        director.PATH_DIRECT, director.WALK_HOP = real_pd, real_hop
         ow = {"bot": "Gau", "cmd": "walk Booty Bay"}
         err = director.validate(ow, director.census())
         check("walk (ground-only) order validates without the flight flag",
