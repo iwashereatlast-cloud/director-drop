@@ -2135,6 +2135,8 @@ def _turn(sender, channel, text, convs, pending):
                         err2 = _start_walk(o, sender)
                         if err2:
                             msg += " | " + err2
+                        elif o.get("_farm"):
+                            msg += " | farming: %s is off to gather in %s" % (o["bot"], o["_walk"][1])
                         elif o.get("_travel"):
                             msg += " | travelling: %s is on the way to %s" % (o["bot"], o["_walk"][1])
                         else:
