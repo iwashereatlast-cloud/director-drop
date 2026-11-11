@@ -770,15 +770,24 @@ WALK_TICK = float(os.environ.get("DIRECTOR_WALK_TICK", "8"))
 WALK_STALL = int(os.environ.get("DIRECTOR_WALK_STALL", "3"))
 WALK_MAX = float(os.environ.get("DIRECTOR_WALK_MAX", "1800"))
 WALK_ARRIVE = 60.0
+PATH_DIRECT = float(os.environ.get("DIRECTOR_PATH_DIRECT", "290"))
+# ^ within one pathfinder search (~296yd smooth-path cap, per the mod's own
+#   MoveFarTo comments) a DIRECT 'go <target>' order pathfinds properly around
+#   city geometry (ramps, canals). Hops are only for distances beyond that - a
+#   straight-line hop point inside a city lands across canals and walks the
+#   bot the wrong way (live 2026-11-10: Stormwind bank -> FM sent Golbez to
+#   the flower shop side instead of up the ramp)
 _WALKING = {}      # bot -> destination name (one march per bot)
 
 
 def _next_hop(px, py, tx, ty):
-    """Next hop toward the target: capped at WALK_HOP yards, straight line.
-    Returns (hx, hy, remaining_distance)."""
+    """Next order toward the target. Within PATH_DIRECT yards the target is
+    ordered DIRECTLY (one pathfinder search routes it around ramps/canals);
+    beyond that, a straight-line hop capped at WALK_HOP. Returns
+    (hx, hy, remaining_distance)."""
     dx, dy = tx - px, ty - py
     dist = (dx * dx + dy * dy) ** 0.5
-    if dist <= WALK_HOP:
+    if dist <= PATH_DIRECT:
         return tx, ty, dist
     return (px + dx / dist * WALK_HOP, py + dy / dist * WALK_HOP, dist)
 
