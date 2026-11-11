@@ -889,6 +889,91 @@ def main():
         msg = director._hb_msg((leo, group_on, wanted, svc, 0), "state change", cfg)
         check("heartbeat message lists Leo's group members",
               "Ayla" in msg and "Gau" in msg, msg)
+
+        print("== 10. invariants: fewshots + recipes + LLM-boundary fuzz ==")
+        # A SKIP is fine when it is about the WORLD (bot offline, not at a
+        # dock, spell not known) - the invariant is about COMMAND SHAPE: our
+        # own teaching material must never teach an order validate() rejects
+        # as malformed/unknown/forbidden.
+        SITUATIONAL = ("not online", "not in census", "already", "not at a "
+                       "departure harbor", "could not read a live position",
+                       "cast spell not allowed", "not a member",
+                       "hand-play", "no route")
+
+        def order_ok(err):
+            return err is None or any(s in str(err) for s in SITUATIONAL)
+
+        bots_c = director.census()
+        bad = []
+        for m in director.FEWSHOT:
+            if m["role"] != "assistant":
+                continue
+            obj = director.parse_orders(m["content"])
+            for o in obj.get("orders", []):
+                err = director.validate(dict(o), bots_c)
+                if not order_ok(err):
+                    bad.append((m["content"][:40], o, err))
+        check("invariant: every fewshot order validates (no drift)",
+              not bad, bad)
+
+        INST = {"<destination>": "Booty Bay",
+                "<the zone's table destination>": "Booty Bay",
+                "<arrival harbor>": "Ratchet",
+                "<exact spell name>": "Heal",
+                "<id>": "153", "<name>": "Ayla", "<mat>": "Peacebloom"}
+        rec = json.load(open("services/db-search/recipes.json"))["recipes"]
+        bad2 = []
+        for r in rec:
+            cmds = [o.get("cmd", "") for o in r.get("orders", [])]
+            for s in r.get("steps", []):
+                cmds += re.findall(r'"cmd":\s*"([^"]+)"', s.replace('\\"', '"'))
+            for c in cmds:
+                for k, v in INST.items():
+                    c = c.replace(k, v)
+                if "<" in c:
+                    bad2.append((r["id"], "uninstantiated placeholder", c))
+                    continue
+                err = director.validate({"bot": "Ayla", "cmd": c}, bots_c)
+                if not order_ok(err):
+                    bad2.append((r["id"], c, err))
+        check("invariant: every recipe command validates", not bad2, bad2)
+
+        garbage = [
+            "",
+            '```json\n{"reply": "ok", "orders": []}\n```',
+            '"""json\n{"query": "recipes", "text": "ha"',
+            'Requesting flight path to STV.\n"json..."',
+            "plain prose, no json at all",
+            '{"reply": "a|b\nc", "orders": [{"bot": "Gau", "cmd": "go Booty Bay"}]}',
+            '```\n{"reply": "x", "orders": [{"bot": "Gau", "cmd": "destroy everything"}]}\n```',
+            '{"reply": "dup", "orders": []} and then {"reply": "second", "orders": []}',
+            '{"reply": "ok", "orders": [{"bot": "Gau", "cmd": "travel Nowhereville"}]}',
+        ]
+        sent_f = []
+        real_send = director.send_order
+        director.send_order = lambda who, cmd: sent_f.append((who, cmd)) or {"line": cmd}
+        bad3 = []
+        for g in garbage:
+            try:
+                obj = director.parse_orders(g)
+                msg = obj.get("reply", "")
+                for o in obj.get("orders", []):
+                    err = director.validate(dict(o), bots_c)
+                    msg += "" if err is None else " | " + str(err)
+                director.say("Cecil", msg)
+            except Exception as e:
+                bad3.append((g[:30], repr(e)))
+        director.send_order = real_send
+        check("invariant: garbage LLM output never crashes the turn tail",
+              not bad3, bad3)
+        check("invariant: nothing raw (fences/newlines) reaches the tunnel",
+              not any("```" in c or '"""' in c or "\n" in c
+                      for _, c in sent_f),
+              [c for _, c in sent_f if "```" in c or '"""' in c or "\n" in c])
+        check("invariant: refused orders never reach the bot "
+              "(only the master hears the SKIP)",
+              all(who == "Cecil" for who, _ in sent_f),
+              [w for w in sent_f if w[0] != "Cecil"])
         return finish()
     finally:
         db_proc.terminate()
