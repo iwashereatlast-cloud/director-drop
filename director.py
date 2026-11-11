@@ -97,6 +97,13 @@ STILL_WORKING = float(os.environ.get("DIRECTOR_STILL_WORKING", "45"))
 STILL_WORKING_MSG = os.environ.get("DIRECTOR_STILL_WORKING_MSG",
                                    "still with you - the model is thinking...")
 MAX_TOKENS = int(os.environ.get("DIRECTOR_MAX_TOKENS", "4096"))
+TEMPERATURE = float(os.environ.get("DIRECTOR_TEMPERATURE", "0.2"))
+REPEAT_PENALTY = float(os.environ.get("DIRECTOR_REPEAT_PENALTY", "1.1"))
+TOP_K = int(os.environ.get("DIRECTOR_TOP_K", "40"))
+TOP_P = float(os.environ.get("DIRECTOR_TOP_P", "0.9"))
+# ^ generation knobs (Ollama defaults shown) - live-tunable without code
+#   changes, the experiment surface for taming thinking spirals: a spiral is
+#   repetition-driven, so repeat_penalty / top_k / top_p move it most
 # ^ runaway BRAKE, not a budget (num_predict). Live evidence 2026-11-10: a
 #   healthy Leo turn is ~4.2k prompt + ~740 thinking + ~200 answer tokens and
 #   lands in well under 30s (trace: stv -> Booty Bay translation, correct
@@ -312,6 +319,7 @@ Rules:
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
 - Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or a strategies query timed out (silent, master-less bot), CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; wrong strategies -> re-push the recipe cmd; silent bot -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
+- Come to me: "have <bot> come to me/you", "bring <bot> here", "summon <bot> to your side" = cmd "follow" (the bot comes to Leo and stays at his side). Do NOT compute Leo's coordinates - "follow" needs none. To release the bot afterwards: cmd "stay" or a task recipe.
 - Zone travel: "go travel <name>" is DEAD on this build (the engine's travel catalogs are never loaded - a live 31/31 probe got "Clearing travel target" for every destination, including its own example). To send a unit to a named destination, order {"bot":"<name>","cmd":"travel <destination>"}: the SYSTEM runs the whole journey - it stands the unit down, hops it to the nearest flight master, reads its own "taxi ?" list, flies the long leg if the network reaches it, hops the last mile, and whispers you the arrival. Narrate it as "<bot> is travelling to <destination>" and say HOW (on foot / via flight). The system whispers progress; do not poll the unit yourself unless asked. "walk <destination>" is the ground-only variant. Cross-continent trips need the harbormaster (boat/zeppelin routes below) - a travel order to another continent will be refused with a map note.
 - Destination translation: the master speaks in ZONE names and abbreviations ("send Golbez to Stranglethorn Vale", "go to stv", "level in Thousand Needles"); the engine wants the town/subzone name. Translate with this table (zone -> destination, level bracket):
 %(zones)s
@@ -1106,7 +1114,8 @@ def llm(messages):
         keep_alive = int(_ka)          # "-1"/"3600" -> JSON number (Ollama: negative = forever)
     except ValueError:
         keep_alive = _ka               # "60m"/"24h" -> duration string
-    opts = {"temperature": 0.2}
+    opts = {"temperature": TEMPERATURE, "repeat_penalty": REPEAT_PENALTY,
+            "top_k": TOP_K, "top_p": TOP_P}
     if MAX_TOKENS > 0:
         opts["num_predict"] = MAX_TOKENS
     body = {"model": MODEL, "messages": messages, "stream": False,
@@ -1156,6 +1165,11 @@ def _ollama_chat(body):
     if resp.get("done_reason") == "length":
         print("daemon: llm hit the %s-token brake mid-generation "
               "(done_reason=length) - a spiral, capped" % MAX_TOKENS)
+        # the TAIL of the thinking shows what the model was stuck repeating -
+        # the tuning instrument for spiral diagnosis (owner 2026-11-11:
+        # "tuning the LLM thinking is the most important thing")
+        if th:
+            print("daemon: spiral tail: %s" % th[-600:].replace("\n", " "))
     return ""
 
 
