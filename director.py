@@ -987,6 +987,21 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                 say(master, "%s is heading to the flight master at %s, then on "
                             "to %s." % (bot, fm[0], name))
                 leg = _walk_leg(fm[1], fm[2], 30.0, "to the flight master")
+                if leg is not True and leg not in ("map", "silent"):
+                    # STALLED NEAR THE FM: many flight masters stand on
+                    # elevated platforms (live: Stormwind's Dungar Longdrink
+                    # on the gryphon roost) - the bot paths to the base but
+                    # never inside the 30yd arrival radius. Try the taxi
+                    # anyway: TaxiAction's own FarDistance gate decides if
+                    # the bot is close enough; an empty list means fail over.
+                    p2 = _live_position(bot)
+                    if p2 and p2[3] == tmap:
+                        d2 = ((p2[0] - fm[1]) ** 2 + (p2[1] - fm[2]) ** 2) ** 0.5
+                        if d2 <= 100:
+                            print("daemon: travel %s: stalled %.0fyd from FM %s - "
+                                  "trying the taxi anyway" % (bot, d2, fm[0]))
+                            leg = True
+                pick = None
                 if leg is True:
                     taxis = _taxi_list(bot)
                     want = name.lower().replace(" ", "")
@@ -1014,9 +1029,11 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                                     flew = True
                                 break
                             last = p
-                elif leg is not True and leg != "map":
-                    print("daemon: travel %s: FM %s unreachable, trying the "
-                          "next one" % (bot, fm[0]))
+                if leg in ("map", "silent"):
+                    break
+                if not pick:
+                    print("daemon: travel %s: no taxi from FM %s, trying "
+                          "the next one" % (bot, fm[0]))
                     continue
                 break
         leg = _walk_leg(tx, ty, WALK_ARRIVE, "last mile")
