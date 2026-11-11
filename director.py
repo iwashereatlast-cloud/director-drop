@@ -845,17 +845,38 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
         _WALKING.pop(bot, None)
 
 
-def _nearest_flightmaster(pos):
-    """Nearest flight master to a live position via db-search, or None."""
+def _nearest_flightmasters(pos):
+    """The (up to 3) nearest flight masters to a live position, nearest first.
+    All three are candidates: a stalled FM leg tries the next one (live
+    2026-11-10: the nearest FM sat across PATHFIND_NOPATH terrain)."""
     try:
         rows = dbsearch("get_flightmasters", x="%.1f" % pos[0], y="%.1f" % pos[1],
                         map=str(pos[3]))["rows"]
     except Exception:
-        return None
-    if not rows:
-        return None
-    r = rows[0]
-    return (r[0], float(r[2]), float(r[3]), int(r[1]))   # name, x, y, map
+        return []
+    return [(r[0], float(r[2]), float(r[3]), int(r[1])) for r in rows]
+
+
+def _sidestep_probe(bot, pos, tx, ty):
+    """Cone sampling on a stalled leg (the rpg engine's MoveFarTo trick):
+    try hops rotated +-30/60/90 degrees off the direct line and keep the first
+    one the bot actually walks (position moves > 5yd). Returns the new position
+    or None if every angle is blocked too."""
+    import math
+    base = math.atan2(ty - pos[1], tx - pos[0])
+    for delta in (0.52, -0.52, 1.05, -1.05, 1.57, -1.57):   # ~30/60/90 deg
+        a = base + delta
+        hx = pos[0] + math.cos(a) * WALK_HOP
+        hy = pos[1] + math.sin(a) * WALK_HOP
+        try:
+            send_order(bot, "go %.1f;%.1f" % (hx, hy))
+        except Exception:
+            continue
+        time.sleep(WALK_TICK)
+        new = _live_position(bot)
+        if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
+            return new
+    return None
 
 
 def _taxi_list(bot):
@@ -907,6 +928,12 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
             else:
                 stalled += 1
                 if stalled >= WALK_STALL:
+                    # cone sampling (the rpg engine's MoveFarTo trick): on a
+                    # blocked line, try rotated hops and keep the first one
+                    # the bot actually walks; None = every angle blocked too
+                    if _sidestep_probe(bot, pos, fx, fy):
+                        stalled = 0
+                        continue
                     return False
 
     try:
@@ -924,8 +951,9 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
             return
         flew = False
         if pos:
-            fm = _nearest_flightmaster(pos)
-            if fm:
+            for fm in _nearest_flightmasters(pos):
+                if time.time() - t0 > WALK_MAX:
+                    break
                 say(master, "%s is heading to the flight master at %s, then on "
                             "to %s." % (bot, fm[0], name))
                 leg = _walk_leg(fm[1], fm[2], 30.0, "to the flight master")
@@ -957,8 +985,10 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                                 break
                             last = p
                 elif leg is not True and leg != "map":
-                    say(master, "%s could not reach the flight master - I am "
-                                "marching the whole way instead." % bot)
+                    print("daemon: travel %s: FM %s unreachable, trying the "
+                          "next one" % (bot, fm[0]))
+                    continue
+                break
         leg = _walk_leg(tx, ty, WALK_ARRIVE, "last mile")
         if leg is True:
             for c in (restore or ("nc +new rpg,+grind,-follow",)):
