@@ -11,7 +11,7 @@
     },
     {
       "id": "travel",
-      "keywords": ["go to", "send to", "travel", "head to", "move to", "stv", "stranglethorn", "make for", "off to"],
+      "keywords": ["go to", "send to", "travel", "head to", "move to", "stv", "stranglethorn", "make for", "off to", "fly to", "fly"],
       "when": "the master wants a bot at a named destination (zone, town, NPC place)",
       "orders": [{"cmd": "travel <destination>", "note": "the SYSTEM runs the whole journey: stands the bot down, walks it to the nearest flight master, reads its own 'taxi ?' list, flies the long leg if the network reaches it, walks the last mile, whispers the arrival"}],
       "zone_table": {
