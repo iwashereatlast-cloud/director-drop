@@ -948,6 +948,11 @@ def main():
             '```\n{"reply": "x", "orders": [{"bot": "Gau", "cmd": "destroy everything"}]}\n```',
             '{"reply": "dup", "orders": []} and then {"reply": "second", "orders": []}',
             '{"reply": "ok", "orders": [{"bot": "Gau", "cmd": "travel Nowhereville"}]}',
+            '{"reply": {"nested": "dict"}, "orders": []}',
+            '{"reply": "ok", "orders": [{"bot": "Gau", "cmd": "follow"}, "not a dict", {"bot": 5, "cmd": "follow"}, {"bot": "Gau"}]}',
+            '{"reply": "ok", "queries": ["nope", {"query": "recipes", "text": "gather herbs"}, 7]}',
+            '{"reply": "ok", "orders": "follow everyone"}',
+            '[{"reply": "not an object", "orders": []}]',
         ]
         sent_f = []
         real_send = director.send_order
@@ -974,6 +979,18 @@ def main():
               "(only the master hears the SKIP)",
               all(who == "Cecil" for who, _ in sent_f),
               [w for w in sent_f if w[0] != "Cecil"])
+        p1 = director.parse_orders('{"reply": {"nested": "dict"}, "orders": []}')
+        check("boundary: non-text reply becomes the retry note",
+              "tangled" in p1["reply"], p1)
+        p2 = director.parse_orders('{"reply": "ok", "orders": [{"bot": "Gau", "cmd": "follow"}, "junk", {"bot": 5, "cmd": "follow"}]}')
+        check("boundary: malformed order entries dropped, good ones kept",
+              p2["orders"] == [{"bot": "Gau", "cmd": "follow"}], p2)
+        p3 = director.parse_orders('{"reply": "ok", "queries": ["nope", {"query": "recipes", "text": "x"}, 7]}')
+        check("boundary: malformed query entries dropped, good ones kept",
+              p3["queries"] == [{"query": "recipes", "text": "x"}], p3)
+        p4 = director.parse_orders('[{"reply": "array not object"}]')
+        check("boundary: an array-wrapped contract still yields text + no orders",
+              p4["reply"] == "array not object" and p4["orders"] == [], p4)
         return finish()
     finally:
         db_proc.terminate()

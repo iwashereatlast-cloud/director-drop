@@ -1164,11 +1164,11 @@ def _ollama_chat(body):
     # while the CoT held the planned JSON). Recover the fenced JSON instead of
     # reporting an empty reply to the master.
     th = m.get("thinking") or ""
-    fence = re.search(r"```json\s*(.*?)\s*```", th, re.S)
+    fence = _extract_json(th)
     if fence:
         print("daemon: empty content but the thinking held the answer - "
               "extracting the fenced JSON")
-        return fence.group(1)
+        return fence
     if resp.get("done_reason") == "length":
         print("daemon: llm hit the %s-token brake mid-generation "
               "(done_reason=length) - a spiral, capped" % MAX_TOKENS)
@@ -1260,9 +1260,14 @@ def _extract_json(text):
 
 
 def parse_orders(text):
-    # NOTE: the old greedy r"\{.*\}" match silently dropped ALL orders when the
-    # model fenced the JSON and added prose containing braces afterwards, or
-    # emitted two JSON objects. Balanced extraction fixes that.
+    r"""THE LLM-output boundary: raw model text -> a shape-validated contract
+    {reply, orders, queries}. Every path a model can be wrong lands here:
+    fences in either spelling, empty content, capped/truncated contracts,
+    wrong-typed fields, malformed order and query entries. Nothing the model
+    produced reaches validate(), run_queries() or the tunnel except through
+    this shape check. (The old greedy r"\{.*\}" match silently dropped ALL
+    orders when the model fenced the JSON and added prose with braces
+    afterwards; balanced extraction fixes that.)"""
     cand = _extract_json(text)
     if not cand:
         if re.search(r"```|\"\"\"|^\s*\{", text):
@@ -1284,11 +1289,38 @@ def parse_orders(text):
               "treating the whole reply as plain text, orders=[]" % len(cand))
         return {"reply": text, "orders": []}
     if not isinstance(obj, dict):
-        return {"reply": text, "orders": []}
-    obj.setdefault("reply", "")
-    obj.setdefault("orders", [])
-    obj.setdefault("queries", [])
-    return obj
+        print("parse_orders: contract is a %s, not an object - "
+              "treating the reply as plain text" % type(obj).__name__)
+        return {"reply": text, "orders": [], "queries": []}
+    reply = obj.get("reply", "")
+    if not isinstance(reply, str):
+        print("parse_orders: reply is a %s, not text - answering with a "
+              "retry note instead" % type(reply).__name__)
+        reply = "I got tangled mid-thought - say that again and I'll retry."
+    orders = obj.get("orders", [])
+    if not isinstance(orders, list):
+        print("parse_orders: orders is a %s, not a list - dropping them all"
+              % type(orders).__name__)
+        orders = []
+    clean_orders = []
+    for o in orders:
+        if isinstance(o, dict) and isinstance(o.get("bot"), str) \
+                and isinstance(o.get("cmd"), str):
+            clean_orders.append(o)
+        else:
+            print("parse_orders: dropped a malformed order entry: %.80r" % (o,))
+    queries = obj.get("queries", [])
+    if not isinstance(queries, list):
+        print("parse_orders: queries is a %s, not a list - dropping them all"
+              % type(queries).__name__)
+        queries = []
+    clean_queries = []
+    for q in queries:
+        if isinstance(q, dict) and isinstance(q.get("query"), str):
+            clean_queries.append(q)
+        else:
+            print("parse_orders: dropped a malformed query entry: %.80r" % (q,))
+    return {"reply": reply, "orders": clean_orders, "queries": clean_queries}
 
 
 def is_master_cmd(cmd):
