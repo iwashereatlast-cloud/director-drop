@@ -248,10 +248,9 @@
       "steps": [
         "check the unit can gather: query {\"query\":\"skills\",\"bot\":\"<name>\"} - it needs herb (plants) or mine (ore); if it lacks the skill, SAY SO and suggest a unit that has it",
         "find the destination: query {\"query\":\"mats\",\"bot\":\"<any>\",\"name\":\"<mat>\"} - the answer ranks named locations by nearby spawn density",
-        "get the unit there: order travel <destination>",
-        "start gathering: {\"bot\":\"<name>\",\"cmd\":\"nc +new rpg,+gather,-follow\"} then {\"bot\":\"<name>\",\"cmd\":\"rpg status do gather\"}"
+        "get the unit there AND keep it gathering: order {\"bot\":\"<name>\",\"cmd\":\"farm <destination>\"} - the system travels it there and keeps the gather status re-armed so it stays put"
       ],
-      "notes": "Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is potential, not a guarantee of what is up right now."
+      "notes": "Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is potential, not a guarantee. The gather status expires after 15 minutes (engine rule) and the system re-arms it - the bot stays in the zone until a stand-down. Narrate as '<bot> is farming <mat> in <destination>'."
     },
     {
       "id": "level_in_zone",

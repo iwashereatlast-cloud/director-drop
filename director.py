@@ -790,6 +790,8 @@ WALK_HOP = float(os.environ.get("DIRECTOR_WALK_HOP", "200"))
 WALK_TICK = float(os.environ.get("DIRECTOR_WALK_TICK", "8"))
 WALK_STALL = int(os.environ.get("DIRECTOR_WALK_STALL", "3"))
 WALK_MAX = float(os.environ.get("DIRECTOR_WALK_MAX", "1800"))
+FARM_REFRESH = int(os.environ.get("DIRECTOR_FARM_REFRESH", "600"))
+FARM_MAX = float(os.environ.get("DIRECTOR_FARM_MAX", "0"))
 WALK_ARRIVE = 60.0
 PATH_DIRECT = float(os.environ.get("DIRECTOR_PATH_DIRECT", "290"))
 # ^ within one pathfinder search (~296yd smooth-path cap, per the mod's own
@@ -799,6 +801,7 @@ PATH_DIRECT = float(os.environ.get("DIRECTOR_PATH_DIRECT", "290"))
 #   bot the wrong way (live 2026-11-10: Stormwind bank -> FM sent Golbez to
 #   the flower shop side instead of up the ramp)
 _WALKING = {}      # bot -> destination name (one march per bot)
+_FARMING = {}       # bot -> zone name (one gather-keeper per bot)
 
 
 def _next_hop(px, py, tx, ty):
@@ -948,13 +951,98 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
         _WALKING.pop(bot, None)
 
 
+def _farm_mission(bot, tx, ty, tmap, name, master):
+    """Gather-keeper (live 2026-11-11: 'sent golbez to stv, told her to gather,
+    now shes back in EPL'): 'rpg status do gather' lasts exactly 15 minutes
+    (statusDoGatherDuration, NewRpgAction.h @ 405f8119), then the rpg engine
+    goes IDLE and RandomChangeStatus can fly the bot to a random
+    level-appropriate destination (RPG_TRAVEL_FLIGHT, weight 15 - a lvl 60
+    bot's optimal list is EPL-era zones). The keeper stands the bot down,
+    teleports it to the zone, arms the gather status, and re-arms it every
+    FARM_REFRESH seconds (default 600 < the 15-minute expiry) so it never
+    goes IDLE. A stand-down order (rpg status idle / nc -new rpg...) cancels
+    the keeper via validate()."""
+    try:
+        for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
+            try:
+                send_order(bot, c)
+            except Exception:
+                pass
+            time.sleep(1)
+        t0 = time.time()
+        say(master, "%s is travelling to %s." % (bot, name))
+        send_order(bot, "travel %s" % name)
+        arrived = False
+        while time.time() - t0 < 30:
+            time.sleep(3)
+            pos = _live_position(bot)
+            if pos and pos[3] == tmap and \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 500.0 ** 2:
+                arrived = True
+                break
+        if not arrived:
+            say(master, "%s did not arrive at %s - the move did not land; "
+                        "whisper me to retry." % (bot, name))
+            return
+        for c in ("nc +new rpg,+gather,-follow", "rpg status do gather"):
+            try:
+                send_order(bot, c)
+            except Exception as e:
+                print("daemon: farm arm failed for %s: %s" % (bot, e))
+            time.sleep(1)
+        say(master, "%s has arrived at %s and is gathering." % (bot, name))
+        print("daemon: farm %s -> %s: gathering (keeper re-arms every %ds)"
+              % (bot, name, FARM_REFRESH))
+        misses = 0
+        while bot in _FARMING:
+            time.sleep(FARM_REFRESH)
+            if bot not in _FARMING:
+                break
+            if FARM_MAX and time.time() - t0 > FARM_MAX:
+                try:
+                    send_order(bot, "rpg status idle")
+                except Exception:
+                    pass
+                say(master, "%s has farmed %s long enough - standing them "
+                            "down; whisper 'farm %s' to send them back."
+                            % (bot, name, name))
+                break
+            try:
+                send_order(bot, "rpg status do gather")
+                misses = 0
+                print("daemon: farm %s: gather status re-armed" % bot)
+            except Exception:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry." % (bot, name))
+                    break
+    except Exception as e:
+        try:
+            say(master, "the farming of %s in %s failed: %s" % (bot, name, e))
+        except Exception:
+            pass
+    finally:
+        _FARMING.pop(bot, None)
+        _WALKING.pop(bot, None)
+
+
 def _start_walk(o, master):
-    """Launch (or refuse) the march for a validated walk/travel order.
-    'travel' is the teleport mission; 'walk' is the ground march."""
+    """Launch (or refuse) the mission for a validated walk/travel/farm order.
+    'travel' is the teleport mission; 'walk' is the ground march; 'farm' is
+    the teleport + gather-keeper."""
     (tx, ty, tmap), name = o["_walk"]
+    if o["bot"] in _FARMING:
+        return "%s is already farming in %s" % (o["bot"], _FARMING[o["bot"]])
     if o["bot"] in _WALKING:
         return "%s is already marching to %s" % (o["bot"], _WALKING[o["bot"]])
     _WALKING[o["bot"]] = name
+    if o.get("_farm"):
+        _FARMING[o["bot"]] = name
+        threading.Thread(target=_farm_mission,
+                         args=(o["bot"], tx, ty, tmap, name, master),
+                         daemon=True).start()
+        return None
     mission = _travel_mission if o.get("_travel") else _walk_mission
     threading.Thread(target=mission,
                      args=(o["bot"], tx, ty, tmap, name, master), daemon=True).start()
@@ -1221,6 +1309,8 @@ def order_line(bot, cmd):
         return ".tele name %s %s" % (bot, cmd.strip()[8:].strip())
     if low == "travel" or low.startswith("travel "):
         return ".tele name %s %s" % (bot, cmd.strip()[6:].strip())
+    if low == "farm" or low.startswith("farm "):
+        return ".tele name %s %s" % (bot, cmd.strip()[4:].strip())
     return "/w %s %s" % (bot, cmd)
 
 
@@ -1338,6 +1428,27 @@ def validate(order, bots):
         canon = _tele_canonical(dest) or dest   # the row's own spelling
         order["cmd"] = "carriage %s" % canon
         order["_route"] = (dest, dest, "carriage")
+        return None
+    if bot in _FARMING and (low == "rpg status idle" or
+                            (low.startswith("nc ") and "-new rpg" in low)):
+        _FARMING.pop(bot, None)
+        print("daemon: farm keeper for %s cancelled by a stand-down order" % bot)
+    if low == "farm" or low.startswith("farm "):
+        dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
+        if not dest:
+            return "SKIP %s: farm needs a destination name" % bot
+        coords = _tele_coords(dest)
+        if coords is None:
+            return ("SKIP %s: %r is not a known location (db-search game_tele)"
+                    % (bot, dest))
+        if bot not in bots:
+            return "SKIP %s: not online (census)" % bot
+        if bot in _FARMING:
+            return "SKIP %s: already farming in %s" % (bot, _FARMING[bot])
+        if bot in _WALKING:
+            return "SKIP %s: already marching to %s" % (bot, _WALKING[bot])
+        order["_farm"] = True
+        order["_walk"] = (coords, _tele_canonical(dest) or dest)
         return None
     if low == "walk" or low.startswith("walk ") or low == "travel" or low.startswith("travel "):
         dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
