@@ -875,22 +875,6 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
         _WALKING.pop(bot, None)
 
 
-def _nearest_flightmasters(pos, bot):
-    """The (up to 3) nearest flight masters to a live position, nearest first.
-    All three are candidates: a stalled FM leg tries the next one (live
-    2026-11-10: the nearest FM sat across PATHFIND_NOPATH terrain).
-    Faction gate (live 2026-11-11): a hostile FM can rank nearest in
-    contested zones and its taxi list is unusable - filter to the bot's
-    own faction; 'any' when the race lookup fails (A34)."""
-    faction = _bot_faction(bot) or "any"
-    try:
-        rows = dbsearch("get_flightmasters", x="%.1f" % pos[0], y="%.1f" % pos[1],
-                        map=str(pos[3]), faction=faction)["rows"]
-    except Exception:
-        return []
-    return [(r[0], float(r[2]), float(r[3]), int(r[1])) for r in rows]
-
-
 def _sidestep_probe(bot, pos, tx, ty):
     """Cone sampling on a stalled leg (the rpg engine's MoveFarTo trick):
     try hops rotated +-30/60/90 degrees off the direct line and keep the first
@@ -913,63 +897,18 @@ def _sidestep_probe(bot, pos, tx, ty):
     return None
 
 
-def _taxi_list(bot):
-    """Ask the bot for its 'taxi ?' destination list (the live route data -
-    the taxi graph lives in the DBC stores, not SQL). Returns {n: name}."""
-    try:
-        tunnel("send_command", bot=bot, cmd="taxi ?")
-    except Exception:
-        return {}
-    time.sleep(6)
-    out = {}
-    try:
-        evs = tunnel("get_recent_events", direction="reply", limit=30)["events"]
-    except Exception:
-        return out
-    for e in evs:
-        if (e.get("sender") or '') != bot:
-            continue
-        m = re.match(r"^(\d+):\s*(.+?)\s*$", (e.get("command") or "").strip())
-        if m:
-            out[int(m.group(1))] = m.group(2)
-    return out
-
 
 def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
-    """Flight-aware march: hop to the nearest flight master, fly the long leg
-    via the stock 'taxi ?' / 'taxi <n>' commands (the bot's own live list is
-    the route data), then hop the last mile. Reports to the master."""
-    def _walk_leg(fx, fy, arrive, label):
-        """Hop-chain to (fx, fy); True on arrival, False on stall/timeout."""
-        stalled = 0
-        while True:
-            pos = _live_position(bot)
-            if not pos:
-                return "silent"
-            if pos[3] != tmap:
-                return "map"
-            hx, hy, dist = _next_hop(pos[0], pos[1], fx, fy)
-            if dist <= arrive:
-                return True
-            try:
-                send_order(bot, "go %.1f;%.1f" % (hx, hy))
-            except Exception as e:
-                print("daemon: travel hop failed (%s): %s" % (bot, e))
-            time.sleep(WALK_TICK)
-            new = _live_position(bot)
-            if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
-                stalled = 0
-            else:
-                stalled += 1
-                if stalled >= WALK_STALL:
-                    # cone sampling (the rpg engine's MoveFarTo trick): on a
-                    # blocked line, try rotated hops and keep the first one
-                    # the bot actually walks; None = every angle blocked too
-                    if _sidestep_probe(bot, pos, fx, fy):
-                        stalled = 0
-                        continue
-                    return False
-
+    """Teleport travel (owner decision 2026-11-11): Leo (gmlevel 3) moves the
+    bot with '.tele name <bot> <location>'. The stock 'taxi ?'/'taxi <n>'
+    commands are a SILENT NO-OP for Leo-mastered bots - TaxiAction returns
+    from the HasGameClientMaster() follower branch before the list/number
+    handling, and Leo's headless client is a real player session (source-
+    pinned TaxiAction.cpp/PlayerbotAI.cpp @ 405f8119; live 2026-11-11: 'no
+    taxi from FM' at Dungar AND Thor, then a manual 'taxi ?' at 15yd from
+    Dungar returned nothing at all). The mission stands the bot down,
+    teleports it to the game_tele point, confirms the arrival from a live
+    position read, restores it, and reports."""
     try:
         for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
             try:
@@ -978,86 +917,28 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                 pass
             time.sleep(1)
         t0 = time.time()
-        pos = _live_position(bot)
-        if pos and pos[3] != tmap:
-            say(master, "%s is on map %d - %s is on map %d; that needs a "
-                        "boat or zeppelin, not a march." % (bot, pos[3], name, tmap))
-            return
-        flew = False
-        if pos:
-            for fm in _nearest_flightmasters(pos, bot):
-                if time.time() - t0 > WALK_MAX:
-                    break
-                say(master, "%s is heading to the flight master at %s, then on "
-                            "to %s." % (bot, fm[0], name))
-                leg = _walk_leg(fm[1], fm[2], 30.0, "to the flight master")
-                if leg is not True and leg not in ("map", "silent"):
-                    # STALLED NEAR THE FM: many flight masters stand on
-                    # elevated platforms (live: Stormwind's Dungar Longdrink
-                    # on the gryphon roost) - the bot paths to the base but
-                    # never inside the 30yd arrival radius. Try the taxi
-                    # anyway: TaxiAction's own FarDistance gate decides if
-                    # the bot is close enough; an empty list means fail over.
-                    p2 = _live_position(bot)
-                    if p2 and p2[3] == tmap:
-                        d2 = ((p2[0] - fm[1]) ** 2 + (p2[1] - fm[2]) ** 2) ** 0.5
-                        if d2 <= 100:
-                            print("daemon: travel %s: stalled %.0fyd from FM %s - "
-                                  "trying the taxi anyway" % (bot, d2, fm[0]))
-                            leg = True
-                pick = None
-                if leg is True:
-                    taxis = _taxi_list(bot)
-                    want = name.lower().replace(" ", "")
-                    pick = next(((n, t) for n, t in sorted(taxis.items())
-                                 if want in t.lower().replace(" ", "")), None)
-                    if pick:
-                        try:
-                            send_order(bot, "taxi %d" % pick[0])
-                            say(master, "%s is flying to %s." % (bot, pick[1]))
-                            print("daemon: travel %s: taxi %d -> %s"
-                                  % (bot, pick[0], pick[1]))
-                        except Exception as e:
-                            print("daemon: taxi send failed (%s): %s" % (bot, e))
-                            pick = None
-                    if pick:
-                        # wait for the flight to land: stable position, moved far
-                        last = None
-                        while time.time() - t0 < WALK_MAX:
-                            time.sleep(15)
-                            p = _live_position(bot)
-                            if not p:
-                                continue
-                            if last and abs(p[0] - last[0]) + abs(p[1] - last[1]) < 10:
-                                if abs(p[0] - fm[1]) + abs(p[1] - fm[2]) > 500:
-                                    flew = True
-                                break
-                            last = p
-                if leg in ("map", "silent"):
-                    break
-                if not pick:
-                    print("daemon: travel %s: no taxi from FM %s, trying "
-                          "the next one" % (bot, fm[0]))
-                    continue
+        say(master, "%s is travelling to %s." % (bot, name))
+        send_order(bot, "travel %s" % name)
+        arrived = False
+        while time.time() - t0 < 30:
+            time.sleep(3)
+            pos = _live_position(bot)
+            if pos and pos[3] == tmap and \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 500.0 ** 2:
+                arrived = True
                 break
-        leg = _walk_leg(tx, ty, WALK_ARRIVE, "last mile")
-        if leg is True:
-            for c in (restore or ("nc +new rpg,+grind,-follow",)):
-                try:
-                    send_order(bot, c)
-                except Exception as e:
-                    print("daemon: travel restore failed for %s: %s" % (bot, e))
-            how = "flew part of the way and marched the rest" if flew else "marched"
-            say(master, "%s has arrived at %s (%s)." % (bot, name, how))
-            print("daemon: travel %s -> %s: arrived (%.0fs)" % (bot, name, time.time() - t0))
-        elif leg == "map":
-            say(master, "%s ended up on the wrong map on the way to %s." % (bot, name))
-        elif leg == "silent":
-            say(master, "%s went silent on the way to %s - I stopped the "
-                        "march; whisper me to retry." % (bot, name))
+        for c in (restore or ("nc +new rpg,+grind,-follow",)):
+            try:
+                send_order(bot, c)
+            except Exception as e:
+                print("daemon: travel restore failed for %s: %s" % (bot, e))
+        if arrived:
+            say(master, "%s has arrived at %s." % (bot, name))
+            print("daemon: travel %s -> %s: arrived (%.0fs)"
+                  % (bot, name, time.time() - t0))
         else:
-            say(master, "%s got stuck on the way to %s - I stopped the "
-                        "march. The ground there may be unpathable." % (bot, name))
+            say(master, "%s did not arrive at %s - the move did not land; "
+                        "whisper me to retry." % (bot, name))
     except Exception as e:
         try:
             say(master, "the journey of %s to %s failed: %s" % (bot, name, e))
@@ -1069,7 +950,7 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
 
 def _start_walk(o, master):
     """Launch (or refuse) the march for a validated walk/travel order.
-    'travel' is flight-aware (hop -> taxi -> last mile); 'walk' is ground."""
+    'travel' is the teleport mission; 'walk' is the ground march."""
     (tx, ty, tmap), name = o["_walk"]
     if o["bot"] in _WALKING:
         return "%s is already marching to %s" % (o["bot"], _WALKING[o["bot"]])
@@ -1323,6 +1204,8 @@ def order_line(bot, cmd):
         return ".tele name %s %s" % (bot, cmd.strip()[4:].strip())
     if low == "carriage" or low.startswith("carriage "):
         return ".tele name %s %s" % (bot, cmd.strip()[8:].strip())
+    if low == "travel" or low.startswith("travel "):
+        return ".tele name %s %s" % (bot, cmd.strip()[6:].strip())
     return "/w %s %s" % (bot, cmd)
 
 
@@ -1360,7 +1243,7 @@ def validate(order, bots):
         # fails past the 3s path search (live 2026-11-10) - refuse it so the
         # brain must use the travel/walk orders
         return ("SKIP %s: raw 'go x;y' legs are mission-internal; order "
-                "'travel <destination>' (flight-aware) or 'walk <destination>' "
+                "'travel <destination>' (teleport) or 'walk <destination>' "
                 "(ground) instead" % bot)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "
@@ -1499,6 +1382,8 @@ def send_order(bot, cmd):
         mark = "BOAT"
     elif low.startswith("carriage "):
         mark = "CARRIAGE"
+    elif low.startswith("travel "):
+        mark = "TRAVEL"
     if _turn_aborted():
         print("daemon: send dropped - turn was aborted: %r" % ((bot, cmd),))
         return {"line": "(aborted turn - not sent)"}

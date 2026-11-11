@@ -362,18 +362,19 @@ def main():
         check("live query returns the real-time position",
               "live position" in digest and "-14420" in digest, digest)
 
-        print("== 1f. travel mission: hop -> taxi -> fly -> last mile (offline sim) ==")
+        print("== 1f. travel mission: stand-down -> tele -> confirm -> restore (offline sim) ==")
         real_hop, real_tick, real_stall, real_max = (director.WALK_HOP,
                                                      director.WALK_TICK,
                                                      director.WALK_STALL,
                                                      director.WALK_MAX)
         director.WALK_HOP, director.WALK_TICK = 100.0, 0.3
         director.WALK_STALL, director.WALK_MAX = 40, 120.0
-        # sim world: Ayla (an orc, horde) starts near Goldshire; her FM is the
-        # fixture Horde FM at (-9800, 60); the taxi list offers Booty Bay; taxi 1 lands her near
-        # the BootyBay tele point (-14420, 480); then she walks the last mile.
+        # sim world: Ayla starts near Goldshire; the fake worldserver honors
+        # Leo's '.tele name Ayla BootyBay' by jumping her to the fixture's
+        # BootyBay tele point (-14420, 480); the mission then confirms the
+        # arrival from a live position read and restores her.
         sim = {"x": -9446.0, "y": 64.0, "target": None}
-        sim_state = {"arrivals": [], "taxis": []}
+        sim_state = {"arrivals": [], "teles": []}
 
         def sim_world():
             seen = len(fifo_lines)
@@ -384,16 +385,10 @@ def main():
                     m = re.match(r"/w Ayla go ([-\d.]+);([-\d.]+)", line)
                     if m:
                         sim["target"] = (float(m.group(1)), float(m.group(2)))
-                    if re.match(r"/w Ayla taxi \?$", line.strip()):
-                        for i, nm in [(1, "Booty Bay"), (2, "Stormwind")]:
-                            with open(log_path, "a") as f:
-                                f.write("2026-11-10 21:10:%02d.000 | MESSAGES | "
-                                        "headless.world.chat.chat:display:124 - "
-                                        "[Ayla] [whisper]: %d: %s\n" % (i * 2, i, nm))
-                    m = re.match(r"/w Ayla taxi (\d+)$", line.strip())
-                    if m and m.group(1) == "1":
-                        sim_state["taxis"].append("taxi 1")
-                        sim["x"], sim["y"], sim["target"] = -14405.0, 495.0, None
+                    m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
+                    if m and m.group(1) == "BootyBay":
+                        sim_state["teles"].append(m.group(1))
+                        sim["x"], sim["y"], sim["target"] = -14420.0, 480.0, None
 
         def sim_replier():
             seen = len(fifo_lines)
@@ -422,6 +417,9 @@ def main():
         err = director.validate(o, director.census())
         check("travel order validates and resolves the destination",
               err is None and o["_travel"] and o["_walk"][1] == "BootyBay", (err, o))
+        check("travel order line is a GM .tele name",
+              director.order_line("Ayla", "travel BootyBay") == ".tele name Ayla BootyBay",
+              director.order_line("Ayla", "travel BootyBay"))
         reported = []
         real_say = director.say
         director.say = lambda who, what: (reported.append(what), fifo_lines.append("(say) %s" % what))
@@ -432,15 +430,18 @@ def main():
             time.sleep(0.2)
         sim_state["done"] = True
         director.say = real_say
-        check("mission flew the long leg (taxi 1 ordered)",
-              sim_state["taxis"] == ["taxi 1"], sim_state["taxis"])
+        check("mission sent the GM .tele name leg",
+              sim_state["teles"] == ["BootyBay"] and
+              ".tele name Ayla BootyBay" in fifo_lines, (sim_state["teles"], fifo_lines[-4:]))
         check("mission reported the arrival",
               any("arrived at BootyBay" in r for r in reported), reported)
-        check("mission narrated the flight",
-              any("flying to Booty Bay" in r for r in reported), reported)
-        hops = [l for l in fifo_lines if re.match(r"/w Ayla go ", l)]
-        check("mission hopped to the flight master first",
-              len(hops) >= 1 and "taxi" in " ".join(fifo_lines), len(hops))
+        check("mission narrated the journey",
+              any("is travelling to BootyBay" in r for r in reported), reported)
+        check("mission stood the bot down and restored it",
+              any("nc -new rpg,-grind,-gather,-follow" in l for l in fifo_lines) and
+              any("nc +new rpg,+grind,-follow" in l for l in fifo_lines), fifo_lines[-6:])
+        check("audit records the leg as TRAVEL",
+              "TRAVEL" in open(director.AUDIT).read(), None)
         err = director.validate({"bot": "Gau", "cmd": "travel Nowhereville"},
                                 director.census())
         check("travel to an unknown location is refused",
