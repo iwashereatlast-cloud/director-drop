@@ -369,8 +369,8 @@ def main():
                                                      director.WALK_MAX)
         director.WALK_HOP, director.WALK_TICK = 100.0, 0.3
         director.WALK_STALL, director.WALK_MAX = 40, 120.0
-        # sim world: Ayla starts near Goldshire; her FM is the fixture FM at
-        # (-9500, 60); the taxi list offers Booty Bay; taxi 1 lands her near
+        # sim world: Ayla (an orc, horde) starts near Goldshire; her FM is the
+        # fixture Horde FM at (-9800, 60); the taxi list offers Booty Bay; taxi 1 lands her near
         # the BootyBay tele point (-14420, 480); then she walks the last mile.
         sim = {"x": -9446.0, "y": 64.0, "target": None}
         sim_state = {"arrivals": [], "taxis": []}
@@ -427,7 +427,7 @@ def main():
         director.say = lambda who, what: (reported.append(what), fifo_lines.append("(say) %s" % what))
         err2 = director._start_walk(o, "Cecil")
         check("travel mission launches", err2 is None, err2)
-        deadline = time.time() + 60
+        deadline = time.time() + 90
         while time.time() < deadline and not any("arrived" in r for r in reported):
             time.sleep(0.2)
         sim_state["done"] = True

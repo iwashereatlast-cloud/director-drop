@@ -875,13 +875,17 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
         _WALKING.pop(bot, None)
 
 
-def _nearest_flightmasters(pos):
+def _nearest_flightmasters(pos, bot):
     """The (up to 3) nearest flight masters to a live position, nearest first.
     All three are candidates: a stalled FM leg tries the next one (live
-    2026-11-10: the nearest FM sat across PATHFIND_NOPATH terrain)."""
+    2026-11-10: the nearest FM sat across PATHFIND_NOPATH terrain).
+    Faction gate (live 2026-11-11): a hostile FM can rank nearest in
+    contested zones and its taxi list is unusable - filter to the bot's
+    own faction; 'any' when the race lookup fails (A34)."""
+    faction = _bot_faction(bot) or "any"
     try:
         rows = dbsearch("get_flightmasters", x="%.1f" % pos[0], y="%.1f" % pos[1],
-                        map=str(pos[3]))["rows"]
+                        map=str(pos[3]), faction=faction)["rows"]
     except Exception:
         return []
     return [(r[0], float(r[2]), float(r[3]), int(r[1])) for r in rows]
@@ -981,7 +985,7 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
             return
         flew = False
         if pos:
-            for fm in _nearest_flightmasters(pos):
+            for fm in _nearest_flightmasters(pos, bot):
                 if time.time() - t0 > WALK_MAX:
                     break
                 say(master, "%s is heading to the flight master at %s, then on "

@@ -117,6 +117,10 @@ def _p(tool, params, key, required=True, pattern=None):
 # SQL metacharacters - leading/trailing space refused too.
 GUILD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_ ]{0,30}[A-Za-z0-9]$")
 
+# faction filter words (get_flightmasters): the fclause map is a fixed
+# whitelist, so no faction string ever reaches the SQL unvalidated
+FACTION_RE = re.compile(r"^(alliance|horde|any)$")
+
 # --------------------------------------------------------------- catalog ----
 # sql: ONE static SELECT. Placeholders {x} are filled only from _p()-validated
 # values. can/cannot feed the catalog docs (README + `catalog` tool).
@@ -422,22 +426,32 @@ CATALOG = {
     # a live position: the travel mission hops to one, reads the bot's own
     # 'taxi ?' list, and flies the long leg (the taxi graph itself lives in
     # the DBC stores, not SQL - the bot's live list IS the route data).
+    # Faction gate (live 2026-11-11: an opposing-faction FM ranks nearest in
+    # contested zones and its taxi list is unusable): creature_template.faction
+    # 1 = Alliance, 2 = Horde (core FactionEntry ids). Neutral FMs (goblin
+    # towns) carry their own faction ids and are EXCLUDED by the alliance/
+    # horde filters - pass faction=any for them (A34 confirm recipe).
     "sql": ("SELECT ct.name, c.map, c.position_x, c.position_y, c.position_z, "
             "(c.position_x - {x}) * (c.position_x - {x}) "
             "+ (c.position_y - {y}) * (c.position_y - {y}) AS dist "
             "FROM acore_world.creature c "
             "JOIN acore_world.creature_template ct ON ct.entry = c.id "
-            "WHERE (ct.npcflag & 8192) != 0 AND c.map = {map} "
+            "WHERE (ct.npcflag & 8192) != 0 AND c.map = {map}{fclause} "
             "ORDER BY dist LIMIT 3"),
     "params": {"x": "required - live position x", "y": "required - live position y",
-                "map": "required - map id"},
+                "map": "required - map id",
+                "faction": "required - 'alliance', 'horde', or 'any' (the BOT'S faction, so hostile flight masters never rank)"},
     "timeout": 10,
-    "can": "the 3 nearest flight masters to a live position on the same map (name, map, coordinates) - the departure points for the stock 'taxi ?' / 'taxi <n>' whisper commands",
-    "cannot": "the taxi graph itself (DBC data, not SQL - ask the bot with 'taxi ?'); flight masters on another map; whether the bot knows a node",
+    "can": "the 3 nearest flight masters to a live position on the same map, filtered to the bot's faction (name, map, coordinates) - the departure points for the stock 'taxi ?' / 'taxi <n>' whisper commands",
+    "cannot": "the taxi graph itself (DBC data, not SQL - ask the bot with 'taxi ?'); flight masters on another map; whether the bot knows a node; neutral (goblin-town) flight masters under the alliance/horde filters - use 'any' for those",
     "caveat": "static spawn data - effectively never stale. The bot must be near the flight master (FarDistance) for 'taxi' to work.",
     "fill": lambda p: {"x": _p("get_flightmasters", p, "x", pattern=NUM_RE),
                       "y": _p("get_flightmasters", p, "y", pattern=NUM_RE),
-                      "map": _p("get_flightmasters", p, "map", pattern=NUM_RE)},
+                      "map": _p("get_flightmasters", p, "map", pattern=NUM_RE),
+                      "fclause": {"alliance": " AND ct.faction = 1",
+                                  "horde": " AND ct.faction = 2",
+                                  "any": ""}[_p("get_flightmasters", p, "faction",
+                                                pattern=FACTION_RE)]},
   },
 
   "get_mat_spawns": {
