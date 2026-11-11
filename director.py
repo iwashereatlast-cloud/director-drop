@@ -340,7 +340,7 @@ FEWSHOT = [
     {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel TheCrossroads\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
     {"role": "user", "content": "have golbez go to stv and gather herbs"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is off to Stranglethorn Vale to gather herbs.\", \"queries\": [{\"query\": \"skills\", \"bot\": \"Golbez\"}], \"orders\": []}\n```"},
-    {"role": "user", "content": "Golbez has the herb skill."},
+    {"role": "user", "content": "DB query results (read-only):\nskills: Golbez - herb 300/300, mine 0/1\nGive your final reply now, with orders if any. (Further queries this turn are ignored.)"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is farming herbs in Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"farm Booty Bay\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
@@ -2090,7 +2090,10 @@ def _turn(sender, channel, text, convs, pending):
         results = run_queries(qs, census(online_only=False))
         conv.append({"role": "system", "content":
                      "DB query results (read-only):\n" + results +
-                     "\nGive your final reply now, with orders if any. "
+                     "\nGive your final reply now, with orders if any - "
+                     "the master asked for an ACTION, so if the checks "
+                     "passed, the orders that execute it MUST be in this "
+                     "reply; describing without ordering is a failure. "
                      "(Further queries this turn are ignored.)"})
         _stage("thinking (final)")
         try:

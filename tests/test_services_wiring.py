@@ -219,6 +219,10 @@ def main():
               any("gather herbs" in m["content"] for m in director.FEWSHOT)
               and any("farm Booty Bay" in m["content"] for m in director.FEWSHOT),
               [m["content"][:60] for m in director.FEWSHOT])
+        check("prompt: the gather fewshot mirrors the LIVE query-results turn",
+              any(m["role"] == "user" and "DB query results" in m["content"]
+                  for m in director.FEWSHOT),
+              [m["content"][:40] for m in director.FEWSHOT])
         check("prompt: the Barrens grind fewshot uses travel, not raw go legs",
               any("travel TheCrossroads" in m["content"] for m in director.FEWSHOT)
               and not any("go -443" in m["content"] for m in director.FEWSHOT),
