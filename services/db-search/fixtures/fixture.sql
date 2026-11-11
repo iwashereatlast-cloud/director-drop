@@ -202,3 +202,21 @@ INSERT INTO acore_world.game_tele VALUES
   (8, 'GromgolBaseCamp', 0, -12360.0, 220.0, 12.0, 0),
   (9, 'Undercity', 0, 1595.0, 240.0, -50.0, 0),
   (10, 'Orgrimmar', 1, 1442.0, -4470.0, 12.0, 0);
+
+-- flight masters (get_flightmasters): UNIT_NPC_FLAG_FLIGHTMASTER = 8192.
+-- Two on the fixture's Eastern Kingdoms: one near Goldshire (departure),
+-- one near the BootyBay tele point (arrival) - the offline travel proof
+-- hops to the first, reads a fake 'taxi ?' list, flies, walks the last mile.
+CREATE TABLE acore_world.creature_template (
+  entry INTEGER PRIMARY KEY, name TEXT, npcflag INTEGER);
+INSERT INTO acore_world.creature_template VALUES
+  (352, 'Fargas the FM', 8192),
+  (353, 'Booty Bay FM', 8192),
+  (354, 'Innkeeper', 65536);
+CREATE TABLE acore_world.creature (
+  guid INTEGER PRIMARY KEY, id INTEGER, map INTEGER,
+  position_x REAL, position_y REAL, position_z REAL);
+INSERT INTO acore_world.creature VALUES
+  (1, 352, 0, -9500.0, 60.0, 56.0),
+  (2, 353, 0, -14400.0, 500.0, 20.0),
+  (3, 354, 0, -9460.0, 90.0, 56.0);

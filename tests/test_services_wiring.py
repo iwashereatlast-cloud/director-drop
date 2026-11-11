@@ -14,6 +14,7 @@ direct FIFO/log access, no `tail` in director.py.
 Run: python3 tests/test_services_wiring.py   (no worldserver needed)
 """
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -174,8 +175,9 @@ def main():
               "go travel <name>\" is DEAD" in rules and "31/31" in rules, rules[:0])
         check("prompt: dest query is the travel path (coords from db-search)",
               '"query\":\"dest\"' in rules and "go <x>;<y>" in rules)
-        check("prompt: never confirm movement from the order alone",
-              "never from the order alone" in rules)
+        check("prompt: travel is the system-run journey (hop, taxi, last mile)",
+              '"cmd":"travel <destination>"' in rules
+              and "taxi ?" in rules and "last mile" in rules, rules[:0])
         err = director.validate({"bot": "Gau", "cmd": "go travel Booty Bay"}, {})
         check("validate: go travel refused as a dead command",
               "DEAD" in str(err) and "dest query" in str(err), err)
@@ -325,6 +327,96 @@ def main():
               "Goldshire" in digest and "spawns" in digest, digest)
         check("live query returns the real-time position",
               "live position" in digest and "-14420" in digest, digest)
+
+        print("== 1f. travel mission: hop -> taxi -> fly -> last mile (offline sim) ==")
+        real_hop, real_tick, real_stall, real_max = (director.WALK_HOP,
+                                                     director.WALK_TICK,
+                                                     director.WALK_STALL,
+                                                     director.WALK_MAX)
+        director.WALK_HOP, director.WALK_TICK = 100.0, 0.3
+        director.WALK_STALL, director.WALK_MAX = 40, 120.0
+        # sim world: Ayla starts near Goldshire; her FM is the fixture FM at
+        # (-9500, 60); the taxi list offers Booty Bay; taxi 1 lands her near
+        # the BootyBay tele point (-14420, 480); then she walks the last mile.
+        sim = {"x": -9446.0, "y": 64.0, "target": None}
+        sim_state = {"arrivals": [], "taxis": []}
+
+        def sim_world():
+            seen = len(fifo_lines)
+            while not sim_state.get("done"):
+                time.sleep(0.05)
+                for line in fifo_lines[seen:]:
+                    seen += 1
+                    m = re.match(r"/w Ayla go ([-\d.]+);([-\d.]+)", line)
+                    if m:
+                        sim["target"] = (float(m.group(1)), float(m.group(2)))
+                    if re.match(r"/w Ayla taxi \?$", line.strip()):
+                        for i, nm in [(1, "Booty Bay"), (2, "Stormwind")]:
+                            with open(log_path, "a") as f:
+                                f.write("2026-11-10 21:10:%02d.000 | MESSAGES | "
+                                        "headless.world.chat.chat:display:124 - "
+                                        "[Ayla] [whisper]: %d: %s\n" % (i * 2, i, nm))
+                    m = re.match(r"/w Ayla taxi (\d+)$", line.strip())
+                    if m and m.group(1) == "1":
+                        sim_state["taxis"].append("taxi 1")
+                        sim["x"], sim["y"], sim["target"] = -14405.0, 495.0, None
+
+        def sim_replier():
+            seen = len(fifo_lines)
+            while not sim_state.get("done"):
+                time.sleep(0.05)
+                for line in fifo_lines[seen:]:
+                    seen += 1
+                    if ".playerbots inspect Ayla position" not in line:
+                        continue
+                    if sim["target"]:
+                        dx = sim["target"][0] - sim["x"]
+                        dy = sim["target"][1] - sim["y"]
+                        d = (dx * dx + dy * dy) ** 0.5
+                        if d > 1:
+                            sim["x"] += dx / d * min(80.0, d)
+                            sim["y"] += dy / d * min(80.0, d)
+                    with open(log_path, "a") as f:
+                        f.write("2026-11-10 21:11:00.000 | MESSAGES | "
+                                "headless.world.chat.chat:display:124 - "
+                                "[System]: Ayla: %.1f %.1f 56.0 0 0.5 |Elwynn Forest|\n"
+                                % (sim["x"], sim["y"]))
+
+        threading.Thread(target=sim_world, daemon=True).start()
+        threading.Thread(target=sim_replier, daemon=True).start()
+        o = {"bot": "Ayla", "cmd": "travel Booty Bay"}
+        err = director.validate(o, director.census())
+        check("travel order validates and resolves the destination",
+              err is None and o["_travel"] and o["_walk"][1] == "BootyBay", (err, o))
+        reported = []
+        real_say = director.say
+        director.say = lambda who, what: (reported.append(what), fifo_lines.append("(say) %s" % what))
+        err2 = director._start_walk(o, "Cecil")
+        check("travel mission launches", err2 is None, err2)
+        deadline = time.time() + 60
+        while time.time() < deadline and not any("arrived" in r for r in reported):
+            time.sleep(0.2)
+        sim_state["done"] = True
+        director.say = real_say
+        check("mission flew the long leg (taxi 1 ordered)",
+              sim_state["taxis"] == ["taxi 1"], sim_state["taxis"])
+        check("mission reported the arrival",
+              any("arrived at BootyBay" in r for r in reported), reported)
+        check("mission narrated the flight",
+              any("flying to Booty Bay" in r for r in reported), reported)
+        hops = [l for l in fifo_lines if re.match(r"/w Ayla go ", l)]
+        check("mission hopped to the flight master first",
+              len(hops) >= 1 and "taxi" in " ".join(fifo_lines), len(hops))
+        err = director.validate({"bot": "Gau", "cmd": "travel Nowhereville"},
+                                director.census())
+        check("travel to an unknown location is refused",
+              "not a known location" in str(err), err)
+        ow = {"bot": "Gau", "cmd": "walk Booty Bay"}
+        err = director.validate(ow, director.census())
+        check("walk (ground-only) order validates without the flight flag",
+              err is None and "_walk" in ow and "_travel" not in ow, (err, ow))
+        director.WALK_HOP, director.WALK_TICK = real_hop, real_tick
+        director.WALK_STALL, director.WALK_MAX = real_stall, real_max
 
         print("== 2. db-search facts: census, masters, sender gates ==")
         online = director.census()

@@ -312,7 +312,7 @@ Rules:
 - Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
 - If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
 - Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or a strategies query timed out (silent, master-less bot), CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; wrong strategies -> re-push the recipe cmd; silent bot -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
-- Zone travel: "go travel <name>" is DEAD on this build (the engine's travel catalogs are never loaded - a live 31/31 probe got "Clearing travel target" for every destination, including its own example). To move a unit to a named destination, attach query {"query":"dest","bot":"<any>","name":"<destination>"} FIRST - the result carries exact coordinates and the ready-made order - then order cmd "go <x>;<y>" (whisper command; the bot walks there with pathfinding, no distance limit, no GM needed). Narrate it as "<bot> is walking to <destination>". Confirm movement only from evidence (a live query or the bot's own words), never from the order alone.
+- Zone travel: "go travel <name>" is DEAD on this build (the engine's travel catalogs are never loaded - a live 31/31 probe got "Clearing travel target" for every destination, including its own example). To send a unit to a named destination, order {"bot":"<name>","cmd":"travel <destination>"}: the SYSTEM runs the whole journey - it stands the unit down, hops it to the nearest flight master, reads its own "taxi ?" list, flies the long leg if the network reaches it, hops the last mile, and whispers you the arrival. Narrate it as "<bot> is travelling to <destination>" and say HOW (on foot / via flight). The system whispers progress; do not poll the unit yourself unless asked. "walk <destination>" is the ground-only variant. Cross-continent trips need the harbormaster (boat/zeppelin routes below) - a travel order to another continent will be refused with a map note.
 - Destination translation: the master speaks in ZONE names and abbreviations ("send Golbez to Stranglethorn Vale", "go to stv", "level in Thousand Needles"); the engine wants the town/subzone name. Translate with this table (zone -> destination, level bracket):
 %(zones)s
   Common abbreviations: %(abbr)s. If the master names a zone not in the table, pick the best-known town in it and TELL them which destination you are sending the unit to. If the master names a town/area directly, use it as-is. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order.
@@ -754,6 +754,249 @@ def _tele_canonical(name):
     return None
 
 
+# ---- waypoint walker: the dead travel system rebuilt at director level ------
+# The mod's own persistent travel (TravelTarget, re-issued every tick by the
+# travel strategy) is dead on this build - the catalogs are loaded by an
+# orphaned function (A24; RNDBOT long-range confirmed dead live 2026-11-10:
+# 'go travel' on a random bot also cleared). A one-shot 'go x;y' MoveTo is
+# silent-false past the 3s path search (live-proven: a 300yd order NOPATHed,
+# 100yd orders were NORMAL). So the director owns the persistence loop:
+# stand the bot down, chain hops inside the pathfinder budget, poll the live
+# position, re-issue on stall, restore + report on arrival.
+WALK_HOP = float(os.environ.get("DIRECTOR_WALK_HOP", "200"))
+WALK_TICK = float(os.environ.get("DIRECTOR_WALK_TICK", "8"))
+WALK_STALL = int(os.environ.get("DIRECTOR_WALK_STALL", "3"))
+WALK_MAX = float(os.environ.get("DIRECTOR_WALK_MAX", "1800"))
+WALK_ARRIVE = 60.0
+_WALKING = {}      # bot -> destination name (one march per bot)
+
+
+def _next_hop(px, py, tx, ty):
+    """Next hop toward the target: capped at WALK_HOP yards, straight line.
+    Returns (hx, hy, remaining_distance)."""
+    dx, dy = tx - px, ty - py
+    dist = (dx * dx + dy * dy) ** 0.5
+    if dist <= WALK_HOP:
+        return tx, ty, dist
+    return (px + dx / dist * WALK_HOP, py + dy / dist * WALK_HOP, dist)
+
+
+def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
+    """March one bot to (tx, ty) on map tmap. Runs in its own thread and
+    reports to the master through the normal whisper path."""
+    try:
+        for c in ("nc -new rpg,-grind,-gather", "rpg status idle"):
+            try:
+                send_order(bot, c)
+            except Exception:
+                pass
+            time.sleep(1)
+        t0 = time.time()
+        stalled = 0
+        while time.time() - t0 < WALK_MAX:
+            pos = _live_position(bot)
+            if not pos:
+                stalled += 1
+                if stalled >= 2 * WALK_STALL:
+                    say(master, "%s went silent on the march to %s - I stopped "
+                                "the march; whisper me to retry." % (bot, name))
+                    return
+                time.sleep(WALK_TICK)
+                continue
+            if pos[3] != tmap:
+                say(master, "%s is on map %d - %s is on map %d; that needs a "
+                            "boat or zeppelin, not a march." % (bot, pos[3], name, tmap))
+                return
+            hx, hy, dist = _next_hop(pos[0], pos[1], tx, ty)
+            if dist <= WALK_ARRIVE:
+                for c in (restore or ("nc +new rpg,+grind,-follow",)):
+                    try:
+                        send_order(bot, c)
+                    except Exception as e:
+                        print("daemon: walk restore failed for %s: %s" % (bot, e))
+                say(master, "%s has arrived at %s." % (bot, name))
+                print("daemon: walk %s -> %s: arrived (%.0fs)" % (bot, name, time.time() - t0))
+                return
+            try:
+                send_order(bot, "go %.1f;%.1f" % (hx, hy))
+            except Exception as e:
+                print("daemon: walk hop send failed for %s: %s" % (bot, e))
+            time.sleep(WALK_TICK)
+            new = _live_position(bot)
+            if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
+                stalled = 0
+            else:
+                stalled += 1
+                if stalled >= WALK_STALL:
+                    say(master, "%s got stuck on the way to %s - I stopped the "
+                                "march at %s. The ground there may be "
+                                "unpathable." % (bot, name, pos[4] or pos[:2]))
+                    return
+        say(master, "%s did not reach %s within %.0f minutes - march timed "
+                    "out. I left them standing; whisper me to retry." % (bot, name, WALK_MAX / 60))
+    except Exception as e:
+        try:
+            say(master, "the march of %s to %s failed: %s" % (bot, name, e))
+        except Exception:
+            pass
+    finally:
+        _WALKING.pop(bot, None)
+
+
+def _nearest_flightmaster(pos):
+    """Nearest flight master to a live position via db-search, or None."""
+    try:
+        rows = dbsearch("get_flightmasters", x="%.1f" % pos[0], y="%.1f" % pos[1],
+                        map=str(pos[3]))["rows"]
+    except Exception:
+        return None
+    if not rows:
+        return None
+    r = rows[0]
+    return (r[0], float(r[2]), float(r[3]), int(r[1]))   # name, x, y, map
+
+
+def _taxi_list(bot):
+    """Ask the bot for its 'taxi ?' destination list (the live route data -
+    the taxi graph lives in the DBC stores, not SQL). Returns {n: name}."""
+    try:
+        tunnel("send_command", bot=bot, cmd="taxi ?")
+    except Exception:
+        return {}
+    time.sleep(6)
+    out = {}
+    try:
+        evs = tunnel("get_recent_events", direction="reply", limit=30)["events"]
+    except Exception:
+        return out
+    for e in evs:
+        if (e.get("sender") or '') != bot:
+            continue
+        m = re.match(r"^(\d+):\s*(.+?)\s*$", (e.get("command") or "").strip())
+        if m:
+            out[int(m.group(1))] = m.group(2)
+    return out
+
+
+def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
+    """Flight-aware march: hop to the nearest flight master, fly the long leg
+    via the stock 'taxi ?' / 'taxi <n>' commands (the bot's own live list is
+    the route data), then hop the last mile. Reports to the master."""
+    def _walk_leg(fx, fy, arrive, label):
+        """Hop-chain to (fx, fy); True on arrival, False on stall/timeout."""
+        stalled = 0
+        while True:
+            pos = _live_position(bot)
+            if not pos:
+                return "silent"
+            if pos[3] != tmap:
+                return "map"
+            hx, hy, dist = _next_hop(pos[0], pos[1], fx, fy)
+            if dist <= arrive:
+                return True
+            try:
+                send_order(bot, "go %.1f;%.1f" % (hx, hy))
+            except Exception as e:
+                print("daemon: travel hop failed (%s): %s" % (bot, e))
+            time.sleep(WALK_TICK)
+            new = _live_position(bot)
+            if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
+                stalled = 0
+            else:
+                stalled += 1
+                if stalled >= WALK_STALL:
+                    return False
+
+    try:
+        for c in ("nc -new rpg,-grind,-gather", "rpg status idle"):
+            try:
+                send_order(bot, c)
+            except Exception:
+                pass
+            time.sleep(1)
+        t0 = time.time()
+        pos = _live_position(bot)
+        if pos and pos[3] != tmap:
+            say(master, "%s is on map %d - %s is on map %d; that needs a "
+                        "boat or zeppelin, not a march." % (bot, pos[3], name, tmap))
+            return
+        flew = False
+        if pos:
+            fm = _nearest_flightmaster(pos)
+            if fm:
+                say(master, "%s is heading to the flight master at %s, then on "
+                            "to %s." % (bot, fm[0], name))
+                leg = _walk_leg(fm[1], fm[2], 30.0, "to the flight master")
+                if leg is True:
+                    taxis = _taxi_list(bot)
+                    want = name.lower().replace(" ", "")
+                    pick = next(((n, t) for n, t in sorted(taxis.items())
+                                 if want in t.lower().replace(" ", "")), None)
+                    if pick:
+                        try:
+                            send_order(bot, "taxi %d" % pick[0])
+                            say(master, "%s is flying to %s." % (bot, pick[1]))
+                            print("daemon: travel %s: taxi %d -> %s"
+                                  % (bot, pick[0], pick[1]))
+                        except Exception as e:
+                            print("daemon: taxi send failed (%s): %s" % (bot, e))
+                            pick = None
+                    if pick:
+                        # wait for the flight to land: stable position, moved far
+                        last = None
+                        while time.time() - t0 < WALK_MAX:
+                            time.sleep(15)
+                            p = _live_position(bot)
+                            if not p:
+                                continue
+                            if last and abs(p[0] - last[0]) + abs(p[1] - last[1]) < 10:
+                                if abs(p[0] - fm[1]) + abs(p[1] - fm[2]) > 500:
+                                    flew = True
+                                break
+                            last = p
+                elif leg is not True and leg != "map":
+                    say(master, "%s could not reach the flight master - I am "
+                                "marching the whole way instead." % bot)
+        leg = _walk_leg(tx, ty, WALK_ARRIVE, "last mile")
+        if leg is True:
+            for c in (restore or ("nc +new rpg,+grind,-follow",)):
+                try:
+                    send_order(bot, c)
+                except Exception as e:
+                    print("daemon: travel restore failed for %s: %s" % (bot, e))
+            how = "flew part of the way and marched the rest" if flew else "marched"
+            say(master, "%s has arrived at %s (%s)." % (bot, name, how))
+            print("daemon: travel %s -> %s: arrived (%.0fs)" % (bot, name, time.time() - t0))
+        elif leg == "map":
+            say(master, "%s ended up on the wrong map on the way to %s." % (bot, name))
+        elif leg == "silent":
+            say(master, "%s went silent on the way to %s - I stopped the "
+                        "march; whisper me to retry." % (bot, name))
+        else:
+            say(master, "%s got stuck on the way to %s - I stopped the "
+                        "march. The ground there may be unpathable." % (bot, name))
+    except Exception as e:
+        try:
+            say(master, "the journey of %s to %s failed: %s" % (bot, name, e))
+        except Exception:
+            pass
+    finally:
+        _WALKING.pop(bot, None)
+
+
+def _start_walk(o, master):
+    """Launch (or refuse) the march for a validated walk/travel order.
+    'travel' is flight-aware (hop -> taxi -> last mile); 'walk' is ground."""
+    (tx, ty, tmap), name = o["_walk"]
+    if o["bot"] in _WALKING:
+        return "%s is already marching to %s" % (o["bot"], _WALKING[o["bot"]])
+    _WALKING[o["bot"]] = name
+    mission = _travel_mission if o.get("_travel") else _walk_mission
+    threading.Thread(target=mission,
+                     args=(o["bot"], tx, ty, tmap, name, master), daemon=True).start()
+    return None
+
+
 def _tele_coords(name):
     """Coordinates of a game_tele location via db-search (exact name match,
     space-insensitive - live game_tele names are concatenated: "BootyBay"),
@@ -1093,6 +1336,22 @@ def validate(order, bots):
         order["cmd"] = "carriage %s" % canon
         order["_route"] = (dest, dest, "carriage")
         return None
+    if low == "walk" or low.startswith("walk ") or low == "travel" or low.startswith("travel "):
+        dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
+        if not dest:
+            return "SKIP %s: walk/travel needs a destination name" % bot
+        coords = _tele_coords(dest)
+        if coords is None:
+            return ("SKIP %s: %r is not a known location (db-search game_tele)"
+                    % (bot, dest))
+        if bot not in bots:
+            return "SKIP %s: not online (census)" % bot
+        if bot in _WALKING:
+            return "SKIP %s: already marching to %s" % (bot, _WALKING[bot])
+        if low.startswith("travel"):
+            order["_travel"] = True
+        order["_walk"] = (coords, _tele_canonical(dest) or dest)
+        return None
     if is_master_cmd(cmd):
         all_bots = census(online_only=False)
         if bot not in all_bots:
@@ -1194,7 +1453,7 @@ def expand_orders(orders, all_bots):
     return out
 
 
-def execute(orders, bots, pace, dry):
+def execute(orders, bots, pace, dry, master=None):
     orders = expand_orders(orders, census(online_only=False))
     plan = []
     for o in orders:
@@ -1202,18 +1461,22 @@ def execute(orders, bots, pace, dry):
         if err:
             print("  " + err)
             continue
-        plan.append({"bot": str(o["bot"]), "cmd": str(o["cmd"])})
+        plan.append(o)
     if not plan:
         print("nothing executable")
         return None
     for o in plan:
-        print("  -> " + order_line(o["bot"], o["cmd"]))
+        print("  -> " + order_line(str(o["bot"]), str(o["cmd"])))
     if dry:
         print("(dry-run: nothing sent; type 'go' to execute, 'skip' to discard)")
         return plan
     for o in plan:
+        if "_walk" in o:
+            err2 = _start_walk(o, master or o["bot"])
+            print("  " + (err2 or "marching: %s -> %s" % (o["bot"], o["_walk"][1])))
+            continue
         try:
-            res = send_order(o["bot"], o["cmd"])
+            res = send_order(str(o["bot"]), str(o["cmd"]))
             print("  sent: " + res["line"])
         except Exception as e:
             print("  send FAILED for %s: %s" % (o["bot"], e))
@@ -1663,6 +1926,11 @@ def _turn(sender, channel, text, convs, pending):
             else:
                 # auto-execute: validation is the safety net, no ritual
                 for o in sent:
+                    if "_walk" in o:
+                        err2 = _start_walk(o, sender)
+                        msg += (" | " + err2) if err2 else \
+                               " | marching: %s is on the way to %s" % (o["bot"], o["_walk"][1])
+                        continue
                     try:
                         res = send_order(str(o["bot"]), str(o["cmd"]))
                         msg += " | executed: " + res["line"]
@@ -1753,7 +2021,7 @@ def daemon():
                 low = text.lower().strip()
                 if CONFIRM and low in GO_WORDS and sender in pending:
                     plan = pending.pop(sender)
-                    sent = execute(plan, census(), 1.0, dry=False)
+                    sent = execute(plan, census(), 1.0, dry=False, master=sender)
                     if sent:
                         say(sender, "executed: " + "; ".join(order_line(o["bot"], o["cmd"]) for o in sent))
                     else:
