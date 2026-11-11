@@ -1336,6 +1336,13 @@ def validate(order, bots):
         bot, cmd, low = target, "group remove", "group remove"
     if bot.strip().lower() == "all":
         return "SKIP: broadcast order was not expanded (internal error)"
+    if re.search(r"[\n`{}]", cmd) or len(cmd) > 120:
+        # a cmd is ONE line, no fences/braces (live 2026-11-11: the model put
+        # its narration - 'Requesting flight path to STV.\n"json...' - into the
+        # cmd field; the tunnel refused the garbage, but the turn crashed at
+        # the send instead of being skipped here with a clear reason)
+        return ("SKIP %s: malformed command shape (not a bot command): %r"
+                % (bot, cmd[:60]))
     if any(low == f or low.startswith(f + " ") for f in FORBIDDEN):
         return "SKIP %s: FORBIDDEN command (purity rails - always refused): %r" % (bot, cmd)
     if low == "go travel" or low.startswith("go travel "):
