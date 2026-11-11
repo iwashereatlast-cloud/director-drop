@@ -299,44 +299,17 @@ GROUP_CMDS = ("group remove",)
 
 ORDER_RULES = """Reply with ONE JSON object as the LAST thing in your reply, inside a single ```json code fence (short prose before the fence is fine, nothing after it):
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
-Rules:
+Core rules:
 - Only name bots from the live roster (the system validates it against the live roster from the DB service and skips others).
 - cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
 - Allowed command prefixes: %(wl)s.
-- Casting: cmd "cast <exact spell name>" makes a unit cast a spell from its own spellbook on itself. ONLY these exact spell names are ever allowed: Mooncloth (tailors), Transmute: Titanium (alchemists), Smelt Titansteel (miners) - the system checks the unit's professions and refuses everything else. Never invent spell names or spell ids.
-- NPC/mob travel is covered by the same dest query: "send Ayla to the trainer in Goldshire", "have Gau grind yetis" - attach {"query":"dest","bot":"<any>","name":"<npc/mob place name>"} and order the returned "go x;y" (the bot pathfinds to the exact spot). Prefer the specific name you mean; say which destination you sent them to.
-- Quest by name: to send a bot after a SPECIFIC quest the master names, attach query {"query":"quest","bot":"<name>"} FIRST - the results carry quest ids - then order cmd "rpg do quest <id>". NEVER invent quest ids; if the quest is not in the bot's log, say so.
-- Silent-bot procedure (A20): if a bot ignores orders or a probe times out, do not report it as fine. 1) attach query {"query":"strategies","bot":"<name>"} - a timeout means silent (offline truth is db-search). 2) If the roster shows it ONLINE and it stayed silent, it is a corpse or master-less: order {"bot":"<name>","cmd":"revive"}, wait, then re-probe. 3) Still silent: remaster - {"bot":"<name>","cmd":"bot remove"} then {"bot":"<name>","cmd":"bot add"}. Attach the orders in the same reply; never just describe them.
-- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) to your JSON when you need facts you lack. The system runs them read-only through the DB service and re-asks you; that first reply is provisional and NOT sent - give your FINAL reply and orders after receiving the results. Each result carries a queried_at time and a staleness caveat - respect both, never present stale numbers as current. Queries: location (the toon's last-flushed map/zone from the DB, marked as such - live position is the tunnel's job), quest (active quests: in progress / ready to turn in), money (gold), skills (profession levels), bags (free bag slots), played (playtime, last logout), raid (the group/raid a toon is in: type, difficulty, leader, member list with online flags), strategies (LIVE strategy read-back through the tunnel's inspect command - returns the bot's live strategy list, or a timeout note if it stays silent). Use them instead of guessing numbers.
-- Presence control: use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out. These run as server commands from Leo himself. If the roster shows a unit OFFLINE, do not refuse - propose a "bot add" order for it.
-- Group/raid management: every roster message includes Leo's current group/raid (type, leader, members). To see another toon's group, attach query {"query":"raid","bot":"<toon>"}. To REMOVE a member from Leo's raid, order {"bot": "<member name>", "cmd": "group remove"} - the system only permits it for CURRENT members of Leo's group, never Leo himself, never hand-play toons. Bot members can also simply be ordered "leave" (they leave on their own); the validator rewrites group-remove to "leave" for bot accounts automatically.
-- Never try to GROW a group: "invite" and "give leader" are not whitelisted (the mod auto-pulls bots into Leo's group on login anyway - the brain clears that auto-formed group with leave orders). Grouped bots split kill XP across everyone in reward range (~1.4/17 per bot in a 17-man raid; quest turn-in XP is NOT split). Use "leave"/"group remove" to shrink a group, never to grow one.
-- Task recipes (issue each cmd as its own order for the same bot; -follow is required or the bot clings to its master and never moves out):
-  * Questing: cmd "nc +new rpg,+quest,-follow" - the 'new rpg' + 'quest' nc strategies drive questing from the bot's own quest log. Do NOT also send "rpg status do quest": it only lands when a quest with a POI is already in the log, otherwise the bot just whispers back "No quest available; use 'do quest <id>'" (NewRpgAction.cpp:183-215). To force a SPECIFIC quest by id: cmd "rpg do quest <id>" (separate command, NewRpgAction.cpp:227-244).
-  * Grinding mobs: cmd "nc +new rpg,+grind,-follow" (optionally then cmd "rpg status go grind").
-  * Gathering mats: cmd "nc +new rpg,+gather,-follow" then cmd "rpg status do gather". ONLY for units whose skills query shows herb or mine - the server refuses others (no skinning in gather mode).
-  * Stand down / return to idle: cmd "nc -new rpg,-grind,-gather" then cmd "rpg status idle".
-- Never invent bot names, item links, or gold amounts. If unsure, explain in reply and leave orders empty.
-- If you CANNOT do what is asked with the allowed commands and roster (unknown name, command not whitelisted, not permitted, target not in your group), reply plainly: "I can't do that - <one short reason>". Never pretend or bluff.
-- Feedback: the roster message may end with "Recent bot error whispers" (bot refusals like "Unknown spell"/"Only your master..."), and you can attach query {"query":"strategies","bot":"<name>"} to read a bot's live strategies back. If a bot errored, or a strategies query timed out (silent, master-less bot), CORRECT COURSE IN THIS SAME REPLY with fixed orders - e.g. offline -> {"bot":"<name>","cmd":"bot add"}; wrong strategies -> re-push the recipe cmd; silent bot -> {"bot":"<name>","cmd":"bot remove"} + {"bot":"<name>","cmd":"bot add"} (remaster to Leo). Never just describe the fix without attaching the orders.
-- Come to me: "have <bot> come to me/you", "bring <bot> here", "summon <bot> to your side" = cmd "follow" (the bot comes to Leo and stays at his side). Do NOT compute Leo's coordinates - "follow" needs none. To release the bot afterwards: cmd "stay" or a task recipe.
-- Zone travel: "go travel <name>" is DEAD on this build (the engine's travel catalogs are never loaded - a live 31/31 probe got "Clearing travel target" for every destination, including its own example). To send a unit to a named destination, order {"bot":"<name>","cmd":"travel <destination>"}: the SYSTEM runs the whole journey - it stands the unit down, hops it to the nearest flight master, reads its own "taxi ?" list, flies the long leg if the network reaches it, hops the last mile, and whispers you the arrival. Narrate it as "<bot> is travelling to <destination>" and say HOW (on foot / via flight). The system whispers progress; do not poll the unit yourself unless asked. "walk <destination>" is the ground-only variant. Cross-continent trips need the harbormaster (boat/zeppelin routes below) - a travel order to another continent will be refused with a map note.
-- Destination translation: the master speaks in ZONE names and abbreviations ("send Golbez to Stranglethorn Vale", "go to stv", "level in Thousand Needles"); the engine wants the town/subzone name. Translate with this table (zone -> destination, level bracket):
-%(zones)s
-  Common abbreviations: %(abbr)s. If the master names a zone not in the table, pick the best-known town in it and TELL them which destination you are sending the unit to. If the master names a town/area directly, use it as-is. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order.
-- Harbormaster travel (cross-continent): Leo is NOT a teleporter. Bots cross continents ONLY by boat/zeppelin, and ONLY along these real routes: Booty Bay->Ratchet, Menethil Harbor->Theramore, Menethil Harbor->Auberdine (boats, any faction); Gromgol Base Camp->Undercity, Gromgol Base Camp->Orgrimmar, Undercity->Orgrimmar (zeppelins, HORDE only - never send an Alliance bot there). To board, the unit must be at the departure harbor; order {"bot":"<name>","cmd":"boat <arrival harbor>"} ONLY when the unit is at the departure dock (check with query {"query":"live","bot":"<name>"}). Narrate trips as travel: "Gau is taking the boat from Menethil Harbor to Auberdine" - never mention teleporting. The system enforces the routes; a SKIP means the unit is not at the dock or the route is wrong for its faction.%(carriage)s
-- Farming mats: "have <bot> farm <mat>" (herbs/ore) = 1) check the unit can gather: query {"query":"skills","bot":"<name>"} - it needs herb (for plants) or mine (for ore); if it lacks the skill, SAY SO and suggest a unit that has it. 2) find the destination: query {"query":"mats","bot":"<any>","name":"<mat>"} - the answer ranks named teleport locations by nearby spawn density. 3) get the unit there (walk/rpg within the continent; harbormaster routes across continents). 4) start gathering: {"bot":"<name>","cmd":"nc +new rpg,+gather,-follow"} then {"bot":"<name>","cmd":"rpg status do gather"}. Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is the potential, not a guarantee of what is up right now.
-- Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = order {"bot":"<name>","cmd":"travel <the zone's table destination>"} (the system flies/marches them there and whispers the arrival) then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
-    {"role": "assistant", "content": "```json\n{\"reply\": \"On it - charting the route to the Barrens.\", \"queries\": [{\"query\": \"dest\", \"bot\": \"Golbez\", \"name\": \"Crossroads\"}], \"orders\": []}\n```"},
-- IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
-- The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST),
-        "zones": "\n".join("  %-22s -> %-20s (%s)" % (z, d[0], d[1])
-                           for z, d in sorted(ZONE_DESTINATIONS.items())),
-        "abbr": ", ".join("%s=%s" % (a, z) for a, z in sorted(ZONE_ABBREVIATIONS.items())),
-        "carriage": (" Carriage is ENABLED (DIRECTOR_CARRIAGE=1): you may order "
-                     '{"bot":"<name>","cmd":"carriage <route harbor>"} to send a '
-                     "carriage (a swift trip) to a route harbor, and narrate it "
-                     "as such.") if CARRIAGE else ""}
+- RECIPES: for any TASK the master asks for (travel, farming, leveling, silent bots, groups, casting, presence, coming to you, boats), attach query {"query":"recipes","text":"<the master's words>"} FIRST - the results return the exact command structures, zone translation table and gotchas for the matched skills. Use them verbatim; do not improvise command shapes. If nothing matches, fall back to these core rules and say what you lack.
+- DB facts: attach "queries": [{"query": "<name>", "bot": "<bot name>"}] (max 3) when you need facts you lack - the system runs them read-only and re-asks you; that first reply is provisional and NOT sent. Queries: location (last-flushed map/zone), quest (active quests), money, skills, bags, played, raid, strategies (LIVE strategy read-back), dest (coordinates of a named location), mats (where a material spawns), live (real-time position), recipes (the library sweep). Each result carries a queried_at time and a staleness caveat - respect both.
+- Use cmd "bot add" to log an OFFLINE unit in, "bot remove" to log an ONLINE unit out (server commands from Leo). Use "bot": "ALL" to apply one cmd to every watched unit at once (never hand-play toons, never Leo).
+- Never invent bot names, item links, gold amounts, quest ids or spell names. If you cannot do what is asked, reply "I can't do that" plus a one-line reason - never bluff.
+- Feedback: the roster message may end with "Recent bot error whispers"; if a bot errored, CORRECT COURSE IN THIS SAME REPLY with fixed orders - never just describe the fix without attaching the orders.
+- Bots grind solo with rpg+grind strategies already set.
+- The system validates and executes the orders after your reply. When the master asks you to DO something, the order MUST be in the orders array of this same reply - describing it without ordering it is a failure. Keep replies short.""" % {"wl": ", ".join(WHITELIST)}
 
 SYSTEM = ("You are the director of altbots on a private WoW server (master: Leo).\n"
           "The human gives marching orders as natural language, JSON, or pasted lists.\n" + ORDER_RULES + "\n"
@@ -679,6 +652,46 @@ def run_queries(qs, all_bots):
                                                   resp.get("caveat")))
             except Exception as e:
                 lines.append("mat %r lookup failed: %s" % (mat, e))
+            continue
+        if name == "recipes":
+            text = str(q.get("text") or q.get("name") or "").strip()
+            if not text:
+                lines.append("recipes query needs the master's words: "
+                              "{\"query\":\"recipes\",\"text\":\"<what they said>\"}")
+                continue
+            try:
+                resp = dbsearch("get_recipes", text=text)
+                if not resp["rows"]:
+                    lines.append("recipes: no library match for %r - fall back to "
+                                 "the core rules and say what you lack" % text)
+                else:
+                    for row in resp["rows"]:
+                        r = json.loads(row)
+                        parts = ["RECIPE %s" % r["id"], "WHEN %s" % r.get("when", "")]
+                        for o in r.get("orders", []):
+                            parts.append("ORDER {\"bot\":\"<name>\",\"cmd\":\"%s\"} %s"
+                                         % (o["cmd"], o.get("note", "")))
+                        if r.get("release"):
+                            parts.append("RELEASE {\"bot\":\"<name>\",\"cmd\":\"%s\"} %s"
+                                         % (r["release"]["cmd"],
+                                            r["release"].get("note", "")))
+                        for i, st in enumerate(r.get("steps", []), 1):
+                            parts.append("STEP %d: %s" % (i, st))
+                        if r.get("requirements"):
+                            parts.append("REQUIRES %s" % r["requirements"])
+                        if r.get("zone_table"):
+                            parts.append(r["zone_table"]["_note"])
+                            parts.extend("  %s -> %s (%s)" % (z, d[0], d[1])
+                                         for z, d in sorted(r["zone_table"].items())
+                                         if not z.startswith("_"))
+                        if r.get("abbreviations"):
+                            parts.append("  abbreviations: " + ", ".join(
+                                "%s=%s" % kv for kv in sorted(r["abbreviations"].items())))
+                        if r.get("notes"):
+                            parts.append("NOTES %s" % r["notes"])
+                        lines.append(" | ".join(parts))
+            except Exception as e:
+                lines.append("recipes lookup failed: %s" % e)
             continue
         if name == "dest":
             place = str(q.get("name") or q.get("dest") or "").strip()
