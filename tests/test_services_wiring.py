@@ -173,24 +173,31 @@ def main():
         rules = director.ORDER_RULES
         check("prompt: go travel marked DEAD with the live 31/31 evidence",
               "go travel <name>\" is DEAD" in rules and "31/31" in rules, rules[:0])
-        check("prompt: dest query is the travel path (coords from db-search)",
-              '"query\":\"dest\"' in rules and "go <x>;<y>" in rules)
+        check("prompt: the travel order is the one true travel path",
+              '"cmd":"travel <destination>"' in rules
+              and "go <x>;<y>" not in rules, rules[:0])
         check("prompt: travel is the system-run journey (hop, taxi, last mile)",
               '"cmd":"travel <destination>"' in rules
               and "taxi ?" in rules and "last mile" in rules, rules[:0])
         err = director.validate({"bot": "Gau", "cmd": "go travel Booty Bay"}, {})
         check("validate: go travel refused as a dead command",
-              "DEAD" in str(err) and "dest query" in str(err), err)
+              "DEAD" in str(err) and "travel <destination>" in str(err), err)
         bots_c = director.census()
         err = director.validate({"bot": "Gau", "cmd": "go 12.3;abc"}, bots_c)
-        check("validate: malformed go x;y coordinates refused",
-              "malformed" in str(err), err)
+        check("validate: bare go x;y legs are mission-internal (refused)",
+              "mission-internal" in str(err) and "travel" in str(err), err)
         err = director.validate({"bot": "Gau", "cmd": "go -14420.0;480.0"}, bots_c)
-        check("validate: well-formed go x;y passes",
-              err is None, err)
+        check("validate: even well-formed bare go x;y is refused",
+              "mission-internal" in str(err), err)
         err = director.validate({"bot": "Gau", "cmd": "go -14420.0;480.0;26.0"}, bots_c)
-        check("validate: go x;y;z (with z) passes",
-              err is None, err)
+        check("validate: go x;y;z is refused too (mission-internal)",
+              "mission-internal" in str(err), err)
+        check("prompt: fewshot teaches stv -> travel Booty Bay",
+              any("send golbez to stv" in m["content"] for m in director.FEWSHOT)
+              and any("travel Booty Bay" in m["content"] for m in director.FEWSHOT),
+              [m["content"][:60] for m in director.FEWSHOT])
+        check("prompt: leveling rule uses the travel order",
+              'cmd":"travel <the zone\'s table destination>' in rules, rules[:0])
         dig = director.run_queries(
             [{"query": "dest", "bot": "Gau", "name": "Booty Bay"}],
             director.census(online_only=False))

@@ -318,7 +318,7 @@ Rules:
   Common abbreviations: %(abbr)s. If the master names a zone not in the table, pick the best-known town in it and TELL them which destination you are sending the unit to. If the master names a town/area directly, use it as-is. rpg grind/quest/gather scans units near the unit's position - send it to the destination FIRST, then the rpg order.
 - Harbormaster travel (cross-continent): Leo is NOT a teleporter. Bots cross continents ONLY by boat/zeppelin, and ONLY along these real routes: Booty Bay->Ratchet, Menethil Harbor->Theramore, Menethil Harbor->Auberdine (boats, any faction); Gromgol Base Camp->Undercity, Gromgol Base Camp->Orgrimmar, Undercity->Orgrimmar (zeppelins, HORDE only - never send an Alliance bot there). To board, the unit must be at the departure harbor; order {"bot":"<name>","cmd":"boat <arrival harbor>"} ONLY when the unit is at the departure dock (check with query {"query":"live","bot":"<name>"}). Narrate trips as travel: "Gau is taking the boat from Menethil Harbor to Auberdine" - never mention teleporting. The system enforces the routes; a SKIP means the unit is not at the dock or the route is wrong for its faction.%(carriage)s
 - Farming mats: "have <bot> farm <mat>" (herbs/ore) = 1) check the unit can gather: query {"query":"skills","bot":"<name>"} - it needs herb (for plants) or mine (for ore); if it lacks the skill, SAY SO and suggest a unit that has it. 2) find the destination: query {"query":"mats","bot":"<any>","name":"<mat>"} - the answer ranks named teleport locations by nearby spawn density. 3) get the unit there (walk/rpg within the continent; harbormaster routes across continents). 4) start gathering: {"bot":"<name>","cmd":"nc +new rpg,+gather,-follow"} then {"bot":"<name>","cmd":"rpg status do gather"}. Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is the potential, not a guarantee of what is up right now.
-- Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = attach {"query":"dest","bot":"<any>","name":"<the zone's table destination>"} then TWO orders for that bot: the returned {"bot":"<name>","cmd":"go <x>;<y>"} then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
+- Leveling requests: "have <bot> go level in <zone>", "send <bot> to level in <zone>" = order {"bot":"<name>","cmd":"travel <the zone's table destination>"} (the system flies/marches them there and whispers the arrival) then the grind recipe {"bot":"<name>","cmd":"nc +new rpg,+grind,-follow"}. When the master leaves the zone open, match the unit's level to the bracket column; if the named zone's bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction.
     {"role": "assistant", "content": "```json\n{\"reply\": \"On it - charting the route to the Barrens.\", \"queries\": [{\"query\": \"dest\", \"bot\": \"Golbez\", \"name\": \"Crossroads\"}], \"orders\": []}\n```"},
 - IMPORTANT: when the master asks you to DO something (bring a unit online, stand one down, assign a task), do not merely describe what you could do - you MUST put the order in the orders array of this same reply. A reply like "I can bring him online with a bot add order" WITHOUT the attached order is a failure.
 - The system validates and executes the orders after your reply. Keep replies short.""" % {"wl": ", ".join(WHITELIST),
@@ -353,6 +353,8 @@ GENERAL = ("You are Leo, the general of a private WoW guild's alt-bot army. "
 # not consume the 10-turn history window. Every assistant message is ONLY a
 # fenced JSON object - that is the contract ORDER_RULES describes.
 FEWSHOT = [
+    {"role": "user", "content": "send golbez to stv"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is travelling to Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel Booty Bay\"}]}\n```"},
     {"role": "user", "content": "send Golbez to the Barrens to grind"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"go -443.0;-2594.0\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
@@ -1095,6 +1097,10 @@ def _ollama_chat(body):
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
         resp = json.loads(r.read())
     m = resp["message"]
+    if DEBUG:
+        th = (m.get("thinking") or "").strip()
+        if th:
+            print("daemon: thinking: %s" % th[:600].replace("\n", " "))
     content = (m.get("content") or "").strip()
     if content:
         return content
@@ -1251,12 +1257,17 @@ def validate(order, bots):
         return "SKIP %s: FORBIDDEN command (purity rails - always refused): %r" % (bot, cmd)
     if low == "go travel" or low.startswith("go travel "):
         return ("SKIP %s: 'go travel' is DEAD on this build (the travel catalogs "
-                "never load - live 31/31 FAIL, A24); attach a dest query and "
-                "order 'go <x>;<y>' instead" % bot)
-    if low.startswith("go ") and ";" in cmd and not re.fullmatch(
-            r"go +-?\d+(?:\.\d+)?;-?\d+(?:\.\d+)?"
-            r"(?:;-?\d+(?:\.\d+)?)?", cmd.strip()):
-        return "SKIP %s: malformed 'go x;y' coordinates: %r" % (bot, cmd)
+                "never load - live 31/31 FAIL, A24); order "
+                "'travel <destination>' instead - the system runs the journey"
+                % bot)
+    if low.startswith("go ") and ";" in cmd:
+        # go x;y legs are MISSION-INTERNAL only (the travel mission issues them
+        # itself); a bare one from the LLM is a one-shot MoveTo that silent-
+        # fails past the 3s path search (live 2026-11-10) - refuse it so the
+        # brain must use the travel/walk orders
+        return ("SKIP %s: raw 'go x;y' legs are mission-internal; order "
+                "'travel <destination>' (flight-aware) or 'walk <destination>' "
+                "(ground) instead" % bot)
     if bot.strip().lower() in HANDPLAY and not cmd.startswith("bot remove"):
         return ("SKIP %s: hand-play toon, never commanded or brought "
                 "online as a bot (DIRECTOR_HANDPLAY)" % bot)
