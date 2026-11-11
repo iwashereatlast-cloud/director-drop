@@ -766,6 +766,8 @@ def _tele_canonical(name):
 # stand the bot down, chain hops inside the pathfinder budget, poll the live
 # position, re-issue on stall, restore + report on arrival.
 WALK_HOP = float(os.environ.get("DIRECTOR_WALK_HOP", "200"))
+# ^ sidestep SAMPLE distance only (cone sampling); legs themselves always
+#   order the true target and let the bot's pathfinder compute the route
 WALK_TICK = float(os.environ.get("DIRECTOR_WALK_TICK", "8"))
 WALK_STALL = int(os.environ.get("DIRECTOR_WALK_STALL", "3"))
 WALK_MAX = float(os.environ.get("DIRECTOR_WALK_MAX", "1800"))
@@ -773,19 +775,45 @@ WALK_ARRIVE = 60.0
 _WALKING = {}      # bot -> destination name (one march per bot)
 
 
-def _next_hop(px, py, tx, ty):
-    """Next hop toward the target: capped at WALK_HOP yards, straight line.
-    Returns (hx, hy, remaining_distance)."""
-    dx, dy = tx - px, ty - py
-    dist = (dx * dx + dy * dy) ** 0.5
-    if dist <= WALK_HOP:
-        return tx, ty, dist
-    return (px + dx / dist * WALK_HOP, py + dy / dist * WALK_HOP, dist)
+def _walk_leg(bot, tmap, fx, fy, arrive):
+    """March one leg with the mod engine's own strategy (MoveFarTo): every
+    iteration orders the TRUE target directly - the bot's pathfinder computes
+    the real route (roads, ramps, mountain passes) and walks the furthest
+    reachable point of it; a no-progress tick cone-samples rotated targets.
+    NO straight-line hops and no distance thresholds: a straight-line
+    waypoint is a guess the terrain does not honor (live 2026-11-10:
+    Stormwind canal, Andorhal ruins). Returns True on arrival, False on
+    stall, "silent"/"map" on those."""
+    stalled = 0
+    while True:
+        pos = _live_position(bot)
+        if not pos:
+            return "silent"
+        if pos[3] != tmap:
+            return "map"
+        dist = ((pos[0] - fx) ** 2 + (pos[1] - fy) ** 2) ** 0.5
+        if dist <= arrive:
+            return True
+        try:
+            send_order(bot, "go %.1f;%.1f" % (fx, fy))
+        except Exception as e:
+            print("daemon: walk order failed (%s): %s" % (bot, e))
+        time.sleep(WALK_TICK)
+        new = _live_position(bot)
+        if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
+            stalled = 0
+            continue
+        if _sidestep_probe(bot, pos, fx, fy):
+            stalled = 0
+            continue
+        stalled += 1
+        if stalled >= WALK_STALL:
+            return False
 
 
 def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
-    """March one bot to (tx, ty) on map tmap. Runs in its own thread and
-    reports to the master through the normal whisper path."""
+    """March one bot to (tx, ty) on map tmap (ground only). Runs in its own
+    thread and reports to the master through the normal whisper path."""
     try:
         for c in ("nc -new rpg,-grind,-gather", "rpg status idle"):
             try:
@@ -794,48 +822,24 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
                 pass
             time.sleep(1)
         t0 = time.time()
-        stalled = 0
-        while time.time() - t0 < WALK_MAX:
-            pos = _live_position(bot)
-            if not pos:
-                stalled += 1
-                if stalled >= 2 * WALK_STALL:
-                    say(master, "%s went silent on the march to %s - I stopped "
-                                "the march; whisper me to retry." % (bot, name))
-                    return
-                time.sleep(WALK_TICK)
-                continue
-            if pos[3] != tmap:
-                say(master, "%s is on map %d - %s is on map %d; that needs a "
-                            "boat or zeppelin, not a march." % (bot, pos[3], name, tmap))
-                return
-            hx, hy, dist = _next_hop(pos[0], pos[1], tx, ty)
-            if dist <= WALK_ARRIVE:
-                for c in (restore or ("nc +new rpg,+grind,-follow",)):
-                    try:
-                        send_order(bot, c)
-                    except Exception as e:
-                        print("daemon: walk restore failed for %s: %s" % (bot, e))
-                say(master, "%s has arrived at %s." % (bot, name))
-                print("daemon: walk %s -> %s: arrived (%.0fs)" % (bot, name, time.time() - t0))
-                return
-            try:
-                send_order(bot, "go %.1f;%.1f" % (hx, hy))
-            except Exception as e:
-                print("daemon: walk hop send failed for %s: %s" % (bot, e))
-            time.sleep(WALK_TICK)
-            new = _live_position(bot)
-            if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
-                stalled = 0
-            else:
-                stalled += 1
-                if stalled >= WALK_STALL:
-                    say(master, "%s got stuck on the way to %s - I stopped the "
-                                "march at %s. The ground there may be "
-                                "unpathable." % (bot, name, pos[4] or pos[:2]))
-                    return
-        say(master, "%s did not reach %s within %.0f minutes - march timed "
-                    "out. I left them standing; whisper me to retry." % (bot, name, WALK_MAX / 60))
+        leg = _walk_leg(bot, tmap, tx, ty, WALK_ARRIVE)
+        if leg is True:
+            for c in (restore or ("nc +new rpg,+grind,-follow",)):
+                try:
+                    send_order(bot, c)
+                except Exception as e:
+                    print("daemon: walk restore failed for %s: %s" % (bot, e))
+            say(master, "%s has arrived at %s." % (bot, name))
+            print("daemon: walk %s -> %s: arrived (%.0fs)" % (bot, name, time.time() - t0))
+        elif leg == "map":
+            say(master, "%s is on the wrong map for %s - that needs a boat or "
+                        "zeppelin, not a march." % (bot, name))
+        elif leg == "silent":
+            say(master, "%s went silent on the march to %s - I stopped the "
+                        "march; whisper me to retry." % (bot, name))
+        else:
+            say(master, "%s got stuck on the way to %s - I stopped the "
+                        "march. The ground there may be unpathable." % (bot, name))
     except Exception as e:
         try:
             say(master, "the march of %s to %s failed: %s" % (bot, name, e))
@@ -905,36 +909,8 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
     """Flight-aware march: hop to the nearest flight master, fly the long leg
     via the stock 'taxi ?' / 'taxi <n>' commands (the bot's own live list is
     the route data), then hop the last mile. Reports to the master."""
-    def _walk_leg(fx, fy, arrive, label):
-        """Hop-chain to (fx, fy); True on arrival, False on stall/timeout."""
-        stalled = 0
-        while True:
-            pos = _live_position(bot)
-            if not pos:
-                return "silent"
-            if pos[3] != tmap:
-                return "map"
-            hx, hy, dist = _next_hop(pos[0], pos[1], fx, fy)
-            if dist <= arrive:
-                return True
-            try:
-                send_order(bot, "go %.1f;%.1f" % (hx, hy))
-            except Exception as e:
-                print("daemon: travel hop failed (%s): %s" % (bot, e))
-            time.sleep(WALK_TICK)
-            new = _live_position(bot)
-            if new and abs(new[0] - pos[0]) + abs(new[1] - pos[1]) > 5:
-                stalled = 0
-            else:
-                stalled += 1
-                if stalled >= WALK_STALL:
-                    # cone sampling (the rpg engine's MoveFarTo trick): on a
-                    # blocked line, try rotated hops and keep the first one
-                    # the bot actually walks; None = every angle blocked too
-                    if _sidestep_probe(bot, pos, fx, fy):
-                        stalled = 0
-                        continue
-                    return False
+    def _leg(fx, fy, arrive):
+        return _walk_leg(bot, tmap, fx, fy, arrive)
 
     try:
         for c in ("nc -new rpg,-grind,-gather", "rpg status idle"):
@@ -956,7 +932,7 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                     break
                 say(master, "%s is heading to the flight master at %s, then on "
                             "to %s." % (bot, fm[0], name))
-                leg = _walk_leg(fm[1], fm[2], 30.0, "to the flight master")
+                leg = _leg(fm[1], fm[2], 30.0)
                 if leg is True:
                     taxis = _taxi_list(bot)
                     want = name.lower().replace(" ", "")
@@ -989,7 +965,7 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
                           "next one" % (bot, fm[0]))
                     continue
                 break
-        leg = _walk_leg(tx, ty, WALK_ARRIVE, "last mile")
+        leg = _leg(tx, ty, WALK_ARRIVE)
         if leg is True:
             for c in (restore or ("nc +new rpg,+grind,-follow",)):
                 try:
