@@ -333,6 +333,19 @@ def main():
         check("mat: unknown mat -> 0 rows, still ok",
               r.get("ok") and r["row_count"] == 0, r)
 
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "0"}})
+        check("flightmasters envelope", envelope_ok(r, "get_flightmasters"), json.dumps(r)[:200])
+        check("flightmasters: nearest FM first (Goldshire area)",
+              r.get("ok") and r["rows"] and r["rows"][0][0] == "Fargas the FM", r)
+        check("flightmasters: non-FM npcs excluded (npcflag gate)",
+              not any(row[0] == "Innkeeper" for row in r.get("rows", [])), r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "-9446.0", "y": "64.0", "map": "9"}})
+        check("flightmasters: other map -> 0 rows, still ok",
+              r.get("ok") and r["row_count"] == 0, r)
+        r = handle(adapter, {"tool": "get_flightmasters", "params": {"x": "0; DROP", "y": "1", "map": "0"}})
+        check("flightmasters: SQL metacharacters refused at the param gate",
+              r.get("ok") is False and r.get("code") == "bad_param", r)
+
         print("== 5. per-query timeout fires ==")
         # the sqlite fixture adapter DETECTS timeouts post-hoc (deadline checked
         # after the query completes - the real mysql adapter ENFORCES by killing

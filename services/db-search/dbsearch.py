@@ -99,6 +99,8 @@ def assert_scope_guild(guild):
 # Every interpolable param is allowlisted per tool AND regex-validated here;
 # there is no code path that puts client text into SQL unvalidated.
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
+NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")   # coordinates / map ids for the
+# flightmaster lookup (no SQL metacharacters possible by construction)
 
 def _p(tool, params, key, required=True, pattern=None):
     v = (params or {}).get(key)
@@ -413,6 +415,29 @@ CATALOG = {
     "cannot": "arbitrary coordinates (no such table); whether a spot is safe/faction-appropriate for a given bot",
     "caveat": "static core data - effectively never stale. A 0-row answer means the location name does not exist; never guess a tele name the LLM has not seen in these rows.",
     "fill": lambda p: {"name": _p("get_game_tele", p, "name", pattern=GUILD_RE)},
+  },
+
+  "get_flightmasters": {
+    # UNIT_NPC_FLAG_FLIGHTMASTER = 8192 (0x2000). Nearest flight masters to
+    # a live position: the travel mission hops to one, reads the bot's own
+    # 'taxi ?' list, and flies the long leg (the taxi graph itself lives in
+    # the DBC stores, not SQL - the bot's live list IS the route data).
+    "sql": ("SELECT ct.name, c.map, c.position_x, c.position_y, c.position_z, "
+            "CAST((c.position_x - {x}) * (c.position_x - {x}) "
+            "+ (c.position_y - {y}) * (c.position_y - {y}) AS INTEGER) AS dist "
+            "FROM acore_world.creature c "
+            "JOIN acore_world.creature_template ct ON ct.entry = c.id "
+            "WHERE (ct.npcflag & 8192) != 0 AND c.map = {map} "
+            "ORDER BY dist LIMIT 3"),
+    "params": {"x": "required - live position x", "y": "required - live position y",
+                "map": "required - map id"},
+    "timeout": 10,
+    "can": "the 3 nearest flight masters to a live position on the same map (name, map, coordinates) - the departure points for the stock 'taxi ?' / 'taxi <n>' whisper commands",
+    "cannot": "the taxi graph itself (DBC data, not SQL - ask the bot with 'taxi ?'); flight masters on another map; whether the bot knows a node",
+    "caveat": "static spawn data - effectively never stale. The bot must be near the flight master (FarDistance) for 'taxi' to work.",
+    "fill": lambda p: {"x": _p("get_flightmasters", p, "x", pattern=NUM_RE),
+                      "y": _p("get_flightmasters", p, "y", pattern=NUM_RE),
+                      "map": _p("get_flightmasters", p, "map", pattern=NUM_RE)},
   },
 
   "get_mat_spawns": {
