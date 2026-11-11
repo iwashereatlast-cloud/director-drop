@@ -193,8 +193,9 @@ def main():
         r3 = director.run_queries(
             [{"query": "recipes", "bot": "Gau", "text": "have gau farm peacebloom"}],
             director.census(online_only=False))
-        check("recipes sweep: farming loads the 4-step structure",
-              "RECIPE farm_mat" in r3 and "STEP 4" in r3 and "rpg status do gather" in r3, r3[:300])
+        check("recipes sweep: farming loads the farm order structure",
+              "RECIPE farm_mat" in r3 and "STEP 3" in r3 and "farm <destination>" in r3
+              and "rpg status do gather" not in r3, r3[:300])
         r4 = director.run_queries(
             [{"query": "recipes", "bot": "Gau", "text": "who is online"}],
             director.census(online_only=False))
@@ -462,6 +463,81 @@ def main():
               err is None and "_walk" in ow and "_travel" not in ow, (err, ow))
         director.WALK_HOP, director.WALK_TICK = real_hop, real_tick
         director.WALK_STALL, director.WALK_MAX = real_stall, real_max
+
+        print("== 1g. farm keeper: tele -> gather -> re-arm -> stand-down cancel ==")
+        real_refresh = director.FARM_REFRESH
+        director.FARM_REFRESH = 2
+        sim2 = {"x": -9446.0, "y": 64.0, "target": None}
+        farm_state = {"done": False, "gathers": 0}
+
+        def farm_world():
+            seen = len(fifo_lines)
+            while not farm_state["done"]:
+                time.sleep(0.05)
+                for line in fifo_lines[seen:]:
+                    seen += 1
+                    m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
+                    if m and m.group(1) == "BootyBay":
+                        sim2["x"], sim2["y"] = -14420.0, 480.0
+                    if "/w Ayla rpg status do gather" in line:
+                        farm_state["gathers"] += 1
+
+        def farm_replier():
+            seen = len(fifo_lines)
+            while not farm_state["done"]:
+                time.sleep(0.05)
+                for line in fifo_lines[seen:]:
+                    seen += 1
+                    if ".playerbots inspect Ayla position" not in line:
+                        continue
+                    with open(log_path, "a") as f:
+                        f.write("2026-11-11 22:00:00.000 | MESSAGES | "
+                                "headless.world.chat.chat:display:124 - "
+                                "[System]: Ayla: %.1f %.1f 26.0 0 0.5 |Stranglethorn Vale|\n"
+                                % (sim2["x"], sim2["y"]))
+
+        threading.Thread(target=farm_world, daemon=True).start()
+        threading.Thread(target=farm_replier, daemon=True).start()
+        fo = {"bot": "Ayla", "cmd": "farm Booty Bay"}
+        err = director.validate(fo, director.census())
+        check("farm order validates and resolves the destination",
+              err is None and fo.get("_farm") and fo["_walk"][1] == "BootyBay", (err, fo))
+        check("farm order line shows the GM tele",
+              director.order_line("Ayla", "farm BootyBay") == ".tele name Ayla BootyBay",
+              director.order_line("Ayla", "farm BootyBay"))
+        err = director.validate({"bot": "Gau", "cmd": "farm Nowhereville"},
+                                director.census())
+        check("farm to an unknown location is refused",
+              "not a known location" in str(err), err)
+        reported2 = []
+        real_say2 = director.say
+        director.say = lambda who, what: (reported2.append(what), fifo_lines.append("(say) %s" % what))
+        err2 = director._start_walk(fo, "Cecil")
+        check("farm mission launches", err2 is None, err2)
+        err3 = director._start_walk(fo, "Cecil")
+        check("second farm order for the same bot is refused",
+              "already farming" in str(err3), err3)
+        deadline = time.time() + 30
+        while time.time() < deadline and farm_state["gathers"] < 3:
+            time.sleep(0.2)
+        check("farm mission armed and re-armed the gather status",
+              farm_state["gathers"] >= 3, farm_state["gathers"])
+        check("farm mission narrated the arrival",
+              any("arrived at BootyBay and is gathering" in r for r in reported2), reported2)
+        check("farm keeper registered the bot",
+              "Ayla" in director._FARMING, director._FARMING)
+        err = director.validate({"bot": "Ayla", "cmd": "rpg status idle"},
+                                director.census())
+        check("stand-down order cancels the keeper",
+              err is None and "Ayla" not in director._FARMING, (err, director._FARMING))
+        time.sleep(3)
+        g_before = farm_state["gathers"]
+        time.sleep(4)
+        check("no further re-arms after the stand-down",
+              farm_state["gathers"] == g_before, (g_before, farm_state["gathers"]))
+        farm_state["done"] = True
+        director.FARM_REFRESH = real_refresh
+        director.say = real_say2
 
         print("== 2. db-search facts: census, masters, sender gates ==")
         online = director.census()
