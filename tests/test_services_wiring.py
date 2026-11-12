@@ -215,6 +215,18 @@ def main():
         check("validate: 'go <name>' is refused too (live 2026-11-11: it was "
               "sent as a no-op and the bot never moved)",
               "mission-internal" in str(err) and "farm" in str(err), err)
+        o_sw = {"bot": "Ayla", "cmd": "travel SW"}
+        err = director.validate(o_sw, bots_c)
+        check("acronyms: 'SW' expands to Stormwind at validation (live "
+              "2026-11-12: 'summon marle to SW' looped on the raw acronym)",
+              err is None and o_sw["_walk"][1] == "Stormwind", (err, o_sw))
+        o_if = {"bot": "Ayla", "cmd": "farm IF"}
+        err = director.validate(o_if, bots_c)
+        check("acronyms: 'IF' expands to Ironforge for farm orders too",
+              err is None and o_if["_walk"][1] == "Ironforge", (err, o_if))
+        err = director.validate({"bot": "Ayla", "cmd": "travel Nowhereville"}, bots_c)
+        check("acronyms: unknown names still refuse (no false expansion)",
+              "not a known location" in str(err), err)
         check("prompt: fewshot teaches gather -> skills query -> farm order",
               any("gather herbs" in m["content"] for m in director.FEWSHOT)
               and any("farm Booty Bay" in m["content"] for m in director.FEWSHOT),
@@ -256,9 +268,13 @@ def main():
         check("every zone has a destination + bracket",
               all(isinstance(d, tuple) and len(d) == 2 and d[0] and d[1]
                   for d in director.ZONE_DESTINATIONS.values()))
-        check("abbreviations resolve to canonical zones",
+        check("abbreviations resolve to canonical places (zone or game_tele)",
               all(z in director.ZONE_DESTINATIONS
-                  for z in director.ZONE_ABBREVIATIONS.values()))
+                  or director._tele_coords(z) is not None
+                  for z in director.ZONE_ABBREVIATIONS.values()),
+              [z for z in director.ZONE_ABBREVIATIONS.values()
+               if z not in director.ZONE_DESTINATIONS
+               and director._tele_coords(z) is None])
         check("library renders the full table (via the travel recipe)",
               all(d[0] in r1 for d in director.ZONE_DESTINATIONS.values()), r1[:200])
         check("library separates prompt data from prompt rules",

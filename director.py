@@ -260,10 +260,24 @@ ZONE_NAMES = {
     1637: "Orgrimmar", 1638: "Thunder Bluff",
 }
 
+# The WoW acronym database (live 2026-11-12: 'summon marle to SW' -> the model
+# passed 'SW' through and game_tele has no such row). Expansion happens in
+# validate() BEFORE the game_tele lookup, so an acronym lands even when the
+# model does not translate it itself (defense in depth - same lesson as the
+# A43/A44 fewshot fixes: never rely on the model alone). Unambiguous entries
+# only - deliberately NO 'sm' (Scarlet Monastery vs Stormwind) and no 'dm'
+# (Deadmines vs Dire Maul).
 ZONE_ABBREVIATIONS = {"stv": "Stranglethorn Vale", "wpl": "Western Plaguelands",
                       "epl": "Eastern Plaguelands", "barrens": "The Barrens",
                       "tn": "Thousand Needles", "hillsbrad": "Hillsbrad Foothills",
-                      "elwynn": "Elwynn Forest", "plaguelands": "Eastern Plaguelands"}
+                      "elwynn": "Elwynn Forest", "plaguelands": "Eastern Plaguelands",
+                      "sw": "Stormwind", "stormwind": "Stormwind",
+                      "if": "Ironforge", "ironforge": "Ironforge",
+                      "darn": "Darnassus", "darnassus": "Darnassus",
+                      "uc": "Undercity", "undercity": "Undercity",
+                      "org": "Orgrimmar", "orgrimmar": "Orgrimmar",
+                      "tb": "Thunder Bluff", "thunder bluff": "Thunder Bluff",
+                      "bb": "Booty Bay", "booty bay": "Booty Bay"}
 
 # Harbormaster policy (operator-approved 2026-11-10): Leo is NOT a teleporter.
 # The GM '.tele name' power is only ever exercised as a BOAT/ZEPPELIN leg
@@ -1517,6 +1531,7 @@ def validate(order, bots):
         print("daemon: farm keeper for %s cancelled by a stand-down order" % bot)
     if low == "farm" or low.startswith("farm "):
         dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
+        dest = ZONE_ABBREVIATIONS.get(dest.lower(), dest)
         if not dest:
             return "SKIP %s: farm needs a destination name" % bot
         coords = _tele_coords(dest)
@@ -1533,6 +1548,7 @@ def validate(order, bots):
         return None
     if low == "walk" or low.startswith("walk ") or low == "travel" or low.startswith("travel "):
         dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
+        dest = ZONE_ABBREVIATIONS.get(dest.lower(), dest)
         if not dest:
             return "SKIP %s: walk/travel needs a destination name" % bot
         coords = _tele_coords(dest)
