@@ -146,6 +146,13 @@ layer to break. Consequences, settled at tracker level:
   on the watch list and in the registry); OUR playerbots fall back to
   db-search's last-flushed position. Extending the reach to playerbots is
   A22 (a mod change, OPEN). No in-core command bus will be built.
+  **SUPERSEDED 2026-11-12 (owner decision, A46):** an in-core module IS
+  now planned — `mod-director-bridge`, spec'd in
+  `docs/incore-bridge-spec.md`. The 2026-11-09 refusal covered a command
+  BUS (free-form passthrough); the approved design is the opposite: a
+  fixed read-only-then-idempotent verb catalog, world-thread-only, roster-
+  scoped, evidence-returning. The spec doc is the single source of truth
+  for its shape, phases, and risk gates.
 - `server_info` and generic `console` passthrough are deleted (nothing in
   the stack consumes them).
 - `kick` is refused with `route_hint: "chat-tunnel"` — `.playerbots bot

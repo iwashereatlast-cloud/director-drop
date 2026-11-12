@@ -397,6 +397,56 @@
         }
       ],
       "notes": "Never invent spell names or spell ids."
+    },
+    {
+      "id": "train",
+      "keywords": [
+        "train",
+        "trainer",
+        "learn skills",
+        "learn new skills",
+        "class skills",
+        "learn spells",
+        "visit trainer",
+        "skills from trainer",
+        "level up skills"
+      ],
+      "when": "the master wants a bot to learn its class/profession skills from trainers",
+      "steps": [
+        "get the unit to a trainer city: order {\"bot\":\"<name>\",\"cmd\":\"travel <destination>\"} (Stormwind, Ironforge, Darnassus etc. - trainers cluster in cities)",
+        "start the rounds: order {\"bot\":\"<name>\",\"cmd\":\"rpg status wander npc\"} - the ENGINE visits nearby NPCs, and on reaching any trainer it can afford it auto-learns every spell and whispers the results"
+      ],
+      "notes": "The engine picks nearby NPCs at random (trainers included), so a training session may take a few rounds - repeat the wander order if the unit idles before reaching a trainer. Learning is automatic, budget-limited by the unit's money. Results whisper through; confirm learning from the bot's whispers, never from the order alone. Narrate as '<bot> is training in <city>'."
+    },
+    {
+      "id": "mail",
+      "keywords": [
+        "mail",
+        "mailbox",
+        "post",
+        "check mail",
+        "collect mail",
+        "send me",
+        "sendmail",
+        "mail me",
+        "parcel"
+      ],
+      "when": "the master wants a bot's mail listed, collected, or an item mailed to Leo",
+      "orders": [
+        {
+          "cmd": "mail ?",
+          "note": "list the mailbox contents; the bot answers 'There is no mailbox nearby' if none is close"
+        },
+        {
+          "cmd": "mail take",
+          "note": "take everything; a filter word can be appended (mail take <word>) to take only matching mails; needs a mailbox nearby"
+        },
+        {
+          "cmd": "sendmail <item>",
+          "note": "mail ONE item (item name) to LEO - the receiver is always the master; money works too (e.g. 'sendmail 1g')"
+        }
+      ],
+      "notes": "Mail commands need a MAILBOX in the bot's scan range. If the bot answers 'no mailbox nearby', travel it to a city first (travel <destination>) and retry. Narrate results from the bot's whispers. Sending is one item per command."
     }
   ]
 }
