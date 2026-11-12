@@ -196,6 +196,18 @@ def main():
         check("recipes sweep: farming loads the farm order structure",
               "RECIPE farm_mat" in r3 and "STEP 3" in r3 and "farm <destination>" in r3
               and "rpg status do gather" not in r3, r3[:300])
+        rt = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "have marle learn new skills from her class trainer"}],
+            director.census(online_only=False))
+        check("recipes sweep: training loads the wander-npc structure",
+              "RECIPE train" in rt and "rpg status wander npc" in rt
+              and "travel <destination>" in rt, rt[:300])
+        rm = director.run_queries(
+            [{"query": "recipes", "bot": "Gau", "text": "check marle's mail and send me the herbs"}],
+            director.census(online_only=False))
+        check("recipes sweep: mail loads the mailbox structure",
+              "RECIPE mail" in rm and "mail ?" in rm and "mail take" in rm
+              and "sendmail" in rm, rm[:300])
         r4 = director.run_queries(
             [{"query": "recipes", "bot": "Gau", "text": "who is online"}],
             director.census(online_only=False))
@@ -924,7 +936,8 @@ def main():
                 "<the zone's table destination>": "Booty Bay",
                 "<arrival harbor>": "Ratchet",
                 "<exact spell name>": "Heal",
-                "<id>": "153", "<name>": "Ayla", "<mat>": "Peacebloom"}
+                "<id>": "153", "<name>": "Ayla", "<mat>": "Peacebloom",
+                "<item>": "Peacebloom", "<word>": "herbs"}
         rec = json.load(open("services/db-search/recipes.json"))["recipes"]
         bad2 = []
         for r in rec:
