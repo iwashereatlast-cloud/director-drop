@@ -29,6 +29,7 @@ gates deliberate rather than accidental.
 **Declined alternative (recorded so it is not re-litigated):**
 `mod-llm-playerbots` (bigr00 fork) — a fork loses upstream currency, has 0
 stars, and does not fix the engine gates above. OWN module dir, NOT a fork.
+Both repos were reviewed as prior art on 2026-11-12 — see §8.
 
 ## 1. Shape (owner-settled, non-negotiable)
 
@@ -50,7 +51,12 @@ stars, and does not fix the engine gates above. OWN module dir, NOT a fork.
 - World-thread-only execution: the socket reader thread NEVER touches a
   World/Map/Player object. It validates, enqueues a task, and the task runs
   on the world thread (AzerothCore's task queue). Replies are written back
-  from the task's completion, not from the reader.
+  from the task's completion, not from the reader. (Working precedent:
+  mod-llm-playerbots' `LlmToolbox.h` states this exact contract for its
+  tool calls — provider thread returns calls, world thread executes them
+  against a live `Player*`, everything in the toolbox file is world-thread
+  only, and an unknown tool/bad argument answers a JSON error field
+  instead of throwing.)
 - Full `isUseful`/`isPossible` chains: every verb reuses the engine's own
   gate logic (or reimplements the same checks) — the module may ADD gates,
   never remove one. A verb that the engine would refuse answers with the
@@ -147,6 +153,66 @@ directly.
    confirm, or a run-directory path under the server's own tree.
 3. Phase-1 `bot_state` scope: strategies + rpg status only, or also
    bag/talent digest (db-search already answers the DB-side of those)?
+   Prior art (§8) argues for finer verbs over one fat snapshot — e.g.
+   `bot_state` (strategies/rpg) kept thin, with `bot_bags`/`bot_talents`
+   added only when a recipe needs them.
 4. Does phase 2 need a worldserver.conf kill-switch
    (`DirectorBridge.Enable`, default off per phase) so a bad verb can be
-   disabled without a rebuild? (Recommended: yes.)
+   disabled without a rebuild? (Recommended: yes — and mod-dungeon-clear's
+   `DcModuleEnable` is the proven pattern: read once, latched on the first
+   world tick via an atomic compare-exchange, first writer wins so a
+   `.reload config` can never move the answer under a bot that already
+   read it.)
+
+## 8. Prior art reviewed (2026-11-12)
+
+Both repos were cloned and read at the owner's suggestion. Neither is used
+as code; they are evidence that the spec's shape is proven in the wild.
+
+### mod-dungeon-clear (jrad7) — the structural template
+
+A drop-in AzerothCore module that drives mod-playerbots tank bots through
+dungeons. Its README states the claim our §1 depends on: it "runs against a
+stock, unmodified mod-playerbots checkout with no playerbots source edits" —
+it SUBCLASSES playerbots' strategy/action/trigger/value classes and links
+against them. That is the exact mechanism our verbs will use to keep the
+engine's `isUseful`/`isPossible` chains real rather than reimplemented.
+
+- **Loader hook:** `Addmod_dungeon_clearScripts()` in
+  `src/mod_dungeon_clear_loader.cpp` — the name AC's generated loader
+  derives from the directory name. One function, six `AddSC_*` calls.
+  Confirms our "one loader hook".
+- **Enable gate:** `DcModuleEnable` — conf bool read once, latched on the
+  first world tick (`std::atomic`, compare-exchange, first writer wins);
+  a `.reload config` cannot move the answer under a bot. Adopted for §7 Q4.
+- **Test discipline:** ~100 gtest files in `t/` over PURE decision kernels
+  ("Decide(Observation) -> Verdict, gtested"), engine-free planner halves,
+  route probes, plus a live `.dc test` harness writing JSONL run records.
+  This is the same philosophy as our harnesses, one level deeper: our phase
+  proofs should also split the headless-testable kernel (verb validation,
+  roster gate, idempotency rules) from the live battery (tick-stall,
+  evidence).
+- **Build landmine documented in its `mod-dungeon-clear.cmake`:** MSVC's
+  `M_PI`/`_USE_MATH_DEFINES` ordering breaks CORE headers when a module TU
+  includes `<cmath>` before the first core header — evidence for our §6.9
+  version-skew row: pin the include surface and expect build-system edges,
+  not just API drift.
+
+### mod-llm-playerbots (bigr00 fork) — threading + catalog precedent, wrong shape for us
+
+Declined as a fork (upstream currency, 0 stars, no engine-gate fixes), but
+its LLM layer is the best written-down statement of our §1 threading rule
+(`LlmToolbox.h`): the model provider runs on a worker thread and never
+touches game state; the provider RETURNS tool calls; the world thread
+executes them against a live `Player*`; unknown tool or bad argument answers
+a JSON error field — never throws. Its fixed read-only tool catalog
+(get_character_sheet, get_equipped_items, get_bag_items, get_quest_log,
+get_nearby_players, get_group_members, get_chat_history, get_server_status)
+is phase-1 verb-shape precedent, and suggests splitting our `bot_state`
+into finer verbs rather than one fat snapshot (folded into §7 Q3).
+
+Design contrast, recorded: the fork embeds the LLM client INSIDE the
+worldserver process (provider on an in-process worker thread). Our design
+keeps the model OUT of the process — director.py owns Ollama, the module is
+a thin verb endpoint — so a model/provider hang can never touch the world
+tick, and the module stays buildable without any HTTP client code.
