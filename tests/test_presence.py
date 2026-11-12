@@ -110,5 +110,33 @@ check("service order: bad service refused",
       "SKIP" in director._hb_exec_service({"service": "worldserver", "cmd": "stop"}),
       True)
 
+# loner policy (owner 2026-11-12: "Leo keeps forgetting to kick bots out of
+# his party"): every presence tick enforces LEO SOLOS through the validated
+# group-remove rail - never model discretion.
+print("== loner policy: Leo solos ==")
+kicks = []
+real_validate, real_census = director.validate, director.census
+real_members, real_send = director.group_members, director.send_order
+director.AUDIT = os.devnull
+
+def fake_validate(o, bots):
+    if o["bot"] == "Leo":
+        return "SKIP Leo: never removed from his own group"
+    return None
+
+director.validate = fake_validate
+director.census = lambda online_only=True: {"Ayla": None}
+director.send_order = lambda who, cmd: kicks.append((who, cmd)) or {"line": "/w %s leave" % who}
+director.group_members = lambda name, _m=["Leo", "Ayla"]: list(_m)
+out = director._enforce_loner()
+check("loner: members get the validated group remove (rewritten to leave)",
+      (out, kicks), (["/w Ayla leave"], [("Ayla", "group remove")]))
+director.group_members = lambda name: []
+check("loner: empty group -> no kicks", director._enforce_loner(), [])
+director.group_members = lambda name: ["Leo"]
+check("loner: Leo himself is never kicked", director._enforce_loner(), [])
+director.validate, director.census = real_validate, real_census
+director.group_members, director.send_order = real_members, real_send
+
 print("presence heartbeat tests: %s" % ("ALL PASS" if not FAILS else "FAILURES: " + ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

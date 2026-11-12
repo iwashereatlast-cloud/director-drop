@@ -1972,6 +1972,7 @@ def _hb_condition(facts, state):
     return "", False
 
 HB_MIN_INTERVAL = 300.0   # a standing alarm re-notifies at most every 5 min
+LONER = int(os.environ.get("DIRECTOR_LONER", "1"))
 HB_CONV = []              # heartbeat conversation (system prompt added lazily)
 
 def _hb_system(cfg):
@@ -2042,6 +2043,38 @@ def _hb_turn(facts, cond, cfg):
         sent = execute(bot_orders, census(), 1.0, dry=False)
         print("presence heartbeat: executed %d bot order(s)" % (len(sent) if sent else 0))
 
+def _enforce_loner():
+    """Standing policy (owner 2026-11-12: 'Leo keeps forgetting to kick bots out
+    of his party'): LEO SOLOS - no bot may linger in his group. Every presence
+    tick, each member gets the validated 'group remove' order; the rail does a
+    LIVE DB membership check, rewrites bot members to the 'leave' whisper, and
+    refuses Leo himself. The LLM is still told the member list at heartbeat
+    time - but the policy never depends on model discretion."""
+    try:
+        members = group_members(LEO)
+    except Exception:
+        return []
+    kicked = []
+    for name in members:
+        o = {"bot": name, "cmd": "group remove"}
+        err = validate(o, census(online_only=False))
+        if err:
+            print("presence: loner policy %s" % err)
+            continue
+        try:
+            res = send_order(str(o["bot"]), str(o["cmd"]))
+            kicked.append(res["line"])
+            with open(AUDIT, "a") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "HB LONER %s\n"
+                        % res["line"])
+        except Exception as e:
+            print("presence: loner kick failed for %s: %s" % (name, e))
+    if kicked:
+        print("presence: loner policy - %d member(s) out of Leo's group: %s"
+              % (len(kicked), "; ".join(kicked)))
+    return kicked
+
+
 def presence_loop(interval=30.0):
     cfg = _wd_conf()
     state = {"prev_sig": None, "off_streak": 0, "last_err_seq": BOTFB_SEQ[0]}
@@ -2050,6 +2083,8 @@ def presence_loop(interval=30.0):
     last_hb = 0.0
     while True:
         try:
+            if LONER:
+                _enforce_loner()
             leo, group_on, wanted, svc = _presence_facts(cfg)
             new_errors = max(0, BOTFB_SEQ[0] - state["last_err_seq"])
             if new_errors:
