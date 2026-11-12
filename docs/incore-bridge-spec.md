@@ -16,9 +16,11 @@ engine decides what our orders mean. Three concrete walls, all pinned:
   `taxi ?`/`taxi <n>` are silent no-ops for Leo-mastered bots (A35).
 - `'go travel'` is dead upstream (orphaned loader); the rpg engine's only
   chosen-destination-free flight is RANDOM via `rpg status travel flight`.
-- `'trainer learn'` needs the MASTER's selected unit, which a headless Leo
-  cannot reliably provide; `RpgTrainAction` has no master gate but
-  auto-learns only affordable spells at whatever the bot happens to face.
+- `'trainer learn'` needs the MASTER's selected unit (A45, PR #132:
+  `TrainerAction::GetTarget` returns the master's selected unit for
+  mastered bots), which a headless Leo cannot reliably provide;
+  `RpgTrainAction` has no master gate but auto-learns only affordable
+  spells at whatever the bot happens to face (A45).
 
 The module does NOT replace the whisper pipeline. It adds a second, typed,
 evidence-returning path for the functions the engine gates off — with the
