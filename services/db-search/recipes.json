@@ -184,7 +184,14 @@
       "abbreviations": {
         "stv": "Stranglethorn Vale",
         "wpl": "Western Plaguelands",
-        "epl": "Eastern Plaguelands"
+        "epl": "Eastern Plaguelands",
+        "sw": "Stormwind",
+        "if": "Ironforge",
+        "darn": "Darnassus",
+        "uc": "Undercity",
+        "org": "Orgrimmar",
+        "tb": "Thunder Bluff",
+        "bb": "Booty Bay"
       },
       "notes": "Narrate as '<bot> is travelling to <destination>' and say arrival only when the system whispers it. Confirm movement only from the system's whispers, never from the order alone. If the master names a town directly, use it as-is. Never narrate HOW the system moves the bot."
     },

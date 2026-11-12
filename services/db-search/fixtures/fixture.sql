@@ -202,7 +202,11 @@ INSERT INTO acore_world.game_tele VALUES
   (8, 'GromgolBaseCamp', 0, -12360.0, 220.0, 12.0, 0),
   (9, 'Undercity', 0, 1595.0, 240.0, -50.0, 0),
   (10, 'Orgrimmar', 1, 1442.0, -4470.0, 12.0, 0),
-  (11, 'TheCrossroads', 1, -452.84, -2650.76, 92.0, 0);
+  (11, 'TheCrossroads', 1, -452.84, -2650.76, 92.0, 0),
+  (12, 'Stormwind', 0, -8832.61, 626.35, 93.08, 0),
+  (13, 'Ironforge', 0, -4982.66, -1138.26, 305.5, 0),
+  (14, 'Darnassus', 1, 9948.88, 2280.42, 1344.4, 0),
+  (15, 'ThunderBluff', 1, -1213.5, 87.4, 157.8, 0);
 
 -- flight masters (get_flightmasters): UNIT_NPC_FLAG_FLIGHTMASTER = 8192.
 -- Two on the fixture's Eastern Kingdoms: one near Goldshire (departure),
