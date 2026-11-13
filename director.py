@@ -1281,17 +1281,18 @@ class _StampedStdout:
         self._out.flush()
 
 
-def _extract_json(text):
+def _extract_json(text, fences=True):
     """First JSON object in text: a fenced ```json block wins (the model has
     live-emitteed triple-DOUBLE-QUOTE fences too - 2026-11-11 'gather only in
     stv' - so both fence spellings count); otherwise the first balanced {...}
     (string-aware, so braces inside strings don't count).
     Returns the raw candidate string, or None."""
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
-    if not m:
-        m = re.search(r'"""(?:json)?\s*(\{.*?\})\s*"""', text, re.S | re.I)
-    if m:
-        return m.group(1)
+    if fences:
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
+        if not m:
+            m = re.search(r'"""(?:json)?\s*(\{.*?\})\s*"""', text, re.S | re.I)
+        if m:
+            return m.group(1)
     start = text.find("{")
     if start < 0:
         return None
@@ -1316,20 +1317,63 @@ def _extract_json(text):
     return None
 
 
+TICK, DQ, SQ = "`", chr(34), "'"
+
+
+def _loads(cand):
+    """Lenient json.loads for model output: real control characters inside
+    string values (newlines the model did not escape) fail strict parsing -
+    strict=False accepts them (live 2026-11-12: a leaked fenced fragment made
+    the outer contract unparseable in strict mode and the whole turn fell back
+    to plain text)."""
+    try:
+        return json.loads(cand)
+    except json.JSONDecodeError:
+        return json.loads(cand, strict=False)
+
+
+def _reply_salvage(text):
+    """When the fallback text is a contract-shaped wrapper (the model leaked a
+    quoted fragment inside its reply value, making the contract unparseable),
+    salvage the prose from the reply value instead of whispering the wrapper."""
+    m = re.search(DQ + "reply" + DQ + r"\s*:\s*" + DQ + r"([^" + DQ + r"]*)", text)
+    return m.group(1) if m else text
+
+
+def _reply_hygiene(reply):
+    """Strip contract fragments the model leaked into its reply prose (live
+    2026-11-12: 'Ayla and Mog are moving to Ashenvale.' followed by a
+    mis-fenced {"query": ...} block - the master saw the raw JSON flattened
+    into the whisper). Keep the prose, drop the fragment."""
+    if not isinstance(reply, str):
+        return "I got tangled mid-thought - say that again and I'll retry."
+    m = re.search(TICK + "{2,}|" + DQ + "{3}|" + SQ + "{2,}(json)?"
+                  + "|" + re.escape("{") + r"\s*" + DQ
+                  + "(query|reply|orders)", reply)
+    if m:
+        print("parse_orders: reply carried contract JSON - stripping it "
+              "(prose kept)")
+        reply = reply[:m.start()].rstrip(" ,;\t\n")
+        if not reply:
+            reply = "I got tangled mid-thought - say that again and I'll retry."
+    return reply
+
+
 def parse_orders(text):
     r"""THE LLM-output boundary: raw model text -> a shape-validated contract
     {reply, orders, queries}. Every path a model can be wrong lands here:
     fences in either spelling, empty content, capped/truncated contracts,
-    wrong-typed fields, malformed order and query entries. Nothing the model
-    produced reaches validate(), run_queries() or the tunnel except through
-    this shape check. (The old greedy r"\{.*\}" match silently dropped ALL
-    orders when the model fenced the JSON and added prose with braces
-    afterwards; balanced extraction fixes that.)"""
+    wrong-typed fields, malformed order and query entries, and leaked
+    fragments of the contract itself inside the reply prose. Nothing the
+    model produced reaches validate(), run_queries() or the tunnel except
+    through this shape check. (The old greedy r"\{.*\}" match silently
+    dropped ALL orders when the model fenced the JSON and added prose with
+    braces afterwards; balanced extraction fixes that.)"""
     cand = _extract_json(text)
     if not cand:
         if re.search(r"```|\"\"\"|^\s*\{", text):
             # a fence/brace with NO balanced object inside = the generation
-            # was capped mid-contract (live 2026-11-11: '"""json\n{"query":
+            # was capped mid-contract (live 2026-11-11: '"\"\"json\n{"query":
             # "recipes", "text": "ha"' - done_reason=length cut the query
             # string in half). Whispering the truncation would only produce
             # a tunnel refusal at the reply stage.
@@ -1338,22 +1382,47 @@ def parse_orders(text):
                   "note instead" % len(text))
             return {"reply": "I got tangled mid-thought - say that again and "
                             "I'll retry.", "orders": [], "queries": []}
-        return {"reply": text, "orders": []}
+        return {"reply": _reply_hygiene(text), "orders": [], "queries": []}
     try:
-        obj = json.loads(cand)
+        obj = _loads(cand)
     except json.JSONDecodeError:
         print("parse_orders: extracted block is not valid JSON (%d chars); "
               "treating the whole reply as plain text, orders=[]" % len(cand))
-        return {"reply": text, "orders": []}
+        return {"reply": _reply_hygiene(_reply_salvage(text)), "orders": [],
+                "queries": []}
     if not isinstance(obj, dict):
         print("parse_orders: contract is a %s, not an object - "
               "treating the reply as plain text" % type(obj).__name__)
-        return {"reply": text, "orders": [], "queries": []}
+        return {"reply": _reply_hygiene(text), "orders": [], "queries": []}
+    if set(obj) - {"reply", "orders", "queries"}:
+        # live 2026-11-12: the reply carried a fenced {"query": ...} block and
+        # the fence regex stole IT as the contract, dropping the real one. An
+        # object with keys outside the contract vocabulary is a leaked
+        # fragment. First try the balanced scan (string-aware, so the fragment
+        # inside the reply value does not break the outer object); if that
+        # recovers a real contract use it, else fall back to plain text.
+        cand2 = _extract_json(text, fences=False)
+        try:
+            obj2 = _loads(cand2) if cand2 else None
+        except json.JSONDecodeError:
+            obj2 = None
+        if isinstance(obj2, dict) and not (set(obj2) - {"reply", "orders",
+                                                       "queries"}):
+            print("parse_orders: the fence regex stole a leaked fragment "
+                  "(keys %s) - recovered the outer contract via the balanced "
+                  "scan" % sorted(obj))
+            obj = obj2
+        else:
+            print("parse_orders: extracted object is a leaked fragment "
+                  "(keys %s), not the contract - treating the reply as plain "
+                  "text" % sorted(obj))
+            return {"reply": _reply_hygiene(_reply_salvage(text)), "orders": [],
+                    "queries": []}
     reply = obj.get("reply", "")
     if not isinstance(reply, str):
         print("parse_orders: reply is a %s, not text - answering with a "
               "retry note instead" % type(reply).__name__)
-        reply = "I got tangled mid-thought - say that again and I'll retry."
+    reply = _reply_hygiene(reply)
     orders = obj.get("orders", [])
     if not isinstance(orders, list):
         print("parse_orders: orders is a %s, not a list - dropping them all"
