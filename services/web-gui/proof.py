@@ -249,6 +249,17 @@ def main():
               w1.get("ok") is True and took >= 2.5 and took < 10
               and not (w1.get("result") or {}).get("events"),
               "took=%.1fs %s" % (took, json.dumps(w1)[:120]))
+        # regression (live bug 2026-11-13): an idle wait LONGER than the
+        # GUI's default 15s backend timeout used to read as 'timed out';
+        # the proxy must outlive the poll it asked for
+        t0 = time.time()
+        st, w2, _ = http("GET", base + "/api/events/wait?after_id=%d&timeout=16"
+                         % last)
+        took2 = time.time() - t0
+        check("idle 16s wait outlives the proxy timeout (no false 'timed out')",
+              w2.get("ok") is True and took2 >= 15
+              and not (w2.get("result") or {}).get("events"),
+              "took=%.1fs %s" % (took2, json.dumps(w2)[:120]))
 
         # --- 4. catalogs + grammar ---------------------------------------
         st, c, _ = http("GET", base + "/api/catalogs")
