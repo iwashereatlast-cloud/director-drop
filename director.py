@@ -1127,6 +1127,36 @@ def _tele_coords(name):
     return None
 
 
+def _resolve_dest(dest):
+    """Master-speak -> a legal game_tele name, or None (live 2026-11-12:
+    'Have Crono level in Duskwoods' SKIPped - the model passed the colloquial
+    plural through and the exact lookup found nothing). Chain, validation-side
+    so a raw master phrasing lands even when the model does not translate:
+    acronyms -> exact -> zone-table (zone name -> its hub town) -> singularize
+    the trailing s -> fuzzy candidates (shortest containing match)."""
+    d = ZONE_ABBREVIATIONS.get(dest.lower().strip(), dest.strip())
+    if _tele_coords(d):
+        return d
+    z = d.lower().replace(" ", "")
+    for zone, (hub, bracket) in ZONE_DESTINATIONS.items():
+        if zone.lower().replace(" ", "") == z and _tele_coords(hub):
+            return hub
+    if d.lower().endswith("s") and _tele_coords(d[:-1]):
+        return d[:-1]
+    try:
+        rows = dbsearch("get_game_tele", name=d)["rows"]
+    except Exception:
+        return None
+    key = d.lower().replace(" ", "")
+    best = None
+    for r in rows:
+        n = str(r[0])
+        if key in n.lower().replace(" ", ""):
+            if best is None or len(n) < len(best):
+                best = n
+    return best
+
+
 def _bot_faction(bot):
     """Faction of a toon from its race (db-search get_character), or None."""
     try:
@@ -1605,10 +1635,12 @@ def validate(order, bots):
         dest = ZONE_ABBREVIATIONS.get(dest.lower(), dest)
         if not dest:
             return "SKIP %s: farm needs a destination name" % bot
-        coords = _tele_coords(dest)
+        canon = _resolve_dest(dest)
+        coords = _tele_coords(canon) if canon else None
         if coords is None:
             return ("SKIP %s: %r is not a known location (db-search game_tele)"
                     % (bot, dest))
+        dest = canon
         if bot not in bots:
             return "SKIP %s: not online (census)" % bot
         err = _lease_busy(bot)
@@ -1622,10 +1654,12 @@ def validate(order, bots):
         dest = ZONE_ABBREVIATIONS.get(dest.lower(), dest)
         if not dest:
             return "SKIP %s: walk/travel needs a destination name" % bot
-        coords = _tele_coords(dest)
+        canon = _resolve_dest(dest)
+        coords = _tele_coords(canon) if canon else None
         if coords is None:
             return ("SKIP %s: %r is not a known location (db-search game_tele)"
                     % (bot, dest))
+        dest = canon
         if bot not in bots:
             return "SKIP %s: not online (census)" % bot
         err = _lease_busy(bot)

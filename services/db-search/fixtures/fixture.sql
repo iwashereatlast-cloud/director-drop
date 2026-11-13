@@ -206,7 +206,9 @@ INSERT INTO acore_world.game_tele VALUES
   (12, 'Stormwind', 0, -8832.61, 626.35, 93.08, 0),
   (13, 'Ironforge', 0, -4982.66, -1138.26, 305.5, 0),
   (14, 'Darnassus', 1, 9948.88, 2280.42, 1344.4, 0),
-  (15, 'ThunderBluff', 1, -1213.5, 87.4, 157.8, 0);
+  (15, 'ThunderBluff', 1, -1213.5, 87.4, 157.8, 0),
+  (16, 'Duskwood', 0, -10531.0, -1176.0, 28.0, 0),
+  (17, 'Darkshire', 0, -10531.0, -1296.0, 30.0, 0);
 
 -- flight masters (get_flightmasters): UNIT_NPC_FLAG_FLIGHTMASTER = 8192.
 -- Two on the fixture's Eastern Kingdoms: one near Goldshire (departure),
