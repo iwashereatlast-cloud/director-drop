@@ -239,6 +239,23 @@ def main():
         err = director.validate({"bot": "Ayla", "cmd": "travel Nowhereville"}, bots_c)
         check("acronyms: unknown names still refuse (no false expansion)",
               "not a known location" in str(err), err)
+        o_d = {"bot": "Ayla", "cmd": "travel Duskwoods"}
+        err = director.validate(o_d, bots_c)
+        check("resolution: colloquial 'Duskwoods' resolves (live 2026-11-12: "
+              "'Have Crono level in Duskwoods' SKIPped on the plural)",
+              err is None and o_d["_walk"][1] in ("Duskwood", "Darkshire"), (err, o_d))
+        o_z = {"bot": "Ayla", "cmd": "travel dusk wood"}
+        err = director.validate(o_z, bots_c)
+        check("resolution: spaced zone speak resolves via the zone table",
+              err is None and o_z["_walk"][1] in ("Duskwood", "Darkshire"), (err, o_z))
+        o_f = {"bot": "Ayla", "cmd": "travel Booty"}
+        err = director.validate(o_f, bots_c)
+        check("resolution: partial names resolve via fuzzy candidates",
+              err is None and o_f["_walk"][1] == "BootyBay", (err, o_f))
+        o_fz = {"bot": "Ayla", "cmd": "farm Duskwoods"}
+        err = director.validate(o_fz, bots_c)
+        check("resolution: the chain covers farm orders too",
+              err is None and o_fz["_walk"][1] in ("Duskwood", "Darkshire"), (err, o_fz))
         check("prompt: fewshot teaches gather -> skills query -> farm order",
               any("gather herbs" in m["content"] for m in director.FEWSHOT)
               and any("farm Booty Bay" in m["content"] for m in director.FEWSHOT),
