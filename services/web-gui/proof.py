@@ -212,6 +212,9 @@ def main():
         check("page serves with the three panels",
               all(x in page for x in
                   ('id="panel-bots"', 'id="panel-feed"', 'id="panel-catalog"')))
+        check("page has the mission drawer markup + column (click target)",
+              'id="mission-drawer"' in page and "<th>mission</th>" in page
+              and "Click a toon's name" in page)
 
         # --- 2. overview: census + leo row + leo group + session ---------
         st, o, _ = http("GET", base + "/api/overview")
