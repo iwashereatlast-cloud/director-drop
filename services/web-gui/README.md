@@ -12,6 +12,7 @@ Panels (roadmap row 4):
 | **Leo's chat — live** | chat-tunnel `get_events_since` + `wait_for_events` | exactly what Leo sees in chat — whisper, guild and inspect-system events with their raw display lines, long-polled (one request per batch, no hot-polling), newest at the bottom |
 | **Bots** | db-search `get_online_census` + `get_character` + `get_group_membership`; chat-tunnel `inspect` | census table with the staleness caveat, **Leo's own row on top**, a group/raid badge per toon (Leo's group auto-filled; any toon on demand via the **group** button), and a **live** button per row that asks chat-tunnel `inspect(bot, "position")` for the position right now (offline truth stays db-search) |
 | **Query catalog browser** | db-search `catalog` + chat-tunnel `describe` | the db-search catalog with read-only execution (full envelope incl. `queried_at` + staleness `caveat`), plus the chat-tunnel grammar as a display-only tab |
+| **Mission drawer** | director.py `submit_orders` + the shared lease registry | click a toon's name: current mission, destination search (db-search `get_game_tele`) or mat search (`get_mat_spawns` → best teleport spots), then **travel there** / **farm there** / **level (grind cycle)** / **stand down** — every order goes through the mission engine's own validate/lease rails, two-step confirm |
 
 Header: live status chips for chat-tunnel, db-search and **Leo's session**
 (`systemctl --user is-active leo.service`) — with the Leo on/off button.
@@ -26,7 +27,17 @@ Header: live status chips for chat-tunnel, db-search and **Leo's session**
 - db-search is read-only upstream (static SELECTs, SELECT-only identity,
   subject scope gate); the GUI just passes tool + params through and
   renders the envelope.
-- **The one deliberate write action: the Leo button.**
+- **Write actions (deliberate, minimal, railed):**
+  - the **Leo button**: `POST /api/leo {"action": "start"|"stop"}` runs
+    `systemctl --user start|stop leo.service` (`WEBGUI_LEO_UNIT`).
+  - the **mission drawer**: `POST /api/mission` submits ONE templated
+    order (`travel/farm/walk <dest>`, `level` = the grind cycle,
+    `standdown`) through director.py's `submit_orders` seam — the SAME
+    expand/validate/lease/mission rails the LLM daemon uses. The GUI
+    never builds a free-form cmd, and validate() re-resolves every
+    destination (game_tele), re-checks census/online, and takes the
+    shared lease. On a LAN bind both sit behind the login screen.
+- The old single write action line:
   `POST /api/leo {"action": "start"|"stop"}` runs
   `systemctl --user start|stop leo.service` (`WEBGUI_LEO_UNIT`). On a LAN
   bind it sits behind the login screen; on loopback it is local-only by
@@ -55,6 +66,8 @@ HTTP 200, never a 5xx — when a sibling is down):
 | `/api/query` | POST | `{"tool", "params"}` | the db-search envelope (or its refusal) |
 | `/api/leo` | GET | — | Leo session status (`systemctl --user is-active`) |
 | `/api/leo` | POST | `{"action": "start"\|"stop"}` | start/stop the Leo unit (the write action) |
+| `/api/missions` | GET | — | the shared lease registry: what every bot is doing (kind, name, pid) |
+| `/api/mission` | POST | `{"bot", "op", "dest"?}` | submit one mission order through director's rails (op: travel/farm/walk/level/standdown) |
 
 ## LAN bind & login
 
@@ -95,6 +108,17 @@ binds), `WEBGUI_TUNNEL` (http://127.0.0.1:8765), `WEBGUI_DBSEARCH_SOCK`
 starts/stops), `WEBGUI_CENSUS` (i_was_here — account prefix for the bot
 table), `WEBGUI_TIMEOUT` (15 s per backend call).
 
+The mission drawer imports `director.py` (the mission owner) in-process
+and uses the SAME env defaults as the daemon (`DIRECTOR_DBSEARCH_SOCK`,
+`DIRECTOR_TUNNEL_URL`, `DIRECTOR_LEASES_FILE` — the shared lease
+registry at `~/.director-leases.json`). Missions launched from the GUI
+run as threads in the GUI process and send through the chat-tunnel
+service; the shared lease file is what keeps the daemon and the GUI from
+double-missioning a bot. If the GUI restarts mid-mission, the keeper
+thread dies with it, the lease's dead pid is pruned on the next read, and
+the bot's gather status lapses on its own (≤15 min) — nothing is
+orphaned.
+
 ## Run
 
 ```bash
@@ -110,7 +134,7 @@ python3 services/web-gui/proof.py
 
 Boots the REAL sibling services in fixture mode (sqlite fixture, temp
 log + FIFO with a name allowlist so no MySQL is touched) and drives the
-real GUI over HTTP. **50 checks**: page + panels render; overview merges
+real GUI over HTTP. **63 checks**: page + panels render; overview merges
 census (with caveat), tunnel health, Leo's character row, Leo's group
 (the group/raid badge source) and the Leo session status; the live chat
 seam — cursor reads ascending + gapless with a monotonic `last_id`, a
@@ -122,7 +146,7 @@ propagate; a live `inspect` issues a correlated command whose
 live queries refused by the GUI (`gui_read_only`); the Leo button —
 status graceful without systemd, unknown actions refused, start returns
 a structured answer; with both siblings down every endpoint still
-answers 200 with `unreachable` states; and the bind knob + login flow
+answers 200 with `unreachable` states; the mission drawer end-to-end — unknown ops refused, unknown destinations refused by validate with the SKIP reason back, the level grind cycle sent, a travel mission that takes the lease, confirms arrival from a live inspect reply AT the game_tele point and releases (and a dead-pid holder's lease is reclaimed, not blocking), a farm keeper that arms `rpg status do gather` and stands down releasing the lease; and the bind knob + login flow
 (wildcard refused, 127.0.0.2 accepted, `lan` resolves, no-password LAN
 bind refused, startup warning proved without ever listening on the LAN
 interface, full login lifecycle on loopback). Exit 0 = all PASS.

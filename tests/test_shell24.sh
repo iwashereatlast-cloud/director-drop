@@ -7,7 +7,7 @@
 #  - doctor runs in a dead environment (no mysql/systemctl/FIFO) without
 #    crashing: sections S1-S4 + summary print, exit code 1 (FAILs present)
 #  - --bundle writes the full output to the file
-#  - docs/assumptions.md: 18 rows, evidence rule, A13 confirmed
+#  - docs/assumptions.md: 50 rows, evidence rule, A13 confirmed
 #  - shellcheck on the new lib: no warnings except pre-existing SC2148 class
 set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -29,7 +29,7 @@ check "header states no-mutating contract" "$(grep -c 'NEVER sends a mutating ga
 
 # --- docs ---
 check "assumptions.md exists" "$([ -s "$REPO/docs/assumptions.md" ] && echo ok)" "ok"
-check "assumptions.md has 18 rows" "$(grep -c '^| A' "$REPO/docs/assumptions.md")" "18"
+check "assumptions.md row count is current" "$(grep -c '^| A' "$REPO/docs/assumptions.md")" "50"
 check "assumptions.md evidence rule" "$(grep -c 'only. ticket for changing behavior' "$REPO/docs/assumptions.md")" "1"
 check "assumptions.md A13 pre-confirmed" "$(grep -c 'i_was_cmd gmlevel=3 RealmID=-1' "$REPO/docs/assumptions.md")" "1"
 check "outline.md exists" "$([ -s "$REPO/docs/outline.md" ] && echo ok)" "ok"
