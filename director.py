@@ -821,42 +821,100 @@ PATH_DIRECT = float(os.environ.get("DIRECTOR_PATH_DIRECT", "290"))
 #   straight-line hop point inside a city lands across canals and walks the
 #   bot the wrong way (live 2026-11-10: Stormwind bank -> FM sent Golbez to
 #   the flower shop side instead of up the ramp)
-# ONE lease registry: bot -> (kind, name), kind in ("walk", "travel", "farm").
-# One mission per bot, ever - the missions and validate() all go through
-# this (the old _WALKING/_FARMING pair was the same concept split in two).
-_LEASES = {}
+# ONE lease registry: bot -> {kind, name, pid, ts}, kind in
+# ("walk", "travel", "farm"). One mission per bot, ever - the missions and
+# validate() all go through this (the old _WALKING/_FARMING pair was the
+# same concept split in two). FILE-BACKED (flock + JSON) so every process
+# that launches missions shares it - the daemon AND the web-gui's
+# submit_orders seam (roadmap web-gui/2 contract, 2026-11-13). A holder is
+# only live while its pid lives: a crashed/restarted owner leaves a stale
+# entry that reads prune instead of blocking the bot forever (the old
+# in-memory dict could not even see a restart - a daemon restart silently
+# forgot every lease, which was a double-mission hole).
+LEASES_FILE = os.environ.get("DIRECTOR_LEASES_FILE",
+                             os.path.expanduser("~/.director-leases.json"))
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists but is not ours (same user anyway)
+    except OSError:
+        return False
+    return True
+
+
+def _leases_update(fn):
+    """Run fn(registry) under the registry's flock and persist the result.
+    Dead-pid entries are pruned on every entry. fn mutates the dict in
+    place and may return a value (the read primitives use this)."""
+    lock = LEASES_FILE + ".lock"
+    fd = os.open(lock, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with open(LEASES_FILE) as f:
+                reg = json.load(f)
+        except (OSError, ValueError):
+            reg = {}
+        reg = {b: e for b, e in reg.items()
+               if _pid_alive(int((e or {}).get("pid", 0)))}
+        out = fn(reg)
+        tmp = LEASES_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(reg, f)
+        os.replace(tmp, LEASES_FILE)
+        return out
+    finally:
+        os.close(fd)
+
+
+def leases():
+    """The live registry (dead holders pruned) - the web-gui's mission
+    status read."""
+    return _leases_update(lambda reg: dict(reg))
+
 
 # Mission order -> expected evidence (the doctrine: the bot's reply and
 # position are the only truth, never the order alone). Every mission leg
 # asserts its evidence before reporting success; bare strategy whispers
 # (nc/rpg status) remain fire-and-forget and are documented as such.
 def _lease_kind(bot):
-    return _LEASES[bot][0] if bot in _LEASES else None
+    e = _leases_update(lambda reg: reg.get(bot))
+    return e["kind"] if e else None
 
 
 _LEASE_VERBS = {"farm": "farming in", "travel": "travelling to",
                 "walk": "marching to"}
 
-
 def _lease_busy(bot):
     """The refusal message naming what the bot is actually doing, or None."""
-    if bot in _LEASES:
-        k, n = _LEASES[bot]
-        return "%s is already %s %s" % (bot, _LEASE_VERBS[k], n)
-    return None
+    e = _leases_update(lambda reg: reg.get(bot))
+    if not e:
+        return None
+    return "%s is already %s %s" % (bot, _LEASE_VERBS[e["kind"]], e["name"])
 
 
 def _take_lease(bot, kind, name):
     """One mission per bot: refuse if any lease is held."""
-    err = _lease_busy(bot)
-    if err:
-        return err
-    _LEASES[bot] = (kind, name)
+    def take(reg):
+        if bot in reg:
+            return reg[bot]              # lost the race: report the winner
+        reg[bot] = {"kind": kind, "name": name, "pid": os.getpid(),
+                    "ts": time.time()}
+        return None
+    clash = _leases_update(take)
+    if clash:
+        return "%s is already %s %s" % (bot, _LEASE_VERBS[clash["kind"]],
+                                        clash["name"])
     return None
 
 
 def _release_lease(bot):
-    _LEASES.pop(bot, None)
+    _leases_update(lambda reg: reg.pop(bot, None))
 
 
 MISSION_EVIDENCE = {
@@ -1806,6 +1864,38 @@ def execute(orders, bots, pace, dry, master=None):
         if pace:
             time.sleep(pace)
     return plan
+
+
+
+def submit_orders(orders, master=None):
+    """Programmatic order seam (the web-gui mission forms - roadmap
+    web-gui/2 contract, 2026-11-13): the SAME rails as execute() -
+    expand_orders, validate(), the lease registry, mission threads,
+    send_order - but with structured per-order results instead of prints.
+    Nothing bypasses validate(): every refusal comes back as
+    {"status": "refused", "detail": <the SKIP reason>}. Missions launched
+    here run as threads in the CALLING process and send through the
+    chat-tunnel service (process-agnostic); the shared lease file is what
+    keeps the daemon and this caller from double-missioning a bot."""
+    bots = census(online_only=True)
+    results = []
+    for o in expand_orders(list(orders), census(online_only=False)):
+        r = {"bot": str(o.get("bot", "")), "cmd": str(o.get("cmd", ""))}
+        err = validate(o, bots)
+        if err:
+            r["status"], r["detail"] = "refused", err
+        elif "_walk" in o:
+            err2 = _start_walk(o, master or r["bot"])
+            r["status"] = "refused" if err2 else "started"
+            r["detail"] = err2 or ("%s -> %s" % (r["bot"], o["_walk"][1]))
+        else:
+            try:
+                res = send_order(r["bot"], r["cmd"])
+                r["status"], r["detail"] = "sent", res["line"]
+            except Exception as e:
+                r["status"], r["detail"] = "failed", str(e)
+        results.append(r)
+    return results
 
 
 def repl():

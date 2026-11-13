@@ -131,6 +131,28 @@ def build_fixture(tmp):
         con.close()
 
 
+
+def arm_arrival_reply(base, bot, log, deadline=40):
+    """Wait for the mission's inspect poll (a PENDING 'inspect position' sent
+    event for this bot), then feed the [System] position reply AT the
+    game_tele point - the mission's arrival evidence. The pending-check is
+    the point: a reply line that lands before any pending inspect gets
+    stored unmatched and the mission never sees it."""
+    for _ in range(deadline * 2):
+        st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        evs = (ev.get("result") or {}).get("events", [])
+        if any(x.get("direction") == "sent" and x.get("target") == bot
+               and x.get("command") == "inspect position"
+               and x.get("status") == "pending" for x in evs):
+            with open(log, "a") as f:
+                f.write(display_line(
+                    "[System]: %s: -14420.0 480.0 26.0 0 "
+                    "0 |Stranglethorn Vale|" % bot) + "\n")
+                f.flush()
+            return True
+        time.sleep(0.5)
+    return False
+
 def display_line(inner):
     """A loguru-shaped chat display line, the A14 anchor the parser needs."""
     return ("2026-11-12 10:00:00.123 | INFO | MESSAGES | "
@@ -171,11 +193,15 @@ def main():
         # --- the real web-gui -------------------------------------------
         port = 18766
         base = "http://127.0.0.1:%d" % port
+        leases_path = os.path.join(tmp, "director-leases.json")
         procs.append(start_gui(port, "127.0.0.1", {
             "WEBGUI_TUNNEL": "http://127.0.0.1:%d" % tunnel_port,
             "WEBGUI_DBSEARCH_SOCK": db_sock,
             "WEBGUI_CENSUS": "i_was_here",
             "WEBGUI_LEO": "Leo",
+            "DIRECTOR_DBSEARCH_SOCK": db_sock,
+            "DIRECTOR_TUNNEL_URL": "http://127.0.0.1:%d/" % tunnel_port,
+            "DIRECTOR_LEASES_FILE": leases_path,
         }))
         check("web-gui came up", wait_port(port))
 
@@ -321,6 +347,101 @@ def main():
               lvbad.get("ok") is False
               and lvbad.get("error", {}).get("code") == "gui_read_only",
               json.dumps(lvbad)[:200])
+
+        # --- 6b. mission drawer: orders through director's rails -----------
+        st, ms0, _ = http("GET", base + "/api/missions")
+        check("missions endpoint answers (empty registry)",
+              st == 200 and ms0.get("ok") is True and ms0.get("missions") == {},
+              json.dumps(ms0)[:120])
+        st, mb, _ = http("POST", base + "/api/mission",
+                         {"bot": "Ayla", "op": "detonate"})
+        check("mission endpoint refuses unknown ops",
+              st == 200 and mb.get("ok") is False
+              and mb.get("error", {}).get("code") == "bad_request",
+              json.dumps(mb)[:120])
+        st, mbad, _ = http("POST", base + "/api/mission",
+                           {"bot": "Ayla", "op": "travel",
+                            "dest": "NowhereFake"})
+        check("unknown destination is refused by validate (SKIP reason back)",
+              mbad.get("ok") is False
+              and mbad.get("result", {}).get("status") == "refused"
+              and "not a known location" in mbad.get("result", {}).get("detail", ""),
+              json.dumps(mbad)[:200])
+        st, mlv, _ = http("POST", base + "/api/mission",
+                           {"bot": "Ayla", "op": "level"})
+        check("level op sends the grind cycle (whitelisted whisper)",
+              mlv.get("ok") is True and mlv.get("result", {}).get("status") == "sent",
+              json.dumps(mlv)[:200])
+
+        st, mt, _ = http("POST", base + "/api/mission",
+                         {"bot": "Ayla", "op": "travel", "dest": "BootyBay"})
+        check("travel order starts a mission (lease taken)",
+              mt.get("ok") is True and mt.get("result", {}).get("status") == "started"
+              and "BootyBay" in mt.get("result", {}).get("detail", ""),
+              json.dumps(mt)[:200])
+        st, ms1, _ = http("GET", base + "/api/missions")
+        check("the lease registry shows Ayla travelling to BootyBay",
+              (ms1.get("missions", {}).get("Ayla") or {}).get("kind") == "travel"
+              and (ms1.get("missions", {}).get("Ayla") or {}).get("name") == "BootyBay",
+              json.dumps(ms1)[:200])
+        # the mission's arrival evidence: an inspect [System] reply AT the
+        # game_tele point -> the travel mission confirms + releases
+        arm_arrival_reply(base, "Ayla", log)
+        released = False
+        for _ in range(45):
+            time.sleep(1)
+            st, msx, _ = http("GET", base + "/api/missions")
+            if "Ayla" not in msx.get("missions", {}):
+                released = True
+                break
+        check("travel mission confirms arrival and releases the lease",
+              released, json.dumps(msx)[:200])
+
+        # dead-pid lease entries are pruned, not blocking: a crashed owner
+        # holds nothing
+        with open(leases_path, "w") as f:
+            json.dump({"Gau": {"kind": "farm", "name": "BootyBay",
+                               "pid": 999999, "ts": time.time()}}, f)
+        st, mdp, _ = http("POST", base + "/api/mission",
+                          {"bot": "Gau", "op": "travel", "dest": "BootyBay"})
+        check("a dead holder's lease is reclaimed (crash does not block)",
+              mdp.get("ok") is True
+              and mdp.get("result", {}).get("status") == "started",
+              json.dumps(mdp)[:200])
+
+        st, mf, _ = http("POST", base + "/api/mission",
+                         {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})
+        check("farm order starts the gather keeper",
+              mf.get("ok") is True and mf.get("result", {}).get("status") == "started",
+              json.dumps(mf)[:200])
+        st, ms2, _ = http("GET", base + "/api/missions")
+        check("the lease registry shows Ayla farming in BootyBay",
+              (ms2.get("missions", {}).get("Ayla") or {}).get("kind") == "farm",
+              json.dumps(ms2)[:200])
+        arm_arrival_reply(base, "Ayla", log)
+        armed = False
+        for _ in range(30):
+            time.sleep(1)
+            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            cmds = [x.get("command") for x in
+                    (ev.get("result") or {}).get("events", [])]
+            if "rpg status do gather" in cmds:
+                armed = True
+                break
+        check("farm keeper arms the gather status (whisper seen in tunnel)",
+              armed, json.dumps(cmds[-8:])[:200])
+        st, msd, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "standdown"})
+        check("stand down releases the farm lease",
+              msd.get("ok") is True, json.dumps(msd)[:160])
+        gone = False
+        for _ in range(10):
+            time.sleep(1)
+            st, msy, _ = http("GET", base + "/api/missions")
+            if "Ayla" not in msy.get("missions", {}):
+                gone = True
+                break
+        check("registry shows the farm lease gone after stand down", gone)
 
         # --- 7. the Leo button --------------------------------------------
         st, ls, _ = http("GET", base + "/api/leo")

@@ -91,6 +91,27 @@ LIVE_QUERIES = ("state", "position", "tpos", "movement", "target", "hp",
 
 INTERFACE = "web-gui/2"
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+
+# The GUI's mission forms: ONLY these order shapes are ever built (the
+# client never supplies a free-form cmd); director's validate() is the
+# second wall either way.
+MISSION_OPS = ("travel", "farm", "walk", "level", "standdown")
+MISSION_DEST_OPS = ("travel", "farm", "walk")
+_DEST_RE = __import__("re").compile(r"^[A-Za-z0-9_' -]{1,40}$")
+
+_DIRECTOR = {"mod": None}
+
+
+def _director():
+    """Lazy import of the mission engine (same process, shared lease file)."""
+    if _DIRECTOR["mod"] is None:
+        sys.path.insert(0, REPO_ROOT)
+        import director
+        _DIRECTOR["mod"] = director
+    return _DIRECTOR["mod"]
+
 
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -194,6 +215,7 @@ def api_overview():
             "tunnel": tunnel_health(),
             "leo_char": db_call("get_character", {"toon": LEO}),
             "leo_group": db_call("get_group_membership", {"toon": LEO}),
+            "missions": api_missions(),
             "census": db_call("get_online_census",
                               {"account_like": CENSUS})}
 
@@ -264,6 +286,58 @@ def api_query(tool, params):
                 "error": {"code": "bad_request",
                           "message": "params must be an object"}}
     return db_call(tool, params)
+
+
+def api_missions():
+    """The shared lease registry: what every bot is doing right now."""
+    try:
+        reg = _director().leases()
+    except Exception as e:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "director_unavailable",
+                          "message": "the mission engine is not loadable: %s" % e}}
+    return {"ok": True, "queried_at": _now(), "missions": reg}
+
+
+def api_mission(bot, op, dest):
+    """Submit ONE mission order through director's rails (submit_orders).
+    The GUI only builds the five templated shapes; validate() re-checks
+    everything (destination resolution, census, lease, whitelist)."""
+    if op not in MISSION_OPS:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "op must be one of %s" %
+                                     ", ".join(MISSION_OPS)}}
+    if not isinstance(bot, str) or not __import__("re").fullmatch(r"[A-Za-z]+", bot):
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "bad toon name %r" % (bot,)}}
+    if op in MISSION_DEST_OPS:
+        if not isinstance(dest, str) or not _DEST_RE.fullmatch(dest.strip()):
+            return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "%s needs a destination name (letters, "
+                                     "digits, spaces, max 40)" % op}}
+        cmd = "%s %s" % (op, dest.strip())
+    elif op == "level":
+        cmd = "nc +new rpg,+grind,-follow"        # the grind cycle (fewshot)
+    else:                                          # standdown
+        cmd = "rpg status idle"                   # releases a farm lease
+    try:
+        d = _director()
+    except Exception as e:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "director_unavailable",
+                          "message": "the mission engine is not loadable: %s" % e}}
+    try:
+        results = d.submit_orders([{"bot": bot, "cmd": cmd}], master=LEO)
+    except Exception as e:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "director_error",
+                          "message": "submitting the order failed: %s" % e}}
+    r = results[0] if results else {"status": "failed", "detail": "no result"}
+    return {"ok": r.get("status") in ("started", "sent"),
+            "queried_at": _now(), "result": r}
 
 
 # ------------------------------------------------------------------ page ----
@@ -399,7 +473,8 @@ async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content
 
 const CLASSES={1:'Warrior',2:'Paladin',3:'Hunter',4:'Rogue',5:'Priest',6:'Death Knight',7:'Shaman',8:'Mage',9:'Warlock',10:'Monk',11:'Druid'};
 
-let overview=null;
+let overview=null, selToon=null, selDest=null;
+const MVERBS={farm:'farming in',travel:'travelling to',walk:'marching to'};
 async function loadOverview(){
   let o; try{ o=await jget('/api/overview') }catch(e){ return }
   overview=o;
@@ -429,9 +504,14 @@ async function loadOverview(){
   };
 
   const tb=$('bots').querySelector('tbody'); tb.innerHTML='';
-  const row=(r)=>'<tr><td>'+esc(r[0])+'</td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td><td>'+esc(r[5])+'</td>'
+  const mbadge=(name)=>{
+  const m=((overview.missions||{}).missions||{})[name];
+  if(!m) return '<span class="off">&mdash;</span>';
+  return '<span class="badge '+(m.kind==='farm'?'raid':'party')+'" title="pid '+esc(m.pid)+'">'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</span>';
+};
+const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'+esc(r[0])+'</a></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td><td>'+esc(r[5])+'</td>'
     +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
-    +'<td>'+badge(r[0])+'</td>'
+    +'<td>'+badge(r[0])+'</td><td>'+mbadge(r[0])+'</td>'
     +'<td><button data-name="'+esc(r[0])+'" class="livebtn">live</button> <button data-name="'+esc(r[0])+'" class="grpbtn">group</button></td></tr>';
   if((o.leo_char||{}).ok && (o.leo_char.rows||[]).length){
     const c=o.leo_char.rows[0];   // get_character: name,account,level,race,class,map,zone,money,totaltime,online
@@ -445,6 +525,57 @@ async function loadOverview(){
   }
   tb.querySelectorAll('button.livebtn').forEach(b=>b.onclick=()=>livePos(b));
   tb.querySelectorAll('button.grpbtn').forEach(b=>b.onclick=()=>grpCheck(b));
+  tb.querySelectorAll('a.toonlink').forEach(a=>a.onclick=(e)=>{e.preventDefault();openDrawer(a.dataset.name)});
+}
+
+// ---- mission drawer: give the selected toon an order (director's rails)
+async function openDrawer(name){
+  selToon=name; selDest=null;
+  const d=$('mission-drawer'); d.style.display='block';
+  const m=((overview.missions||{}).missions||{})[name];
+  d.innerHTML='<b style="color:var(--acc)">Mission: '+esc(name)+'</b>'
+    +(m?' &mdash; currently '+esc(MVERBS[m.kind]||m.kind)+' <b>'+esc(m.name)+'</b>':'')
+    +'<p class="note">orders go through the mission engine\u2019s own validate/lease rails; the destination must be a known teleport location</p>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+    +'<input id="dest-in" placeholder="destination (game_tele), e.g. BootyBay" style="width:240px">'
+    +'<button id="dest-search">find</button>'
+    +'<input id="mat-in" placeholder="or farm what? (mat, e.g. Peacebloom)" style="width:240px">'
+    +'<button id="mat-search">mats</button></div>'
+    +'<div id="dest-list" style="margin:6px 0"></div>'
+    +'<div id="dest-picked" style="margin:6px 0"></div>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+    +'<button id="op-travel" class="warn" disabled>travel there</button>'
+    +'<button id="op-farm" class="warn" disabled>farm there</button>'
+    +'<button id="op-level">level (grind cycle)</button>'
+    +'<button id="op-standdown">stand down</button>'
+    +'<button id="op-close">close</button></div>'
+    +'<p class="note" id="mission-result"></p>';
+  function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';$('op-travel').disabled=false;$('op-farm').disabled=false;}
+  $('dest-search').onclick=async()=>{
+    const q=await jpost('/api/query',{tool:'get_game_tele',params:{name:$('dest-in').value}});
+    $('dest-list').innerHTML=(q.ok&&q.rows.length)?q.rows.map(r=>'<button class="destbtn" data-n="'+esc(r[0])+'">'+esc(r[0])+' (map '+esc(r[1])+')</button>').join(' '):'<span class="err">'+esc((q.error||{}).message||'no match')+'</span>';
+    $('dest-list').querySelectorAll('.destbtn').forEach(b=>b.onclick=()=>pickDest(b.dataset.n));
+  };
+  $('mat-search').onclick=async()=>{
+    const q=await jpost('/api/query',{tool:'get_mat_spawns',params:{mat:$('mat-in').value}});
+    $('dest-list').innerHTML=(q.ok&&q.rows.length)?q.rows.map(r=>'<button class="destbtn" data-n="'+esc(r[0])+'">'+esc(r[0])+' ('+esc(r[2])+' spawns)</button>').join(' '):'<span class="err">'+esc((q.error||{}).message||'no match')+'</span>';
+    $('dest-list').querySelectorAll('.destbtn').forEach(b=>b.onclick=()=>pickDest(b.dataset.n));
+  };
+  const confirmable=(btn,op)=>{
+    btn.onclick=()=>{
+      if(btn.dataset.armed!=='1'){btn.dataset.armed='1';btn.textContent='CONFIRM?';setTimeout(()=>{btn.dataset.armed='0';btn.textContent=btn.dataset.label},2500);return}
+      btn.dataset.armed='0';btn.textContent=btn.dataset.label;
+      runMission(op);
+    };
+  };
+  ['op-travel','op-farm','op-level','op-standdown'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  $('op-close').onclick=()=>{d.style.display='none';selToon=null};
+  async function runMission(op){
+    const out=$('mission-result'); out.textContent='submitting...';
+    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:(op==='level'||op==='standdown')?undefined:selDest});
+    out.innerHTML=r.ok?'<span class="on">'+esc(r.result.status)+': '+esc(r.result.detail)+'</span>':'<span class="err">'+esc((r.error||{}).message||(r.result||{}).detail)+'</span>';
+    setTimeout(loadOverview,1500);
+  }
 }
 
 async function livePos(btn){
@@ -668,6 +799,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, api_grammar())
         elif parsed.path == "/api/catalogs":
             self.reply(200, api_catalogs())
+        elif parsed.path == "/api/missions":
+            self.reply(200, api_missions())
         elif parsed.path == "/api/leo":
             self.reply(200, {"ok": True, "queried_at": _now(),
                              "unit": LEO_UNIT, "active": leo_active()})
@@ -691,7 +824,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(401, {"ok": False,
                              "error": "not logged in (POST /login first)"})
             return
-        if self.path not in ("/api/query", "/api/live", "/api/leo"):
+        if self.path not in ("/api/query", "/api/live", "/api/leo",
+                            "/api/mission"):
             self.reply(404, {"ok": False, "error": "no such path"})
             return
         try:
@@ -705,6 +839,8 @@ class Handler(BaseHTTPRequestHandler):
             resp = api_query(req.get("tool"), req.get("params"))
         elif self.path == "/api/live":
             resp = api_live(req.get("bot"), req.get("query"))
+        elif self.path == "/api/mission":
+            resp = api_mission(req.get("bot"), req.get("op"), req.get("dest"))
         else:
             resp = leo_action(req.get("action"))
         self.reply(200, resp)
