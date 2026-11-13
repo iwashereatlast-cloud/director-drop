@@ -370,11 +370,25 @@ def main():
               and mbad.get("result", {}).get("status") == "refused"
               and "not a known location" in mbad.get("result", {}).get("detail", ""),
               json.dumps(mbad)[:200])
-        st, mlv, _ = http("POST", base + "/api/mission",
-                           {"bot": "Ayla", "op": "level"})
-        check("level op sends the grind cycle (whitelisted whisper)",
-              mlv.get("ok") is True and mlv.get("result", {}).get("status") == "sent",
-              json.dumps(mlv)[:200])
+        st, sbad, _ = http("POST", base + "/api/mission",
+                           {"bot": "Ayla", "op": "state", "dest": "party"})
+        check("state op refuses unknown presets",
+              sbad.get("ok") is False
+              and sbad.get("error", {}).get("code") == "bad_request",
+              json.dumps(sbad)[:200])
+        st, sgr, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "state", "dest": "grind"})
+        check("state grind sends the botcmd preset verbatim",
+              sgr.get("ok") is True and len(sgr.get("results", [])) == 1
+              and "+grind,-quest,-gather,-follow" in
+              sgr.get("results", [{}])[0].get("detail", ""),
+              json.dumps(sgr)[:200])
+        st, sga, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "state", "dest": "gather"})
+        check("state gather sends both whispers (nc + status arm)",
+              sga.get("ok") is True and len(sga.get("results", [])) == 2
+              and all(r.get("status") == "sent" for r in sga.get("results", [])),
+              json.dumps(sga)[:260])
 
         st, mt, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "travel", "dest": "BootyBay"})
