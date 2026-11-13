@@ -439,11 +439,12 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
 </header>
 <main>
   <section class="panel" id="panel-bots">
-    <h2>Bots &mdash; census + groups (db-search)</h2>
-    <p class="note">DB rows are last-flushed values (A3/A5 staleness). &ldquo;live&rdquo; asks chat-tunnel <code>inspect</code> for the position right now (offline truth is db-search). The group badge is Leo's group; &ldquo;group&rdquo; checks any toon's own party/raid.</p>
+    <h2>Bots &mdash; census + groups + missions</h2>
+    <p class="note">DB rows are last-flushed values (A3/A5 staleness). &ldquo;live&rdquo; asks chat-tunnel <code>inspect</code> for the position right now (offline truth is db-search). The group badge is Leo's group; &ldquo;group&rdquo; checks any toon's own party/raid. <b>Click a toon's name to give them a mission.</b></p>
     <table id="bots"><thead><tr>
-      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th></th>
+      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th>mission</th><th></th>
     </tr></thead><tbody></tbody></table>
+    <div id="mission-drawer" style="display:none;border-top:1px solid var(--line);margin-top:8px;padding-top:8px"></div>
     <p class="note" id="bots-note"></p>
   </section>
   <section class="panel" id="panel-feed">
