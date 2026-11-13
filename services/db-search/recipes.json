@@ -277,9 +277,14 @@
         {
           "cmd": "nc +new rpg,+grind,-follow",
           "note": "the grind recipe; for questing use +quest instead of +grind"
+        },
+        {
+          "cmd": "nc +new rpg,+grind,-follow",
+          "bot": "ALL",
+          "note": "for the WHOLE fleet at once use bot \"ALL\": {\"bot\":\"ALL\",\"cmd\":\"nc +new rpg,+grind,-follow\"} - the system expands it to every unit; add per-unit travel orders afterwards for specific destinations"
         }
       ],
-      "notes": "Match the unit's level to the zone's bracket (travel recipe's table); if the bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction."
+      "notes": "Match the unit's level to the zone's bracket (travel recipe's table); if the bracket is far from the unit's level, say so and suggest a bracket-appropriate zone - but obey an explicit instruction. Fleet-wide leveling: ONE order with bot \"ALL\" starts every unit's grind cycle in place - never narrate 'protocols' or wait for parameters; order it in the same reply."
     },
     {
       "id": "silent_bot",

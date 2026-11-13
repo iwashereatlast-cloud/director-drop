@@ -941,7 +941,8 @@ def main():
             if m["role"] != "assistant":
                 continue
             obj = director.parse_orders(m["content"])
-            for o in obj.get("orders", []):
+            for o in director.expand_orders(obj.get("orders", []),
+                                            director.census(online_only=False)):
                 err = director.validate(dict(o), bots_c)
                 if not order_ok(err):
                     bad.append((m["content"][:40], o, err))
