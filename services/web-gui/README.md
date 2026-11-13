@@ -1,28 +1,60 @@
 # web-gui (service 4 of 4)
 
-Read-only, Cockpit-style dashboard over the three sibling services. One
-stdlib-only HTTP server on 127.0.0.1:8766, no dependencies, no build step.
+Read-mostly, Cockpit-style dashboard over the sibling services. One
+stdlib-only HTTP server on `127.0.0.1:8766`, no dependencies, no build
+step. Interface `web-gui/2` (resynced 2026-11-13 to the post-rtt-engine
+stack: live reads route through chat-tunnel `inspect`, A23).
 
 Panels (roadmap row 4):
 
 | panel | source | what you see |
 |---|---|---|
-| **Bots** | db-search `get_online_census` | toon / account / level / class / map / zone / DB-online / guild for the census account prefix, with the per-query staleness caveat shown under the table; a **live** button per row asks rtt-engine `pinfo` for the current position of an online bot (offline truth stays db-search) |
-| **Tunnel feed** | chat-tunnel `get_recent_events` | sent commands and matched replies, newest first, with correlation ids, status badges (pending/replied/timeout, matched/unmatched) and the raw line; polls every 5 s |
-| **Query catalog browser** | db-search `catalog` + rtt-engine `catalog` | both catalogs side by side; pick a tool, fill its params, run it read-only, see the full envelope (rows, `queried_at`, staleness `caveat`) |
+| **Leo's chat — live** | chat-tunnel `get_events_since` + `wait_for_events` | exactly what Leo sees in chat — whisper, guild and inspect-system events with their raw display lines, long-polled (one request per batch, no hot-polling), newest at the bottom |
+| **Bots** | db-search `get_online_census` + `get_character` + `get_group_membership`; chat-tunnel `inspect` | census table with the staleness caveat, **Leo's own row on top**, a group/raid badge per toon (Leo's group auto-filled; any toon on demand via the **group** button), and a **live** button per row that asks chat-tunnel `inspect(bot, "position")` for the position right now (offline truth stays db-search) |
+| **Query catalog browser** | db-search `catalog` + chat-tunnel `describe` | the db-search catalog with read-only execution (full envelope incl. `queried_at` + staleness `caveat`), plus the chat-tunnel grammar as a display-only tab |
 
-## Read-only by construction
+Header: live status chips for chat-tunnel, db-search and **Leo's session**
+(`systemctl --user is-active leo.service`) — with the Leo on/off button.
+
+## Read-mostly by construction
 
 - chat-tunnel's `send_command` is **never proxied** — command sends belong
   to chat-tunnel callers (director, botcmd), not the dashboard.
-- rtt ops are allowlisted to `{catalog, ping, pinfo}` **inside the GUI**
-  before the request leaves the process; anything else gets
-  `{"code": "gui_read_only"}` (rtt-engine's own refusals are a second wall).
-- db-search is read-only upstream (static SELECTs, SELECT-only identity);
-  the GUI just passes tool + params through and renders the envelope.
+- Live reads go through chat-tunnel `inspect` with the GUI-side allowlist
+  mirroring the tunnel's `INSPECT_QUERIES`; anything else gets
+  `{"code": "gui_read_only"}` (the tunnel re-validates — second wall).
+- db-search is read-only upstream (static SELECTs, SELECT-only identity,
+  subject scope gate); the GUI just passes tool + params through and
+  renders the envelope.
+- **The one deliberate write action: the Leo button.**
+  `POST /api/leo {"action": "start"|"stop"}` runs
+  `systemctl --user start|stop leo.service` (`WEBGUI_LEO_UNIT`). On a LAN
+  bind it sits behind the login screen; on loopback it is local-only by
+  definition. `inspect` also sends a live-read command through the tunnel
+  (correlated, allowlisted). Nothing else in the GUI writes anything.
 - Local-only by default: `WEB_GUI_BIND` defaults to 127.0.0.1 (no login
   needed). Opt-in LAN exposure exists but is fenced — see
   **LAN bind & login** below.
+
+## Interface — `web-gui/2`
+
+`GET /` serves the dashboard (self-contained HTML+JS, no external assets).
+JSON API (all degrade to a per-backend `{"code": "unreachable"}` state —
+HTTP 200, never a 5xx — when a sibling is down):
+
+| route | method | body / query | returns |
+|---|---|---|---|
+| `/health` | GET | — | running config |
+| `/api/overview` | GET | — | census + Leo's row + Leo's group + tunnel health + Leo session status |
+| `/api/events` | GET | `after_id`, `limit` | cursor read: events with id > after_id, ascending, plus `last_id` |
+| `/api/events/wait` | GET | `after_id`, `timeout` (≤25), `limit` | long-poll: blocks until new events or timeout |
+| `/api/reply` | GET | `cid` | the sent event + its matched reply (chat-tunnel `get_reply`) |
+| `/api/live` | POST | `{"bot", "query"}` | chat-tunnel `inspect` (correlation_id; the reply lands in the feed / via `/api/reply`) |
+| `/api/grammar` | GET | — | the chat-tunnel grammar (`describe`) |
+| `/api/catalogs` | GET | — | the db-search catalog |
+| `/api/query` | POST | `{"tool", "params"}` | the db-search envelope (or its refusal) |
+| `/api/leo` | GET | — | Leo session status (`systemctl --user is-active`) |
+| `/api/leo` | POST | `{"action": "start"\|"stop"}` | start/stop the Leo unit (the write action) |
 
 ## LAN bind & login
 
@@ -40,30 +72,15 @@ The GUI is reachable from the LAN only as a deliberate, fenced choice:
   non-loopback bind is refused.
 - **The warning is honest: there is no TLS.** The username, password and
   session cookie cross the LAN in cleartext, and behind the login the
-  query browser executes real DB reads. Anyone on the segment who can
-  reach the port and get the password can read the roster data —
-  the operator is responsible for firewalling the address/port
-  (e.g. `sudo ufw allow from 192.168.88.0/24 to any port 8766` and deny
-  the rest).
+  query browser executes real DB reads and the Leo button can stop the
+  world session. Anyone on the segment who can reach the port and get
+  the password can read the roster data — the operator is responsible
+  for firewalling the address/port (e.g. `sudo ufw allow from
+  192.168.88.0/24 to any port 8766` and deny the rest).
 - **Recommended default:** keep `127.0.0.1` and reach the GUI from the
   laptop through an SSH tunnel (`ssh -N -L 8766:127.0.0.1:8766
   <user>@<server>`, then open http://127.0.0.1:8766/ locally) — same
   browser experience, encrypted, no extra attack surface.
-
-## Interface — `web-gui/1`
-
-`GET /` serves the dashboard (self-contained HTML+JS, no external assets).
-JSON API (all degrade to a per-backend `{"code": "unreachable"}` state —
-HTTP 200, never a 5xx — when a sibling is down):
-
-| route | method | body / query | returns |
-|---|---|---|---|
-| `/health` | GET | — | running config |
-| `/api/overview` | GET | — | census rows + tunnel health + rtt ping, one snapshot |
-| `/api/events` | GET | `limit`, `direction` (`sent`\|`reply`) | tunnel events, newest first |
-| `/api/catalogs` | GET | — | db-search catalog + rtt-engine catalog |
-| `/api/query` | POST | `{"tool", "params"}` | the db-search envelope (or its refusal) |
-| `/api/rtt` | POST | `{"op", "name"?}` | the rtt-engine envelope, or `gui_read_only` |
 
 ## Env knobs (all optional)
 
@@ -73,9 +90,10 @@ default; the wildcard `0.0.0.0` is ALWAYS refused), `WEB_GUI_USER`
 (director) / `WEB_GUI_PASS` (required for any non-loopback bind),
 `WEB_GUI_AUTH` (auto | on | off — `off` is refused on non-loopback
 binds), `WEBGUI_TUNNEL` (http://127.0.0.1:8765), `WEBGUI_DBSEARCH_SOCK`
-(/tmp/db-search.sock), `WEBGUI_RTT_SOCK` (/tmp/rtt-engine.sock),
-`WEBGUI_CENSUS` (i_was_here — account prefix for the bot table),
-`WEBGUI_TIMEOUT` (15 s per backend call).
+(/tmp/db-search.sock), `WEBGUI_LEO` (Leo — the shell toon: own table row
++ group), `WEBGUI_LEO_UNIT` (leo.service — the unit the Leo button
+starts/stops), `WEBGUI_CENSUS` (i_was_here — account prefix for the bot
+table), `WEBGUI_TIMEOUT` (15 s per backend call).
 
 ## Run
 
@@ -84,29 +102,30 @@ python3 services/web-gui/web_gui.py serve
 # then open http://127.0.0.1:8766/ on the host (local-only by contract)
 ```
 
-## Proof (no worldserver, no DB, no 8888 server)
+## Proof (no worldserver, no DB, no Leo session)
 
 ```bash
 python3 services/web-gui/proof.py
 ```
 
-Boots the three REAL sibling services in fixture mode (sqlite fixture,
-temp log + FIFO, mock command server + GUID fixture), then drives the
-real GUI over HTTP. 44 checks: page + panels render; overview merges
-census (with caveat) + both healths; the feed shows a sent command and
-its reply **matched by correlation_id**; both catalogs list; a catalog
+Boots the REAL sibling services in fixture mode (sqlite fixture, temp
+log + FIFO with a name allowlist so no MySQL is touched) and drives the
+real GUI over HTTP. **50 checks**: page + panels render; overview merges
+census (with caveat), tunnel health, Leo's character row, Leo's group
+(the group/raid badge source) and the Leo session status; the live chat
+seam — cursor reads ascending + gapless with a monotonic `last_id`, a
+sent command bound to its whisper reply by correlation_id, and
+`wait_for_events` actually long-polls; both catalogs list; a catalog
 read executes and refusals (`unknown_tool`, injection-shaped params)
-propagate; `pinfo` answers and offline is a soft answer; non-read rtt
-ops are refused by the GUI (`gui_read_only`); with all three siblings
-down every endpoint still answers 200 with `unreachable` states; the
-wildcard bind is refused while a specific address (127.0.0.2) is
-accepted; `lan` resolves the host's address and refuses to start
-without a password; the startup warning fires (proved WITHOUT ever
-listening on the LAN interface — the warning precedes the bind, so a
-held address forces the exit); and the login flow is exercised
-end-to-end on 127.0.0.2 (401 without a session, 401 on a wrong
-password, cookie issued, cookie unlocks the API, logout invalidates,
-`WEB_GUI_AUTH=off` refused on LAN binds). Exit 0 = all PASS.
+propagate; a live `inspect` issues a correlated command whose
+`[System]` reply is matched back through `/api/reply`; non-allowlisted
+live queries refused by the GUI (`gui_read_only`); the Leo button —
+status graceful without systemd, unknown actions refused, start returns
+a structured answer; with both siblings down every endpoint still
+answers 200 with `unreachable` states; and the bind knob + login flow
+(wildcard refused, 127.0.0.2 accepted, `lan` resolves, no-password LAN
+bind refused, startup warning proved without ever listening on the LAN
+interface, full login lifecycle on loopback). Exit 0 = all PASS.
 
 ## Deploy
 
@@ -130,6 +149,3 @@ Environment=WEB_GUI_PASS=<password> # REQUIRED: the service refuses to start wit
 ```
 
 and firewall the port to the trusted segment (see **LAN bind & login**).
-
-Write actions (send a command from the GUI, bot add/remove, etc.) come
-later — this service ships read-only.
