@@ -986,6 +986,8 @@ def main():
             '{"reply": "ok", "queries": ["nope", {"query": "recipes", "text": "gather herbs"}, 7]}',
             '{"reply": "ok", "orders": "follow everyone"}',
             '[{"reply": "not an object", "orders": []}]',
+            '{"reply": "Ayla and Mog are moving to Ashenvale. ```json\n{"query": "recipes"}\n```", "orders": []}',
+            'Checking.\n```json\n{"reply": "Ayla and Mog are moving to Ashenvale. \'\'json\n{"query": "recipes", "text": "x"}", "orders": []}\n```',
         ]
         sent_f = []
         real_send = director.send_order
@@ -1021,6 +1023,12 @@ def main():
         p3 = director.parse_orders('{"reply": "ok", "queries": ["nope", {"query": "recipes", "text": "x"}, 7]}')
         check("boundary: malformed query entries dropped, good ones kept",
               p3["queries"] == [{"query": "recipes", "text": "x"}], p3)
+        pa = director.parse_orders('{"reply": "Ayla and Mog are moving to Ashenvale. ```json\n{"query": "recipes"}\n```", "orders": []}')
+        check("boundary: a leaked fenced fragment in the reply keeps the prose",
+              pa["reply"] == "Ayla and Mog are moving to Ashenvale.", pa)
+        pb = director.parse_orders('Checking.\n```json\n{"reply": "Ayla and Mog are moving to Ashenvale. \'\'json\n{"query": "recipes", "text": "x"}", "orders": []}\n```')
+        check("boundary: a mis-fenced fragment is salvaged from the wrapper",
+              pb["reply"] == "Ayla and Mog are moving to Ashenvale.", pb)
         p4 = director.parse_orders('[{"reply": "array not object"}]')
         check("boundary: an array-wrapped contract still yields text + no orders",
               p4["reply"] == "array not object" and p4["orders"] == [], p4)

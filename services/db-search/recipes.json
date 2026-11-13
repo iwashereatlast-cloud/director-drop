@@ -26,7 +26,7 @@
         "cmd": "stay",
         "note": "or any task recipe frees the bot from following"
       },
-      "notes": "Do NOT compute Leo's coordinates - 'follow' needs none. Never order travel for this."
+      "notes": "Do NOT compute Leo's coordinates - 'follow' needs none. Never order travel for this. 'summon' teleports the unit STRAIGHT to Leo (SummonAction Teleports to the master when master security >= SEC_PLAYER - always true for Leo); use it for come-to-me. NEVER summon units as part of bring-online (bot add): units log in WHERE THEY LOGGED OUT, and summoning drags them to Leo's city."
     },
     {
       "id": "travel",
@@ -377,7 +377,7 @@
           "note": "logs an ONLINE unit out"
         }
       ],
-      "notes": "If the roster shows a unit OFFLINE, do not refuse - propose the bot add."
+      "notes": "If the roster shows a unit OFFLINE, do not refuse - propose the bot add. bot add brings units online WHERE THEY LOGGED OUT - do NOT follow with summon (it teleports units to Leo) unless the master asked for it."
     },
     {
       "id": "cast",
