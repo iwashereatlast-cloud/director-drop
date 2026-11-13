@@ -124,13 +124,13 @@ def _unreachable(source, e):
 
 
 # ------------------------------------------------------------- backends ----
-def tunnel_call(tool, args):
+def tunnel_call(tool, args, timeout=None):
     source = "chat-tunnel"
     body = json.dumps({"tool": tool, "args": args}).encode()
     req = urllib.request.Request(TUNNEL + "/", data=body,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as r:
             return json.loads(r.read().decode())
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
             ValueError) as e:
@@ -237,9 +237,16 @@ def api_events(after_id, limit):
 
 
 def api_events_wait(after_id, timeout, limit):
+    """wait_for_events long-polls server-side for up to 25s - the proxy's
+    own client timeout must OUTLIVE the poll (the frontend asks for 20s),
+    or a quiet chat reads as 'timed out' (the bug this fixed)."""
+    try:
+        t = max(0.0, min(float(timeout or 20), 25.0))
+    except (TypeError, ValueError):
+        t = 20.0
     return _tunnel_result(tunnel_call(
-        "wait_for_events", {"after_id": after_id, "timeout": timeout,
-                            "limit": limit}))
+        "wait_for_events", {"after_id": after_id, "timeout": t,
+                            "limit": limit}, timeout=t + TIMEOUT))
 
 
 def api_reply(cid):

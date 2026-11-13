@@ -134,7 +134,7 @@ python3 services/web-gui/proof.py
 
 Boots the REAL sibling services in fixture mode (sqlite fixture, temp
 log + FIFO with a name allowlist so no MySQL is touched) and drives the
-real GUI over HTTP. **63 checks**: page + panels render; overview merges
+real GUI over HTTP. **51 checks**: page + panels render; overview merges
 census (with caveat), tunnel health, Leo's character row, Leo's group
 (the group/raid badge source) and the Leo session status; the live chat
 seam — cursor reads ascending + gapless with a monotonic `last_id`, a
