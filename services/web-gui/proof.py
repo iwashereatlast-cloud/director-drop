@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
-"""web-gui proof harness - runs WITHOUT a live worldserver, DB, or the real
-8888 command server.
+"""web-gui proof harness - runs WITHOUT a live worldserver, DB, or Leo.
 
-Boots the three real sibling services in fixture mode (db-search on a
-sqlite fixture built from services/db-search/fixtures/fixture.sql,
-chat-tunnel against a temp log + FIFO, rtt-engine against the mock
-command server + GUID fixture from services/rtt-engine/fixtures/), then
-drives the REAL web-gui over HTTP and asserts:
+Boots the two real sibling services in fixture mode (db-search on a sqlite
+fixture built from services/db-search/fixtures/fixture.sql, chat-tunnel
+against a temp log + FIFO with a name allowlist so no MySQL is touched),
+then drives the REAL web-gui over HTTP and asserts (web-gui/2, resynced to
+the post-rtt-engine stack):
 
   1. the dashboard page serves with all three panels;
-  2. /api/overview merges census + tunnel health + rtt ping, with the
-     staleness caveat surfaced;
-  3. /api/events streams real tunnel events (a sent command bound to its
-     reply by correlation_id);
-  4. /api/catalogs lists both catalogs;
+  2. /api/overview merges census + tunnel health + Leo's character row +
+     Leo's group membership (the group/raid badge source) + the Leo
+     session status, with the staleness caveat surfaced;
+  3. the live chat window seam: cursor reads (get_events_since) are
+     ascending + gapless with a monotonic last_id, a sent command is bound
+     to its whisper reply by correlation_id, and wait_for_events actually
+     long-polls (blocks ~the timeout with no new events);
+  4. /api/catalogs lists the db-search catalog; /api/grammar serves the
+     chat-tunnel grammar (inspect queries included);
   5. /api/query executes a catalog read and propagates db-search refusals;
-  6. /api/rtt runs the read-only rtt ops and REFUSES non-read ops
-     (gui_read_only) before anything leaves the process;
-  7. graceful degradation: with all three siblings down, every panel
-     endpoint still answers 200 with a per-backend "unreachable" state;
-  8. the bind knob: the wildcard is always refused, a specific address
-     (127.0.0.2) is accepted, WEB_GUI_BIND=lan resolves the host's current
-     non-loopback address, refuses to start without WEB_GUI_PASS, and
-     prints the prominent startup warning (proved WITHOUT ever listening
-     on the LAN - the warning fires before the bind, so a port collision
-     proves it and the process exits);
-  9. the login screen: the loopback default needs no login; with auth on,
-     unauthenticated API requests get 401, wrong passwords get 401, a
-     correct login issues a session cookie that unlocks the API, logout
-     invalidates it, and WEB_GUI_AUTH=off is refused on non-loopback binds
-     (the whole flow is exercised on 127.0.0.2 - the harness itself never
-     binds a non-loopback interface).
+  6. /api/live runs a chat-tunnel inspect (correlation_id issued, the
+     [System] reply line matched back through /api/reply) and REFUSES
+     non-allowlisted queries (gui_read_only);
+  7. the Leo button: /api/leo status is graceful without systemd, a bad
+     action is refused, start/stop return a structured answer (never a
+     5xx, never a crash);
+  8. graceful degradation: with both siblings down, every panel endpoint
+     still answers 200 with a per-backend "unreachable" state;
+  9. the bind knob + login screen (unchanged from web-gui/1): wildcard
+     refused, specific address accepted, lan resolves, no-password LAN
+     bind refused, warning proved without ever listening on the LAN, full
+     login flow on loopback.
 
 Exit code 0 = all proofs pass. Run: python3 proof.py
 """
@@ -50,7 +49,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 DBSEARCH = os.path.join(REPO, "services", "db-search")
 CHATTUNNEL = os.path.join(REPO, "services", "chat-tunnel")
-RTTENGINE = os.path.join(REPO, "services", "rtt-engine")
 
 PASS = 0
 FAIL = 0
@@ -73,7 +71,7 @@ def http(method, url, body=None, headers=None):
         h.update(headers)
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, json.loads(r.read().decode()), dict(r.headers)
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode()), dict(e.headers)
@@ -101,16 +99,13 @@ def wait_connect(port, tries=80, host="127.0.0.1"):
     return False
 
 
-def start_gui(port, bind, extra_env=None, errfile=None):
+def start_gui(port, bind, extra_env=None):
     env = dict(os.environ, WEBGUI_PORT=str(port), WEB_GUI_BIND=bind)
     env.update(extra_env or {})
-    err = open(errfile, "w+") if errfile else subprocess.DEVNULL
-    p = subprocess.Popen([sys.executable, os.path.join(HERE, "web_gui.py"),
-                          "serve"], env=env,
-                         stdout=subprocess.DEVNULL, stderr=err)
-    if errfile:
-        err.close()
-    return p
+    return subprocess.Popen([sys.executable, os.path.join(HERE, "web_gui.py"),
+                             "serve"], env=env,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
 
 
 def wait_sock(path, tries=80):
@@ -136,6 +131,12 @@ def build_fixture(tmp):
         con.close()
 
 
+def display_line(inner):
+    """A loguru-shaped chat display line, the A14 anchor the parser needs."""
+    return ("2026-11-12 10:00:00.123 | INFO | MESSAGES | "
+            "headless.world.chat.chat:display:124 - " + inner)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="webgui-proof-")
     procs = []
@@ -151,7 +152,7 @@ def main():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         check("db-search fixture mode came up", wait_sock(db_sock))
 
-        # --- fixture-mode chat-tunnel -----------------------------------
+        # --- fixture-mode chat-tunnel (name allowlist: no MySQL) ---------
         log = os.path.join(tmp, "leo.log")
         fifo = os.path.join(tmp, "leo.in")
         open(log, "w").close()
@@ -162,40 +163,20 @@ def main():
             [sys.executable, os.path.join(CHATTUNNEL, "chat_tunnel.py")],
             env=dict(os.environ, CHAT_TUNNEL_LOG=log, CHAT_TUNNEL_FIFO=fifo,
                      CHAT_TUNNEL_PORT=str(tunnel_port),
-                     CHAT_TUNNEL_DB=os.path.join(tmp, "tunnel.db")),
+                     CHAT_TUNNEL_DB=os.path.join(tmp, "tunnel.db"),
+                     CHAT_TUNNEL_ALLOW="Leo,Ayla,Gau,Locke,Vivi"),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        check("chat-tunnel fixture mode came up",
-              wait_port(tunnel_port))
-
-        # --- fixture-mode rtt-engine (mock 8888 + GUID fixture) ---------
-        rtt_sock = os.path.join(tmp, "rtt-engine.sock")
-        pb_port = 18888
-        procs.append(subprocess.Popen(
-            [sys.executable, os.path.join(RTTENGINE, "fixtures",
-                                          "mock-cmdserver.py"), str(pb_port),
-             os.path.join(RTTENGINE, "fixtures", "cmdserver-responses.json")],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        time.sleep(0.3)
-        procs.append(subprocess.Popen(
-            [sys.executable, os.path.join(RTTENGINE, "rtt_engine.py"), "serve"],
-            env=dict(os.environ, RTT_SOCK=rtt_sock, RTT_PBHOST="127.0.0.1",
-                     RTT_PBPORT=str(pb_port), RTT_GUID_SOURCE="fixture",
-                     RTT_GUID_FIXTURE=os.path.join(RTTENGINE, "fixtures",
-                                                   "guid-fixture.json")),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        check("rtt-engine fixture mode came up", wait_sock(rtt_sock))
+        check("chat-tunnel fixture mode came up", wait_port(tunnel_port))
 
         # --- the real web-gui -------------------------------------------
         port = 18766
         base = "http://127.0.0.1:%d" % port
-        procs.append(subprocess.Popen(
-            [sys.executable, os.path.join(HERE, "web_gui.py"), "serve"],
-            env=dict(os.environ, WEBGUI_PORT=str(port),
-                     WEBGUI_TUNNEL="http://127.0.0.1:%d" % tunnel_port,
-                     WEBGUI_DBSEARCH_SOCK=db_sock,
-                     WEBGUI_RTT_SOCK=rtt_sock,
-                     WEBGUI_CENSUS="i_was_here"),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        procs.append(start_gui(port, "127.0.0.1", {
+            "WEBGUI_TUNNEL": "http://127.0.0.1:%d" % tunnel_port,
+            "WEBGUI_DBSEARCH_SOCK": db_sock,
+            "WEBGUI_CENSUS": "i_was_here",
+            "WEBGUI_LEO": "Leo",
+        }))
         check("web-gui came up", wait_port(port))
 
         # --- 1. dashboard page ------------------------------------------
@@ -206,7 +187,7 @@ def main():
               all(x in page for x in
                   ('id="panel-bots"', 'id="panel-feed"', 'id="panel-catalog"')))
 
-        # --- 2. overview: census + health merge -------------------------
+        # --- 2. overview: census + leo row + leo group + session ---------
         st, o, _ = http("GET", base + "/api/overview")
         check("overview answers 200 ok", st == 200 and o.get("ok") is True)
         d = o.get("census", {})
@@ -218,95 +199,140 @@ def main():
               {"Ayla", "Gau", "Locke"} <= names, str(sorted(names)))
         check("overview tunnel health ok",
               o.get("tunnel", {}).get("ok") is True)
-        check("overview rtt ping ok",
-              o.get("rtt_ping", {}).get("ok") is True)
+        lc = o.get("leo_char", {})
+        check("overview carries Leo's own row (get_character)",
+              lc.get("ok") is True and (lc.get("rows") or [[""]])[0][0] == "Leo",
+              json.dumps(lc)[:200])
+        lg = o.get("leo_group", {})
+        members = {r[4] for r in lg.get("rows", [])}
+        check("overview carries Leo's group (get_group_membership)",
+              lg.get("ok") is True
+              and {"Leo", "Ayla", "Gau", "Locke"} <= members,
+              json.dumps(lg)[:200])
+        check("Leo's fixture group is a raid (groupType bit 0x02)",
+              lg.get("ok") is True and (lg.get("rows") or [["0"]])[0][0] in
+              ("2", "6", "3"), str((lg.get("rows") or [["?"]])[0][0]))
+        check("Leo session status is graceful without systemd",
+              isinstance(o.get("leo_active"), bool))
 
-        # --- 3. tunnel feed: send a command, append its reply -----------
+        # --- 3. live chat seam: cursor + correlation ----------------------
         st, sc, _ = http("POST", "http://127.0.0.1:%d/" % tunnel_port,
-                      {"tool": "send_command",
-                       "args": {"bot": "Ayla", "cmd": "who"}})
+                         {"tool": "send_command",
+                          "args": {"bot": "Ayla", "cmd": "who"}})
         check("harness sent a command through chat-tunnel",
               sc.get("ok") is True, json.dumps(sc)[:200])
         cid = sc.get("result", {}).get("correlation_id")
         with open(log, "a") as f:
-            f.write("[Ayla] [whisper]: Ayla here\n")
+            f.write(display_line("[Ayla] [whisper]: Ayla here") + "\n")
             f.flush()
         time.sleep(1.0)
-        st, e, _ = http("GET", base + "/api/events?limit=50")
-        evs = e.get("events", [])
-        sents = [x for x in evs if x["direction"] == "sent"]
-        replies = [x for x in evs if x["direction"] == "reply"]
-        check("feed streams sent events with correlation_id",
-              e.get("ok") is True and sents
-              and all(x.get("correlation_id") for x in sents),
-              json.dumps(e)[:200])
+        st, e1, _ = http("GET", base + "/api/events?after_id=0&limit=200")
+        evs = (e1.get("result") or {}).get("events", [])
+        ids = [x["id"] for x in evs]
+        check("cursor read is ascending + gapless with a last_id",
+              e1.get("ok") is True and ids == sorted(ids)
+              and len(ids) >= 2 and ids[-1] == (e1.get("result") or {}).get("last_id"),
+              json.dumps(e1)[:200])
+        check("feed shows the sent command with its correlation_id",
+              any(x["direction"] == "sent" and x["correlation_id"] == cid
+                  for x in evs), json.dumps(evs)[:200])
         check("feed shows the reply matched to the right command",
-              any(x.get("matched_correlation_id") == cid for x in replies),
-              json.dumps(replies)[:200])
-        st, er, _ = http("GET", base + "/api/events?limit=50&direction=reply")
-        check("feed direction filter works",
-              er.get("ok") is True
-              and all(x["direction"] == "reply" for x in er.get("events", [])))
+              any(x["direction"] == "reply"
+                  and x.get("matched_correlation_id") == cid
+                  for x in evs), json.dumps(evs)[:200])
+        last = (e1.get("result") or {}).get("last_id")
+        t0 = time.time()
+        st, w1, _ = http("GET", base + "/api/events/wait?after_id=%d&timeout=3"
+                         % last)
+        took = time.time() - t0
+        check("wait_for_events long-polls (blocks ~timeout, empty batch)",
+              w1.get("ok") is True and took >= 2.5 and took < 10
+              and not (w1.get("result") or {}).get("events"),
+              "took=%.1fs %s" % (took, json.dumps(w1)[:120]))
 
-        # --- 4. catalogs -------------------------------------------------
+        # --- 4. catalogs + grammar ---------------------------------------
         st, c, _ = http("GET", base + "/api/catalogs")
         db_tools = {r["name"] for r in c.get("db_search", {}).get("rows", [])}
-        rtt_ops = {x["op"] for x in
-                   (c.get("rtt_engine", {}).get("result", {}) or {}).get("ops", [])}
         check("catalogs lists the db-search catalog",
               c.get("db_search", {}).get("ok") is True
               and {"get_online_census", "get_character",
-                   "get_group_membership"} <= db_tools, str(db_tools))
-        check("catalogs lists the rtt-engine op catalog",
-              c.get("rtt_engine", {}).get("ok") is True
-              and {"catalog", "ping", "pinfo"} <= rtt_ops, str(rtt_ops))
+                   "get_group_membership", "get_equipped_gear"} <= db_tools,
+              str(sorted(db_tools)))
+        st, gr, _ = http("GET", base + "/api/grammar")
+        queries = ((gr.get("result") or {}).get("live_reads") or {}).get("queries")
+        check("grammar serves the chat-tunnel grammar (inspect queries)",
+              gr.get("ok") is True and queries and "position" in queries,
+              json.dumps(gr)[:200])
 
         # --- 5. query browser execution ----------------------------------
         st, q, _ = http("POST", base + "/api/query",
-                     {"tool": "get_character", "params": {"toon": "Ayla"}})
+                        {"tool": "get_character", "params": {"toon": "Ayla"}})
         check("query browser runs a catalog read (envelope + caveat)",
               q.get("ok") is True and q.get("tool") == "get_character"
               and q.get("row_count") == 1 and q.get("caveat", "").strip()
               and "queried_at" in q, json.dumps(q)[:200])
         st, bad, _ = http("POST", base + "/api/query",
-                       {"tool": "no_such_tool", "params": {}})
+                          {"tool": "no_such_tool", "params": {}})
         check("db-search refusals propagate (unknown_tool)",
               bad.get("ok") is False
               and bad.get("code") == "unknown_tool", json.dumps(bad)[:200])
         st, inj, _ = http("POST", base + "/api/query",
-                       {"tool": "get_character",
-                        "params": {"toon": "Ayla'; DROP TABLE x; --"}})
+                          {"tool": "get_character",
+                           "params": {"toon": "Ayla'; DROP TABLE x; --"}})
         check("injection-shaped params are refused upstream",
               inj.get("ok") is False and inj.get("code") == "bad_param",
               json.dumps(inj)[:200])
 
-        # --- 6. rtt proxy: read ops only -----------------------------------
-        st, p, _ = http("POST", base + "/api/rtt",
-                     {"op": "pinfo", "name": "Vivi"})
-        check("rtt pinfo answers live fixture position",
-              p.get("ok") is True and p.get("result", {}).get("online") is True
-              and len(p.get("result", {}).get("position", [])) == 3,
-              json.dumps(p)[:200])
-        st, k, _ = http("POST", base + "/api/rtt", {"op": "kick", "name": "Vivi"})
-        check("non-read rtt ops are refused by the GUI itself",
-              k.get("ok") is False and k.get("error", {}).get("code") == "gui_read_only",
-              json.dumps(k)[:200])
-        st, off, _ = http("POST", base + "/api/rtt", {"op": "pinfo", "name": "Cecil"})
-        check("rtt offline fallback is a soft answer, not an error",
-              off.get("ok") is True
-              and off.get("result", {}).get("online") is False,
-              json.dumps(off)[:200])
+        # --- 6. live inspect (the A23 path, through the tunnel) ----------
+        st, lv, _ = http("POST", base + "/api/live",
+                         {"bot": "Ayla", "query": "position"})
+        lv_cid = (lv.get("result") or {}).get("correlation_id")
+        check("live inspect issues a correlated command",
+              lv.get("ok") is True and lv_cid, json.dumps(lv)[:200])
+        with open(log, "a") as f:
+            f.write(display_line(
+                "[System]: Ayla: Ayla position (live): map 1 at "
+                "-8925.06, 133.77, 83.33 in Dun Morogh") + "\n")
+            f.flush()
+        reply = None
+        for _ in range(15):
+            time.sleep(0.5)
+            st, rp, _ = http("GET", base + "/api/reply?cid=%s" % lv_cid)
+            if rp.get("ok") and (rp.get("result") or {}).get("reply"):
+                reply = rp["result"]["reply"]
+                break
+        check("inspect [System] reply is matched back by correlation_id",
+              reply is not None and "position" in (reply or {}).get("command", ""),
+              json.dumps(rp)[:200])
+        st, lvbad, _ = http("POST", base + "/api/live",
+                            {"bot": "Ayla", "query": "kick"})
+        check("non-allowlisted live queries are refused by the GUI",
+              lvbad.get("ok") is False
+              and lvbad.get("error", {}).get("code") == "gui_read_only",
+              json.dumps(lvbad)[:200])
 
-        # --- 7. graceful degradation: all siblings down -------------------
+        # --- 7. the Leo button --------------------------------------------
+        st, ls, _ = http("GET", base + "/api/leo")
+        check("Leo session status endpoint answers",
+              st == 200 and ls.get("ok") is True
+              and isinstance(ls.get("active"), bool), json.dumps(ls)[:120])
+        st, lb, _ = http("POST", base + "/api/leo", {"action": "detonate"})
+        check("Leo button refuses unknown actions",
+              st == 200 and lb.get("ok") is False
+              and lb.get("error", {}).get("code") == "bad_request",
+              json.dumps(lb)[:120])
+        st, lstart, _ = http("POST", base + "/api/leo", {"action": "start"})
+        check("Leo start returns a structured answer (never a 5xx/crash)",
+              st == 200 and isinstance(lstart.get("ok"), bool)
+              and isinstance(lstart.get("active"), bool)
+              and "unit" in lstart, json.dumps(lstart)[:200])
+
+        # --- 8. graceful degradation: both siblings down -------------------
         dead_port = 18767
         dead_base = "http://127.0.0.1:%d" % dead_port
-        procs.append(subprocess.Popen(
-            [sys.executable, os.path.join(HERE, "web_gui.py"), "serve"],
-            env=dict(os.environ, WEBGUI_PORT=str(dead_port),
-                     WEBGUI_TUNNEL="http://127.0.0.1:18999",
-                     WEBGUI_DBSEARCH_SOCK=os.path.join(tmp, "nope-db.sock"),
-                     WEBGUI_RTT_SOCK=os.path.join(tmp, "nope-rtt.sock")),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        procs.append(start_gui(dead_port, "127.0.0.1", {
+            "WEBGUI_TUNNEL": "http://127.0.0.1:18999",
+            "WEBGUI_DBSEARCH_SOCK": os.path.join(tmp, "nope-db.sock")}))
         check("down-siblings web-gui instance came up", wait_port(dead_port))
         st, o2, _ = http("GET", dead_base + "/api/overview")
         check("degraded overview still answers 200 ok",
@@ -315,16 +341,17 @@ def main():
               o2.get("census", {}).get("ok") is False
               and o2.get("census", {}).get("error", {}).get("code") == "unreachable",
               json.dumps(o2.get("census", {}))[:200])
-        check("degraded tunnel + rtt report unreachable",
+        check("degraded tunnel + leo_char + leo_group report unreachable",
               o2.get("tunnel", {}).get("ok") is False
-              and o2.get("rtt_ping", {}).get("ok") is False)
+              and o2.get("leo_char", {}).get("ok") is False
+              and o2.get("leo_group", {}).get("ok") is False)
         st, e2, _ = http("GET", dead_base + "/api/events")
         check("degraded feed reports unreachable",
               e2.get("ok") is False
               and e2.get("error", {}).get("code") == "unreachable",
               json.dumps(e2)[:200])
         st, q2, _ = http("POST", dead_base + "/api/query",
-                      {"tool": "get_character", "params": {"toon": "Ayla"}})
+                         {"tool": "get_character", "params": {"toon": "Ayla"}})
         check("degraded query reports unreachable",
               q2.get("ok") is False
               and q2.get("error", {}).get("code") == "unreachable")
@@ -332,7 +359,7 @@ def main():
         with urllib.request.urlopen(req, timeout=10) as r:
             check("degraded page still serves", r.status == 200)
 
-        # --- 8. bind guard + LAN knob + login ----------------------------
+        # --- 9. bind guard + LAN knob + login ------------------------------
         g = subprocess.run(
             [sys.executable, os.path.join(HERE, "web_gui.py"), "serve"],
             env=dict(os.environ, WEBGUI_PORT="18900", WEB_GUI_BIND="0.0.0.0"),
@@ -345,7 +372,6 @@ def main():
         check("loopback default requires no login",
               st == 200 and h0.get("ok") is True)
 
-        # specific-address bind accepted (loopback /8, login stays off)
         p2 = start_gui(18768, "127.0.0.2")
         procs.append(p2)
         check("specific-address bind accepted (127.0.0.2)",
@@ -354,7 +380,6 @@ def main():
         check("127.0.0.2 serves without a login (loopback /8)",
               st == 200 and h2.get("ok") is True)
 
-        # lan mode: resolves the host's current address (unit, no bind)
         sys.path.insert(0, HERE)
         import web_gui
         lan_addr = web_gui.resolve_lan_addr()
@@ -362,7 +387,6 @@ def main():
               bool(lan_addr) and not web_gui.is_loopback(lan_addr),
               repr(lan_addr))
 
-        # lan mode without a password refuses to start
         g = subprocess.run(
             [sys.executable, os.path.join(HERE, "web_gui.py"), "serve"],
             env=dict(os.environ, WEBGUI_PORT="18901", WEB_GUI_BIND="lan"),
@@ -371,10 +395,6 @@ def main():
               g.returncode != 0 and "WEB_GUI_PASS" in (g.stderr + g.stdout),
               (g.stderr + g.stdout).strip()[:120])
 
-        # lan mode with a password: warning fires before the listener binds.
-        # A dummy socket (bound, never listening) holds the resolved LAN
-        # address + port, so the GUI's bind fails right AFTER the warning -
-        # proving the warning without ever listening on the LAN interface
         blocker = socket.socket()
         blocker.bind((lan_addr, 18903))
         try:
@@ -393,8 +413,6 @@ def main():
         check("warning instance never listened (port collision, exits)",
               g.returncode != 0)
 
-        # login flow, exercised on 127.0.0.2 with WEB_GUI_AUTH=on (loopback,
-        # so the harness itself never touches a non-loopback interface)
         p3 = start_gui(18769, "127.0.0.2",
                        {"WEB_GUI_AUTH": "on", "WEB_GUI_USER": "director",
                         "WEB_GUI_PASS": "sekret"})
@@ -413,7 +431,8 @@ def main():
                           {"user": "director", "pass": "sekret"})
         cookie = (hh.get("Set-Cookie") or "").split(";", 1)[0]
         check("login issues a session cookie",
-              st == 200 and r2.get("ok") is True and cookie.startswith("webgui_session="),
+              st == 200 and r2.get("ok") is True
+              and cookie.startswith("webgui_session="),
               str(hh.get("Set-Cookie"))[:120])
         st, r3, _ = http("GET", authed_base + "/api/overview",
                          headers={"Cookie": cookie})
@@ -426,7 +445,6 @@ def main():
         check("logout invalidates the session",
               r4.get("ok") is True and st == 401)
 
-        # WEB_GUI_AUTH=off is refused on non-loopback binds
         g = subprocess.run(
             [sys.executable, os.path.join(HERE, "web_gui.py"), "serve"],
             env=dict(os.environ, WEBGUI_PORT="18902", WEB_GUI_BIND="lan",

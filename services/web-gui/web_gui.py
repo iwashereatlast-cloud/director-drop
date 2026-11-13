@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""web-gui (service 4 of 4) - read-only Cockpit-style dashboard over services 1-3.
+"""web-gui (service 4 of 4) - read-mostly Cockpit-style dashboard over services 1-3.
 
-Panels (roadmap row 4): a bot status table (db-search census + rtt-engine
-live position, on demand), a live tunnel event/command feed (chat-tunnel
-get_recent_events), and a query catalog browser (db-search + rtt-engine
-catalogs, with read-only execution of catalog queries).
+Panels (roadmap row 4, resynced to the post-rtt-engine stack 2026-11-10):
 
-READ-ONLY by construction: the GUI proxies only the read tools of the three
-sibling services. chat-tunnel's `send_command` is never exposed (command
-sends stay with chat-tunnel callers), and rtt ops are allowlisted to
-{catalog, ping, pinfo} before the request leaves this process.
+- **Leo's chat (live)** - what Leo sees in chat, via chat-tunnel's cursor
+  seam (`get_events_since` + `wait_for_events` long-poll): whispers, guild
+  chat and inspect system replies with their raw display lines, newest at
+  the bottom, no hot-polling.
+- **Bots** - db-search `get_online_census` table with the staleness caveat,
+  Leo's own row on top (db-search `get_character`), group/raid badges from
+  db-search `get_group_membership` (Leo's group auto; any toon on demand),
+  and a **live** button per row that asks chat-tunnel `inspect(bot,
+  "position")` (A23 - the retired rtt-engine's job, now owned by the
+  tunnel).
+- **Query catalog browser** - the db-search catalog, read-only execution
+  with the full envelope (`queried_at`, staleness `caveat`), plus the
+  chat-tunnel grammar (`describe`) as a second, display-only tab.
 
-Local-only HTTP like chat-tunnel: binds 127.0.0.1 (WEBGUI_ADDR must be
-loopback; anything else is refused). Every backend call degrades to a
-per-panel "backend down" state - one sibling being offline never breaks
-the page.
+Write actions (deliberate, minimal): the **Leo session control** -
+`POST /api/leo {"action": "start"|"stop"}` runs `systemctl --user
+start|stop leo.service` (WEBGUI_LEO_UNIT), and `inspect` sends a live
+read command through the tunnel. Everything else is read-only:
+`send_command` is never proxied; the catalog executes only db-search's
+static SELECTs. On a LAN bind all of it sits behind the login screen.
+
+Local-only HTTP like chat-tunnel: binds 127.0.0.1 by default
+(WEB_GUI_BIND - a specific address or `lan`; the wildcard 0.0.0.0 is
+ALWAYS refused). Every backend call degrades to a per-panel "backend
+down" state - one sibling being offline never breaks the page.
 
 Env knobs (all optional):
   WEBGUI_PORT           8766
@@ -25,16 +38,17 @@ Env knobs (all optional):
                         refused. Any non-loopback bind requires a login
                         (WEB_GUI_USER / WEB_GUI_PASS) and prints a prominent
                         startup warning: no TLS - credentials cross the LAN
-                        in cleartext, and the query browser executes real DB
-                        reads. Firewall it; the SSH tunnel is the recommended
-                        default (see README).
+                        in cleartext. Firewall it; the SSH tunnel is the
+                        recommended default (see README).
   WEB_GUI_USER          director   (login user, non-loopback binds only)
   WEB_GUI_PASS          (required for a non-loopback bind; empty = refuse)
   WEB_GUI_AUTH          auto (on for non-loopback binds) | on | off (off is
                         refused on non-loopback binds)
   WEBGUI_TUNNEL         http://127.0.0.1:8765     (chat-tunnel base URL)
   WEBGUI_DBSEARCH_SOCK  /tmp/db-search.sock       (db-search unix socket)
-  WEBGUI_RTT_SOCK       /tmp/rtt-engine.sock     (rtt-engine unix socket)
+  WEBGUI_LEO            Leo        (the shell toon: own table row + group)
+  WEBGUI_LEO_UNIT       leo.service (systemctl --user unit the Leo button
+                        starts/stops)
   WEBGUI_CENSUS         i_was_here  (account prefix for the bot status table)
   WEBGUI_TIMEOUT        15          (seconds, per backend call)
 
@@ -45,6 +59,7 @@ import json
 import os
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -59,7 +74,8 @@ BIND = (os.environ.get("WEB_GUI_BIND") or os.environ.get("WEBGUI_ADDR")
         or "127.0.0.1")
 TUNNEL = os.environ.get("WEBGUI_TUNNEL", "http://127.0.0.1:8765").rstrip("/")
 DB_SOCK = os.environ.get("WEBGUI_DBSEARCH_SOCK", "/tmp/db-search.sock")
-RTT_SOCK = os.environ.get("WEBGUI_RTT_SOCK", "/tmp/rtt-engine.sock")
+LEO = os.environ.get("WEBGUI_LEO", "Leo")
+LEO_UNIT = os.environ.get("WEBGUI_LEO_UNIT", "leo.service")
 CENSUS = os.environ.get("WEBGUI_CENSUS", "i_was_here")
 TIMEOUT = float(os.environ.get("WEBGUI_TIMEOUT", "15"))
 
@@ -68,53 +84,12 @@ AUTH_PASS = os.environ.get("WEB_GUI_PASS", "")
 SESSION_TTL = float(os.environ.get("WEB_GUI_SESSION_TTL", str(12 * 3600)))
 AUTH_MODE = os.environ.get("WEB_GUI_AUTH", "auto").strip().lower()
 
+# chat-tunnel's own INSPECT_QUERIES (A23) - mirrored so a stale GUI fails
+# closed (the tunnel re-validates anyway)
+LIVE_QUERIES = ("state", "position", "tpos", "movement", "target", "hp",
+                "strategy", "action", "values", "travel", "budget")
 
-def is_loopback(addr):
-    return (addr in ("localhost", "::1")
-            or (addr.startswith("127.") and addr != "127.255.255.255"))
-
-
-if AUTH_MODE == "on":
-    AUTH_ENABLED = True
-elif AUTH_MODE == "off":
-    AUTH_ENABLED = False
-else:
-    AUTH_ENABLED = not is_loopback(BIND)
-
-SESSIONS = {}
-SESSIONS_LOCK = threading.Lock()
-COOKIE_NAME = "webgui_session"
-
-
-def new_session():
-    tok = secrets.token_urlsafe(32)
-    with SESSIONS_LOCK:
-        now = time.time()
-        for t in [t for t, exp in SESSIONS.items() if exp <= now]:
-            del SESSIONS[t]
-        SESSIONS[tok] = now + SESSION_TTL
-    return tok
-
-
-def session_valid(tok):
-    with SESSIONS_LOCK:
-        exp = SESSIONS.get(tok)
-    return exp is not None and exp > time.time()
-
-
-def drop_session(tok):
-    with SESSIONS_LOCK:
-        SESSIONS.pop(tok, None)
-
-
-def check_login(user, password):
-    ok_u = hmac.compare_digest(str(user or "").encode(), AUTH_USER.encode())
-    ok_p = hmac.compare_digest(str(password or "").encode(), AUTH_PASS.encode())
-    return ok_u and ok_p and bool(AUTH_PASS)
-
-RTT_READ_OPS = ("catalog", "ping", "pinfo")
-
-INTERFACE = "web-gui/1"
+INTERFACE = "web-gui/2"
 
 
 def _now():
@@ -172,42 +147,61 @@ def unix_call(sock_path, source, req):
         s.close()
 
 
-def _err_code(resp):
-    err = resp.get("error")
-    if isinstance(err, dict):
-        return err.get("code")
-    return resp.get("code")
-
-
 def db_call(tool, params):
     return unix_call(DB_SOCK, "db-search",
                      {"tool": tool, "params": params or {}})
 
 
-def rtt_call(op, name=None):
-    req = {"op": op}
-    if name is not None:
-        req["name"] = name
-    return unix_call(RTT_SOCK, "rtt-engine", req)
+# ------------------------------------------------------------- leo (unit) --
+def leo_active():
+    """systemctl --user is-active, graceful: any error reads as 'down'."""
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-active", LEO_UNIT],
+                           capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and r.stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def leo_action(action):
+    if action not in ("start", "stop"):
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "action must be start|stop, not %r"
+                                     % (action,)}}
+    try:
+        r = subprocess.run(["systemctl", "--user", action, LEO_UNIT],
+                           capture_output=True, text=True, timeout=30)
+        ok = r.returncode == 0
+        return {"ok": ok, "queried_at": _now(), "unit": LEO_UNIT,
+                "action": action, "active": leo_active(),
+                "error": None if ok else {
+                    "code": "leo_error",
+                    "message": (r.stderr or r.stdout or
+                                "systemctl %s %s failed" % (action, LEO_UNIT)
+                                ).strip()[:300]}}
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "queried_at": _now(), "unit": LEO_UNIT,
+                "action": action, "active": False,
+                "error": {"code": "leo_error", "message": str(e)}}
 
 
 # ------------------------------------------------------------- handlers ----
 def api_overview():
     return {"ok": True, "interface": INTERFACE, "queried_at": _now(),
-            "census_prefix": CENSUS,
+            "census_prefix": CENSUS, "leo": LEO, "leo_unit": LEO_UNIT,
+            "leo_active": leo_active(),
             "tunnel": tunnel_health(),
-            "rtt_ping": rtt_call("ping"),
-            "census": db_call("get_online_census", {"account_like": CENSUS})}
+            "leo_char": db_call("get_character", {"toon": LEO}),
+            "leo_group": db_call("get_group_membership", {"toon": LEO}),
+            "census": db_call("get_online_census",
+                              {"account_like": CENSUS})}
 
 
-def api_events(limit, direction):
-    args = {"limit": limit}
-    if direction:
-        args["direction"] = direction
-    resp = tunnel_call("get_recent_events", args)
+def _tunnel_result(resp):
+    """chat-tunnel envelope -> {ok, queried_at, result|error}."""
     if resp.get("ok"):
-        return {"ok": True, "queried_at": _now(),
-                "events": resp["result"]["events"]}
+        return {"ok": True, "queried_at": _now(), "result": resp["result"]}
     if "source" in resp:
         return resp
     return {"ok": False, "queried_at": _now(),
@@ -215,10 +209,42 @@ def api_events(limit, direction):
                       "message": resp.get("error") or "chat-tunnel error"}}
 
 
+def api_events(after_id, limit):
+    return _tunnel_result(tunnel_call("get_events_since",
+                                      {"after_id": after_id, "limit": limit}))
+
+
+def api_events_wait(after_id, timeout, limit):
+    return _tunnel_result(tunnel_call(
+        "wait_for_events", {"after_id": after_id, "timeout": timeout,
+                            "limit": limit}))
+
+
+def api_reply(cid):
+    return _tunnel_result(tunnel_call("get_reply", {"correlation_id": cid}))
+
+
+def api_live(bot, query):
+    if not isinstance(bot, str) or not bot:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "live needs a {\"bot\": ...}"}}
+    if query not in LIVE_QUERIES:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "gui_read_only",
+                          "message": "web-gui live reads allowlist: %s "
+                                     "(anything else routes to the owning "
+                                     "service)" % ", ".join(LIVE_QUERIES)}}
+    return _tunnel_result(tunnel_call("inspect", {"bot": bot, "query": query}))
+
+
+def api_grammar():
+    return _tunnel_result(tunnel_call("describe", {}))
+
+
 def api_catalogs():
     return {"ok": True, "queried_at": _now(),
-            "db_search": db_call("catalog", {}),
-            "rtt_engine": rtt_call("catalog")}
+            "db_search": db_call("catalog", {})}
 
 
 def api_query(tool, params):
@@ -231,20 +257,6 @@ def api_query(tool, params):
                 "error": {"code": "bad_request",
                           "message": "params must be an object"}}
     return db_call(tool, params)
-
-
-def api_rtt(op, name):
-    if op not in RTT_READ_OPS:
-        return {"ok": False, "queried_at": _now(),
-                "error": {"code": "gui_read_only",
-                          "message": "web-gui is read-only: op %r is not one of "
-                                     "%s (writes route to the owning service)"
-                                     % (op, "/".join(RTT_READ_OPS))}}
-    if op == "pinfo" and not (isinstance(name, str) and name):
-        return {"ok": False, "queried_at": _now(),
-                "error": {"code": "bad_request",
-                          "message": "pinfo needs a {\"name\": ...}"}}
-    return rtt_call(op, name)
 
 
 # ------------------------------------------------------------------ page ----
@@ -278,6 +290,7 @@ document.getElementById('f').onsubmit=async(e)=>{
   document.getElementById('e').textContent='login failed';
 };</script>
 </body></html>"""
+
 PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -290,10 +303,11 @@ font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line)}
 header h1{font-size:17px;margin:0}
 header .sub{color:var(--dim);font-size:12px}
-.chips{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+.chips{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap;align-items:center}
 .chip{padding:3px 10px;border-radius:12px;font-size:12px;border:1px solid var(--line);color:var(--dim)}
 .chip.up{color:var(--ok);border-color:var(--ok)}
 .chip.down{color:var(--err);border-color:var(--err)}
+.chip button{margin-left:8px;padding:1px 8px;font-size:11px}
 main{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px 20px;max-width:1500px;margin:0 auto}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;min-width:0}
 .panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:0 0 8px}
@@ -304,10 +318,13 @@ th{color:var(--dim);text-align:left;font-weight:500;border-bottom:1px solid var(
 td{border-bottom:1px solid var(--line);padding:4px 8px;white-space:nowrap}
 tr:last-child td{border-bottom:none}
 .on{color:var(--ok)}.off{color:var(--dim)}
-.badge{display:inline-block;padding:0 6px;border-radius:9px;font-size:11px}
+.badge{display:inline-block;padding:0 6px;border-radius:9px;font-size:11px;margin-right:4px}
 .badge.pending{background:#3a3320;color:var(--warn)}
 .badge.replied{background:#1d3325;color:var(--ok)}
 .badge.timeout{background:#38201f;color:var(--err)}
+.badge.raid{background:#2a2f45;color:#9db4ee}
+.badge.party{background:#1d3325;color:var(--ok)}
+.badge.sys{background:#33302a;color:var(--warn)}
 .dir-sent{color:var(--acc)}.dir-reply{color:var(--ok)}
 #feed{font:var(--mono);max-height:420px;overflow-y:auto}
 #feed .ev{padding:2px 0;border-bottom:1px dotted var(--line);word-break:break-all}
@@ -315,9 +332,10 @@ tr:last-child td{border-bottom:none}
 button{background:var(--acc);color:#fff;border:none;border-radius:5px;padding:3px 9px;font-size:12px;cursor:pointer}
 button:hover{filter:brightness(1.15)}
 button:disabled{background:var(--line);color:var(--dim);cursor:default}
+button.warn{background:var(--warn)}
 select,input{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:3px 7px;font-size:13px}
 pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;overflow:auto;max-height:260px;margin:8px 0 0}
-.cat-cols{display:grid;grid-template-columns:200px 1fr;gap:10px}
+.cat-cols{display:grid;grid-template-columns:220px 1fr;gap:10px}
 .tools{max-height:300px;overflow-y:auto}
 .tools button{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;color:var(--fg);padding:4px 8px;margin:1px 0}
 .tools button.sel{background:var(--bg);border-color:var(--line);color:var(--acc)}
@@ -330,108 +348,161 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
 @media(max-width:1000px){main{grid-template-columns:1fr}}
 </style></head><body>
 <header>
-  <h1>director-drop</h1><span class="sub">read-only web-gui &middot; web-gui/1</span>
-  <div class="chips" id="chips">
+  <h1>director-drop</h1><span class="sub">web-gui/2 &middot; read-mostly</span>
+  <div class="chips">
     <span class="chip" id="chip-tunnel">chat-tunnel ?</span>
     <span class="chip" id="chip-db">db-search ?</span>
-    <span class="chip" id="chip-rtt">rtt-engine ?</span>
+    <span class="chip" id="chip-leo">Leo session ?</span>
     <span class="chip" id="chip-refresh">updated ?</span>
   </div>
 </header>
 <main>
   <section class="panel" id="panel-bots">
-    <h2>Bots &mdash; census (db-search)</h2>
-    <p class="note">DB rows are last-flushed values (A3/A5 staleness); &ldquo;live&rdquo; asks rtt-engine for the current position of an online bot.</p>
+    <h2>Bots &mdash; census + groups (db-search)</h2>
+    <p class="note">DB rows are last-flushed values (A3/A5 staleness). &ldquo;live&rdquo; asks chat-tunnel <code>inspect</code> for the position right now (offline truth is db-search). The group badge is Leo's group; &ldquo;group&rdquo; checks any toon's own party/raid.</p>
     <table id="bots"><thead><tr>
-      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th></th>
+      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th></th>
     </tr></thead><tbody></tbody></table>
     <p class="note" id="bots-note"></p>
   </section>
   <section class="panel" id="panel-feed">
-    <h2>Tunnel feed (chat-tunnel)</h2>
-    <p class="note">sent commands and matched replies, newest first</p>
+    <h2>Leo's chat &mdash; live (chat-tunnel cursor)</h2>
+    <p class="note">whispers, guild chat and inspect system replies exactly as Leo sees them; long-polled, newest at the bottom</p>
     <div id="feed"></div>
   </section>
   <section class="panel" id="panel-catalog">
     <h2>Query catalog browser</h2>
     <div class="tabs">
       <button id="tab-db" class="sel">db-search</button>
-      <button id="tab-rtt">rtt-engine</button>
+      <button id="tab-grammar">tunnel grammar</button>
     </div>
-    <div class="cat-cols">
+    <div class="cat-cols" id="cat-wrap">
       <div class="tools" id="tools"></div>
       <div id="tool-detail"><p class="note">pick a tool</p></div>
     </div>
+    <div id="grammar-wrap" style="display:none"><pre id="grammar-out">...</pre></div>
   </section>
 </main>
 <script>
 const $=(id)=>document.getElementById(id);
-let curTab='db', curTool=null, latestCid=null;
-
-function chip(id, up, txt){const e=$('chip-'+id);e.className='chip '+(up?'up':'down');e.textContent=txt}
+const esc=(s)=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function chip(id, up, txt, btn){const e=$('chip-'+id);e.className='chip '+(up?'up':'down');e.innerHTML=esc(txt)+(btn?' <button class="'+(up?'warn':'')+'" id="btn-'+id+'">'+esc(btn)+'</button>':'')}
 async function jget(u){const r=await fetch(u);return r.json()}
 async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
 
 const CLASSES={1:'Warrior',2:'Paladin',3:'Hunter',4:'Rogue',5:'Priest',6:'Death Knight',7:'Shaman',8:'Mage',9:'Warlock',10:'Monk',11:'Druid'};
-const esc=(s)=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+let overview=null;
 async function loadOverview(){
   let o; try{ o=await jget('/api/overview') }catch(e){ return }
-  const t=o.tunnel||{}, d=o.census||{}, p=o.rtt_ping||{};
+  overview=o;
+  const t=o.tunnel||{}, d=o.census||{};
   chip('tunnel', t.ok===true, 'chat-tunnel '+(t.ok?'up':'down'));
   chip('db', d.ok===true, 'db-search '+(d.ok?'up':'down'));
-  chip('rtt', p.ok===true, 'rtt-engine '+(p.ok?'up':'down'));
+  chip('leo', o.leo_active===true, 'Leo session '+(o.leo_active?'up':'down'),
+       o.leo_active?'stop':'start');
   chip('refresh', true, 'updated '+o.queried_at);
-  const tb=$('bots').querySelector('tbody'); tb.innerHTML='';
-  if(d.ok){
-    for(const r of (d.rows||[])){
-      const tr=document.createElement('tr');
-      tr.innerHTML='<td>'+esc(r[0])+'</td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td><td>'+esc(r[5])+'</td>'
-        +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
-        +'<td><button data-name="'+esc(r[0])+'">live</button></td>';
-      tb.appendChild(tr);
+  const bl=$('btn-leo'); if(bl) bl.onclick=async()=>{
+    bl.disabled=true;
+    await jpost('/api/leo',{action: overview.leo_active?'stop':'start'});
+    setTimeout(loadOverview, 1500);
+  };
+
+  // Leo's group -> badge map (member name -> raid/party + leader)
+  const g=o.leo_group||{}; const gmap={};
+  if(g.ok){
+    for(const r of (g.rows||[])){
+      const type=parseInt(r[0])||0;
+      gmap[r[4]]={kind:(type&2)?'raid':'party', leader:r[3], subgroup:r[8]};
     }
-    $('bots-note').textContent=(d.row_count||0)+' rows - '+d.caveat;
-  } else {
+  }
+  const badge=(name)=>{
+    const m=gmap[name];
+    return m?'<span class="badge '+m.kind+'" title="leader '+esc(m.leader)+', subgroup '+esc(m.subgroup)+'">'+m.kind+'</span>':'';
+  };
+
+  const tb=$('bots').querySelector('tbody'); tb.innerHTML='';
+  const row=(r)=>'<tr><td>'+esc(r[0])+'</td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td><td>'+esc(r[5])+'</td>'
+    +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
+    +'<td>'+badge(r[0])+'</td>'
+    +'<td><button data-name="'+esc(r[0])+'" class="livebtn">live</button> <button data-name="'+esc(r[0])+'" class="grpbtn">group</button></td></tr>';
+  if((o.leo_char||{}).ok && (o.leo_char.rows||[]).length){
+    const c=o.leo_char.rows[0];   // get_character: name,account,level,race,class,map,zone,money,totaltime,online
+    tb.innerHTML=row([c[0],c[1],c[2],c[4],c[5],c[6],c[9],'']);
+  }
+  if(d.ok){
+    for(const r of (d.rows||[])) tb.innerHTML+=row(r);
+    $('bots-note').textContent=(d.row_count||0)+' bot rows - '+d.caveat;
+  } else if(!(o.leo_char||{}).ok) {
     $('bots-note').innerHTML='<span class="err">'+esc((d.error||{}).message||'db-search unreachable')+'</span>';
   }
-  tb.querySelectorAll('button[data-name]').forEach(b=>b.onclick=()=>livePos(b));
+  tb.querySelectorAll('button.livebtn').forEach(b=>b.onclick=()=>livePos(b));
+  tb.querySelectorAll('button.grpbtn').forEach(b=>b.onclick=()=>grpCheck(b));
 }
 
 async function livePos(btn){
   const name=btn.dataset.name, cell=btn.parentElement;
   btn.disabled=true; cell.querySelector('.live')?.remove();
-  const r=await jpost('/api/rtt',{op:'pinfo',name});
+  const r=await jpost('/api/live',{bot:name,query:'position'});
   const s=document.createElement('span'); s.className='live';
-  if(r.ok&&r.result&&r.result.online){
-    const p=r.result.position||[];
-    s.textContent=' '+r.result.zone+' ('+p.map(x=>Math.round(+x||0)).join(', ')+')';
-  } else if(r.ok){
-    s.textContent=' offline - truth is db-search';
-  } else {
-    s.className='err'; s.textContent=' '+((r.error||{}).message||'rtt-engine unreachable');
+  if(!r.ok){ s.className='err'; s.textContent=' '+((r.error||{}).message||'tunnel unreachable'); cell.appendChild(s); btn.disabled=false; return }
+  const cid=(r.result||{}).correlation_id;
+  s.textContent=' asking...'; cell.appendChild(s);
+  for(let i=0;i<12;i++){
+    await new Promise(res=>setTimeout(res,1000));
+    const rr=await jget('/api/reply?cid='+encodeURIComponent(cid));
+    if(rr.ok){
+      const rep=(rr.result||{}).reply;
+      if(rep){ s.textContent=' '+rep.command; btn.disabled=false; return }
+      if((rr.result||{}).sent && rr.result.sent.status!=='pending'){
+        s.textContent=' offline - truth is db-search'; btn.disabled=false; return }
+    }
   }
+  s.textContent=' no reply in window'; btn.disabled=false;
+}
+
+async function grpCheck(btn){
+  const name=btn.dataset.name, cell=btn.parentElement;
+  btn.disabled=true; cell.querySelector('.grp')?.remove();
+  const r=await jpost('/api/query',{tool:'get_group_membership',params:{toon:name}});
+  const s=document.createElement('span'); s.className='live grp';
+  if(r.ok && r.row_count>0){
+    const type=parseInt(r.rows[0][0])||0, kind=(type&2)?'raid':'party';
+    s.innerHTML='<span class="badge '+kind+'">'+kind+'('+r.row_count+')</span> leader '+esc(r.rows[0][3]);
+  } else if(r.ok){ s.textContent=' ungrouped'; }
+  else { s.className='err'; s.textContent=' '+((r.error||{}).message||'db-search unreachable'); }
   cell.appendChild(s); btn.disabled=false;
 }
 
-async function loadFeed(){
-  let e; try{ e=await jget('/api/events?limit=100') }catch(err){ return }
-  const f=$('feed'); f.innerHTML='';
-  if(!e.ok){ f.innerHTML='<p class="err">'+esc((e.error||{}).message||'chat-tunnel unreachable')+'</p>'; return }
-  for(const ev of (e.events||[])){
-    const div=document.createElement('div'); div.className='ev';
-    const stat=ev.direction==='sent'?' <span class="badge '+esc(ev.status)+'">'+esc(ev.status)+'</span>'
-      :(ev.matched_correlation_id?' <span class="badge replied">matched</span>':' <span class="badge timeout">unmatched</span>');
-    div.innerHTML='<span class="dir-'+esc(ev.direction)+'">'+esc(ev.direction)+'</span> '+esc(ev.ts)
-      +' '+esc(ev.sender)+' &rarr; '+esc(ev.target)+stat+' '+esc(ev.command)
-      +(ev.correlation_id?' <span title="correlation_id">['+esc(ev.correlation_id)+']</span>':'')
-      +'<div class="raw">'+esc(ev.raw_line)+'</div>';
-    f.appendChild(div);
-    if(ev.direction==='sent') latestCid=ev.correlation_id;
-  }
-  if(!(e.events||[]).length) f.innerHTML='<p class="note">no tunnel events yet</p>';
+// ---- live feed: chat-tunnel cursor seam (get_events_since + wait_for_events)
+let cursor=0, feedOn=true;
+function addEvent(ev){
+  const f=$('feed');
+  const div=document.createElement('div'); div.className='ev';
+  const ch=ev.channel?' <span class="badge sys">'+esc(ev.channel)+'</span>':'';
+  const stat=ev.direction==='sent'?' <span class="badge '+esc(ev.status)+'">'+esc(ev.status)+'</span>'
+    :(ev.matched_correlation_id?' <span class="badge replied">matched</span>':' <span class="badge timeout">unmatched</span>');
+  div.innerHTML='<span class="dir-'+esc(ev.direction)+'">'+esc(ev.direction)+'</span> '+esc(ev.ts)
+    +' '+esc(ev.sender)+' &rarr; '+esc(ev.target)+stat+ch+' '+esc(ev.command)
+    +(ev.correlation_id?' <span title="correlation_id">['+esc(ev.correlation_id)+']</span>':'')
+    +'<div class="raw">'+esc(ev.raw_line)+'</div>';
+  f.appendChild(div);
+  while(f.children.length>200) f.removeChild(f.firstChild);
+  f.scrollTop=f.scrollHeight;
 }
+async function feedLoop(){
+  let first; try{ first=await jget('/api/events?after_id=0&limit=200') }catch(e){ setTimeout(feedLoop,3000); return }
+  if(first.ok){ for(const ev of (first.result.events||[])) addEvent(ev); cursor=first.result.last_id }
+  else $('feed').innerHTML='<p class="err">'+esc((first.error||{}).message||'chat-tunnel unreachable')+'</p>';
+  while(feedOn){
+    let w; try{ w=await jget('/api/events/wait?after_id='+cursor+'&timeout=20') }catch(e){ await new Promise(r=>setTimeout(r,3000)); continue }
+    if(w.ok){ for(const ev of (w.result.events||[])) addEvent(ev); cursor=w.result.last_id }
+    else if((w.error||{}).code==='unreachable'){ $('feed').innerHTML='<p class="err">'+esc((w.error||{}).message)+'</p>'; await new Promise(r=>setTimeout(r,3000)) }
+  }
+}
+feedLoop();
 
+// ---- catalog browser
 let catalogs=null;
 async function loadCatalogs(){
   try{ catalogs=await jget('/api/catalogs') }catch(e){ return }
@@ -439,43 +510,90 @@ async function loadCatalogs(){
 }
 function renderTools(){
   const list=$('tools'); list.innerHTML='';
-  const cat=curTab==='db'?(catalogs.db_search||{}):(catalogs.rtt_engine||{});
-  let items;
-  if(curTab==='db'){ items=(cat.rows||[]).map(r=>({name:r.name,desc:r.can,params:r.params,caveat:r.caveat})) }
-  else { items=((cat.result&&cat.result.ops)||[]).map(v=>({name:v.op,desc:v.answers||'',params:v.op==='pinfo'?{name:'toon name'}:{},caveat:''})) }
+  const cat=(catalogs.db_search||{});
   if(!cat.ok){ list.innerHTML='<p class="err">'+esc((cat.error||{}).message||'unreachable')+'</p>'; return }
-  for(const it of items){
+  for(const it of (cat.rows||[])){
     const b=document.createElement('button'); b.textContent=it.name;
     if(curTool===it.name) b.className='sel';
     b.onclick=()=>{curTool=it.name; renderTools(); renderDetail(it)};
     list.appendChild(b);
   }
 }
+let curTool=null;
 function renderDetail(it){
   const d=$('tool-detail');
   let form='';
-  const keys=Object.keys(it.params||{});
-  for(const k of keys){
+  for(const k of Object.keys(it.params||{})){
     form+='<label style="display:block;margin:6px 0">'+esc(k)+': <input id="p_'+esc(k)+'" style="width:60%"></label>';
   }
   d.innerHTML='<b style="color:var(--acc)">'+esc(it.name)+'</b>'
-    +'<p class="note">'+esc(it.desc||'')+'</p>'
+    +'<p class="note">'+esc(it.can||'')+'</p>'
+    +(it.cannot?'<p class="note">does NOT answer: '+esc(it.cannot)+'</p>':'')
     +(it.caveat?'<p class="caveat">caveat: '+esc(it.caveat)+'</p>':'')
     +form+'<button id="run">run</button><pre id="out"></pre>';
   $('run').onclick=async()=>{
-    const params={}; for(const k of keys){ const v=$('p_'+k).value; if(v) params[k]=v }
+    const params={}; for(const k of Object.keys(it.params||{})){ const v=$('p_'+k).value; if(v) params[k]=v }
     const out=$('out'); out.textContent='...';
-    const r=curTab==='db'?await jpost('/api/query',{tool:it.name,params})
-      :await jpost('/api/rtt',Object.assign({op:it.name},params));
+    const r=await jpost('/api/query',{tool:it.name,params});
     out.textContent=JSON.stringify(r,null,2);
   };
 }
-$('tab-db').onclick=()=>{curTab='db';curTool=null;$('tab-db').className='sel';$('tab-rtt').className='';renderTools();$('tool-detail').innerHTML='<p class="note">pick a tool</p>'};
-$('tab-rtt').onclick=()=>{curTab='rtt';curTool=null;$('tab-rtt').className='sel';$('tab-db').className='';renderTools();$('tool-detail').innerHTML='<p class="note">pick a tool</p>'};
+async function loadGrammar(){
+  const g=await jget('/api/grammar');
+  $('grammar-out').textContent=g.ok?JSON.stringify(g.result,null,2):JSON.stringify(g,null,2);
+}
+$('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('cat-wrap').style.display='grid';$('grammar-wrap').style.display='none'};
+$('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
 
-async function tick(){ await Promise.all([loadOverview(),loadFeed()]) }
+async function tick(){ await loadOverview() }
 tick(); loadCatalogs(); setInterval(tick,5000);
 </script></body></html>"""
+
+
+# -------------------------------------------------------------- sessions ---
+SESSIONS = {}
+SESSIONS_LOCK = threading.Lock()
+COOKIE_NAME = "webgui_session"
+
+
+def is_loopback(addr):
+    return (addr in ("localhost", "::1")
+            or (addr.startswith("127.") and addr != "127.255.255.255"))
+
+
+if AUTH_MODE == "on":
+    AUTH_ENABLED = True
+elif AUTH_MODE == "off":
+    AUTH_ENABLED = False
+else:
+    AUTH_ENABLED = not is_loopback(BIND)
+
+
+def new_session():
+    tok = secrets.token_urlsafe(32)
+    with SESSIONS_LOCK:
+        now = time.time()
+        for t in [t for t, exp in SESSIONS.items() if exp <= now]:
+            del SESSIONS[t]
+        SESSIONS[tok] = now + SESSION_TTL
+    return tok
+
+
+def session_valid(tok):
+    with SESSIONS_LOCK:
+        exp = SESSIONS.get(tok)
+    return exp is not None and exp > time.time()
+
+
+def drop_session(tok):
+    with SESSIONS_LOCK:
+        SESSIONS.pop(tok, None)
+
+
+def check_login(user, password):
+    ok_u = hmac.compare_digest(str(user or "").encode(), AUTH_USER.encode())
+    ok_p = hmac.compare_digest(str(password or "").encode(), AUTH_PASS.encode())
+    return ok_u and ok_p and bool(AUTH_PASS)
 
 
 # -------------------------------------------------------------- server ----
@@ -517,23 +635,35 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(302, b"", "text/plain",
                            headers=(("Location", "/login"),))
             return
-        if self.path == "/" or self.path.startswith("/index.html"):
+        from urllib.parse import parse_qs, urlparse
+        parsed = urlparse(self.path)
+        q = parse_qs(parsed.query)
+        if parsed.path == "/" or parsed.path.startswith("/index.html"):
             self.reply(200, PAGE.encode(), "text/html; charset=utf-8")
-        elif self.path == "/health":
+        elif parsed.path == "/health":
             self.reply(200, {"ok": True, "service": "web-gui",
                              "interface": INTERFACE, "port": PORT,
                              "tunnel": TUNNEL, "db_search_sock": DB_SOCK,
-                             "rtt_sock": RTT_SOCK, "census_prefix": CENSUS})
-        elif self.path == "/api/overview":
+                             "leo": LEO, "leo_unit": LEO_UNIT,
+                             "census_prefix": CENSUS})
+        elif parsed.path == "/api/overview":
             self.reply(200, api_overview())
-        elif self.path.startswith("/api/events"):
-            from urllib.parse import parse_qs, urlparse
-            q = parse_qs(urlparse(self.path).query)
-            limit = (q.get("limit") or ["50"])[0]
-            direction = (q.get("direction") or [None])[0]
-            self.reply(200, api_events(limit, direction))
-        elif self.path == "/api/catalogs":
+        elif parsed.path == "/api/events":
+            self.reply(200, api_events((q.get("after_id") or ["0"])[0],
+                                      (q.get("limit") or ["200"])[0]))
+        elif parsed.path == "/api/events/wait":
+            self.reply(200, api_events_wait((q.get("after_id") or ["0"])[0],
+                                            (q.get("timeout") or ["20"])[0],
+                                            (q.get("limit") or ["200"])[0]))
+        elif parsed.path == "/api/reply":
+            self.reply(200, api_reply((q.get("cid") or [""])[0]))
+        elif parsed.path == "/api/grammar":
+            self.reply(200, api_grammar())
+        elif parsed.path == "/api/catalogs":
             self.reply(200, api_catalogs())
+        elif parsed.path == "/api/leo":
+            self.reply(200, {"ok": True, "queried_at": _now(),
+                             "unit": LEO_UNIT, "active": leo_active()})
         else:
             self.reply(404, {"ok": False, "error": "no such path"})
 
@@ -546,14 +676,15 @@ class Handler(BaseHTTPRequestHandler):
             if tok:
                 drop_session(tok)
             self.reply(200, {"ok": True},
-                       headers=(("Set-Cookie",
-                                 "%s=deleted; Path=/; Max-Age=0" % COOKIE_NAME),))
+                       headers=((("Set-Cookie",
+                                  "%s=deleted; Path=/; Max-Age=0"
+                                  % COOKIE_NAME)),))
             return
         if AUTH_ENABLED and not self.authed():
             self.reply(401, {"ok": False,
                              "error": "not logged in (POST /login first)"})
             return
-        if self.path not in ("/api/query", "/api/rtt"):
+        if self.path not in ("/api/query", "/api/live", "/api/leo"):
             self.reply(404, {"ok": False, "error": "no such path"})
             return
         try:
@@ -565,8 +696,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/query":
             resp = api_query(req.get("tool"), req.get("params"))
+        elif self.path == "/api/live":
+            resp = api_live(req.get("bot"), req.get("query"))
         else:
-            resp = api_rtt(req.get("op"), req.get("name"))
+            resp = leo_action(req.get("action"))
         self.reply(200, resp)
 
     def do_login(self):
@@ -585,9 +718,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         tok = new_session()
         self.reply(200, {"ok": True},
-                   headers=(("Set-Cookie",
-                             "%s=%s; Path=/; HttpOnly; SameSite=Strict" %
-                             (COOKIE_NAME, tok)),))
+                   headers=((("Set-Cookie",
+                              "%s=%s; Path=/; HttpOnly; SameSite=Strict" %
+                              (COOKIE_NAME, tok))),))
 
 
 def resolve_lan_addr():
@@ -619,15 +752,16 @@ def main():
     if AUTH_ENABLED and not AUTH_PASS:
         sys.exit("web-gui: WEB_GUI_BIND=%s is not loopback and WEB_GUI_PASS "
                  "is not set - the login screen gates the whole GUI (the "
-                 "query browser executes real DB reads); set WEB_GUI_USER / "
-                 "WEB_GUI_PASS, or keep the 127.0.0.1 default and use an SSH "
-                 "tunnel" % BIND)
+                 "query browser executes real DB reads, and the Leo button "
+                 "can stop the session); set WEB_GUI_USER / WEB_GUI_PASS, or "
+                 "keep the 127.0.0.1 default and use an SSH tunnel" % BIND)
     if AUTH_ENABLED:
         warn = ("\n" + "!" * 70 + "\n"
                 "WARNING: web-gui is bound to %s - NOT loopback.\n"
                 "The GUI has no TLS: the login and session cookie cross the \n"
                 "network in CLEARTEXT, and behind the login the query browser \n"
-                "executes REAL DB reads. Anyone who can reach this address and \n"
+                "executes REAL DB reads and the Leo button can stop/start \n"
+                "the world session. Anyone who can reach this address and \n"
                 "guesses the password can read your roster data.\n"
                 "You are responsible for firewalling %s:%d (allow only the \n"
                 "trusted LAN segment). Recommended default: keep 127.0.0.1 and \n"
@@ -636,8 +770,9 @@ def main():
         print(warn, file=sys.stderr)
         print(warn)
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    print("web-gui: http://%s:%d/ (tunnel %s, db-search %s, rtt-engine %s, "
-          "census prefix %r)" % (BIND, PORT, TUNNEL, DB_SOCK, RTT_SOCK, CENSUS))
+    print("web-gui: http://%s:%d/ (tunnel %s, db-search %s, leo %s [%s], "
+          "census prefix %r)" % (BIND, PORT, TUNNEL, DB_SOCK, LEO, LEO_UNIT,
+                                 CENSUS))
     srv.serve_forever()
 
 
