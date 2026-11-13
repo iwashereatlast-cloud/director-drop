@@ -357,6 +357,8 @@ FEWSHOT = [
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is off to Stranglethorn Vale to gather herbs.\", \"queries\": [{\"query\": \"skills\", \"bot\": \"Golbez\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "DB query results (read-only):\nskills: Golbez - herb 300/300, mine 0/1\nGive your final reply now, with orders if any. (Further queries this turn are ignored.)"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is farming herbs in Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"farm Booty Bay\"}]}\n```"},
+    {"role": "user", "content": "have all the bots start leveling"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to their grind cycles.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "make everyone quest in Westfall"},
