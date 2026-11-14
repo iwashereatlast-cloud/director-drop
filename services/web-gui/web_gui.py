@@ -97,8 +97,21 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # The GUI's mission forms: ONLY these order shapes are ever built (the
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
-MISSION_OPS = ("travel", "farm", "walk", "level", "standdown")
+MISSION_OPS = ("travel", "farm", "walk", "state", "standdown")
 MISSION_DEST_OPS = ("travel", "farm", "walk")
+# The bot states, verbatim from lib/botcmd/states.sh (the proven preset path):
+# gather needs Herbalism/Mining and arms the 15-minute gather status;
+# quest is nc-only ('rpg status do quest' was a dead round-trip, PR #34);
+# idle is the stand-down (and releases a farm lease via validate).
+STATE_PRESETS = {
+    "grind": ("nc +new rpg,+grind,-quest,-gather,-follow",),
+    "quest": ("nc +new rpg,+quest,-grind,-gather,-follow",),
+    "gather": ("nc +new rpg,+gather,-grind,-quest,-follow",
+               "rpg status do gather"),
+    "leveling": ("nc +new rpg,+quest,+grind,+gather,-follow",),
+    "follow": ("nc +follow",),
+    "idle": ("nc -new rpg,-grind,-quest,-gather,-follow", "rpg status idle"),
+}
 _DEST_RE = __import__("re").compile(r"^[A-Za-z0-9_' -]{1,40}$")
 
 _DIRECTOR = {"mod": None}
@@ -312,32 +325,41 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "bad_request",
                           "message": "bad toon name %r" % (bot,)}}
-    if op in MISSION_DEST_OPS:
-        if not isinstance(dest, str) or not _DEST_RE.fullmatch(dest.strip()):
-            return {"ok": False, "queried_at": _now(),
-                "error": {"code": "bad_request",
-                          "message": "%s needs a destination name (letters, "
-                                     "digits, spaces, max 40)" % op}}
-        cmd = "%s %s" % (op, dest.strip())
-    elif op == "level":
-        cmd = "nc +new rpg,+grind,-follow"        # the grind cycle (fewshot)
-    else:                                          # standdown
-        cmd = "rpg status idle"                   # releases a farm lease
     try:
         d = _director()
     except Exception as e:
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_unavailable",
                           "message": "the mission engine is not loadable: %s" % e}}
+    if op in MISSION_DEST_OPS:
+        if not isinstance(dest, str) or not _DEST_RE.fullmatch(dest.strip()):
+            return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "%s needs a destination name (letters, "
+                                     "digits, spaces, max 40)" % op}}
+        orders = [{"bot": bot, "cmd": "%s %s" % (op, dest.strip())}]
+    elif op == "state":
+        preset = dest if isinstance(dest, str) else ""
+        if preset not in STATE_PRESETS:
+            return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "state preset must be one of %s"
+                                     % ", ".join(STATE_PRESETS)}}
+        orders = [{"bot": bot, "cmd": c} for c in STATE_PRESETS[preset]]
+    else:                                          # standdown
+        orders = [{"bot": bot, "cmd": "rpg status idle"}]
     try:
-        results = d.submit_orders([{"bot": bot, "cmd": cmd}], master=LEO)
+        results = d.submit_orders(orders, master=LEO)
     except Exception as e:
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_error",
                           "message": "submitting the order failed: %s" % e}}
-    r = results[0] if results else {"status": "failed", "detail": "no result"}
-    return {"ok": r.get("status") in ("started", "sent"),
-            "queried_at": _now(), "result": r}
+    ok = bool(results) and all(r.get("status") in ("started", "sent")
+                               for r in results)
+    return {"ok": ok, "queried_at": _now(),
+            "result": results[0] if results else
+            {"status": "failed", "detail": "no result"},
+            "results": results}
 
 
 # ------------------------------------------------------------------ page ----
@@ -547,9 +569,16 @@ async function openDrawer(name){
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<button id="op-travel" class="warn" disabled>travel there</button>'
     +'<button id="op-farm" class="warn" disabled>farm there</button>'
-    +'<button id="op-level">level (grind cycle)</button>'
     +'<button id="op-standdown">stand down</button>'
     +'<button id="op-close">close</button></div>'
+    +'<p class="note" style="margin:8px 0 2px">states (botcmd presets, verbatim):</p>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
+    +'<button id="op-grind">grind</button>'
+    +'<button id="op-quest">quest</button>'
+    +'<button id="op-gather">gather</button>'
+    +'<button id="op-leveling">leveling</button>'
+    +'<button id="op-follow">follow</button>'
+    +'<button id="op-idle">idle</button></div>'
     +'<p class="note" id="mission-result"></p>';
   function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';$('op-travel').disabled=false;$('op-farm').disabled=false;}
   $('dest-search').onclick=async()=>{
@@ -562,19 +591,21 @@ async function openDrawer(name){
     $('dest-list').innerHTML=(q.ok&&q.rows.length)?q.rows.map(r=>'<button class="destbtn" data-n="'+esc(r[0])+'">'+esc(r[0])+' ('+esc(r[2])+' spawns)</button>').join(' '):'<span class="err">'+esc((q.error||{}).message||'no match')+'</span>';
     $('dest-list').querySelectorAll('.destbtn').forEach(b=>b.onclick=()=>pickDest(b.dataset.n));
   };
-  const confirmable=(btn,op)=>{
+  const confirmable=(btn,op,preset)=>{
     btn.onclick=()=>{
       if(btn.dataset.armed!=='1'){btn.dataset.armed='1';btn.textContent='CONFIRM?';setTimeout(()=>{btn.dataset.armed='0';btn.textContent=btn.dataset.label},2500);return}
       btn.dataset.armed='0';btn.textContent=btn.dataset.label;
-      runMission(op);
+      runMission(op,preset);
     };
   };
-  ['op-travel','op-farm','op-level','op-standdown'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  ['op-travel','op-farm','op-standdown'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   $('op-close').onclick=()=>{d.style.display='none';selToon=null};
-  async function runMission(op){
+  async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
-    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:(op==='level'||op==='standdown')?undefined:selDest});
-    out.innerHTML=r.ok?'<span class="on">'+esc(r.result.status)+': '+esc(r.result.detail)+'</span>':'<span class="err">'+esc((r.error||{}).message||(r.result||{}).detail)+'</span>';
+    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown')?undefined:selDest)});
+    const det=r.ok?((r.results||[]).map(x=>x.status+': '+x.detail).join(' | ')):((r.error||{}).message||(r.result||{}).detail);
+    out.innerHTML=r.ok?'<span class="on">'+esc(det)+'</span>':'<span class="err">'+esc(det)+'</span>';
     setTimeout(loadOverview,1500);
   }
 }
