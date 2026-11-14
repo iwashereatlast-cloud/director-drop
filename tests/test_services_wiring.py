@@ -199,8 +199,8 @@ def main():
         rt = director.run_queries(
             [{"query": "recipes", "bot": "Gau", "text": "have marle learn new skills from her class trainer"}],
             director.census(online_only=False))
-        check("recipes sweep: training loads the wander-npc structure",
-              "RECIPE train" in rt and "rpg status wander npc" in rt
+        check("recipes sweep: training loads the nc-engine structure",
+              "RECIPE train" in rt and "nc +new rpg" in rt
               and "travel <destination>" in rt, rt[:300])
         rm = director.run_queries(
             [{"query": "recipes", "bot": "Gau", "text": "check marle's mail and send me the herbs"}],
@@ -540,7 +540,7 @@ def main():
                     m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
                     if m and m.group(1) == "BootyBay":
                         sim2["x"], sim2["y"] = -14420.0, 480.0
-                    if "/w Ayla rpg status do gather" in line:
+                    if "/w Ayla nc +new rpg,+gather,-follow" in line:
                         farm_state["gathers"] += 1
 
         def farm_replier():
@@ -587,7 +587,7 @@ def main():
               any("arrived at BootyBay and is gathering" in r for r in reported2), reported2)
         check("farm keeper registered the bot",
               director._lease_kind("Ayla") == "farm", director.leases())
-        err = director.validate({"bot": "Ayla", "cmd": "rpg status idle"},
+        err = director.validate({"bot": "Ayla", "cmd": "nc -new rpg,-gather"},
                                 director.census())
         check("stand-down order cancels the keeper",
               err is None and "Ayla" not in director.leases(),
@@ -1056,13 +1056,17 @@ def main():
         err = director.validate({"bot": "Gau", "cmd": "farm Booty Bay"}, bots_c)
         check("invariant: a leased bot refuses new missions with the live verb",
               "already travelling to Ironforge" in str(err), err)
-        err = director.validate({"bot": "Gau", "cmd": "rpg status idle"}, bots_c)
+        err = director.validate({"bot": "Gau", "cmd": "nc -new rpg"}, bots_c)
         check("invariant: stand-down cancels only farm leases",
               "Gau" in director.leases(), director.leases())
         director._release_lease("Gau")
         err = director.validate({"bot": "Gau", "cmd": "travel Booty Bay"}, bots_c)
         check("invariant: a released lease accepts new missions",
               err is None, err)
+        err = director.validate({"bot": "Gau", "cmd": "rpg status do gather"}, bots_c)
+        check("doctrine: 'rpg status' is never sendable (read-only on this "
+              "build; owner 2026-11-12)",
+              "read-only" in str(err) and "nc" in str(err), err)
         return finish()
     finally:
         db_proc.terminate()

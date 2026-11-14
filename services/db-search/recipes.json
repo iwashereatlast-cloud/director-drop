@@ -257,7 +257,7 @@
         "find the destination: query {\"query\":\"mats\",\"bot\":\"<any>\",\"name\":\"<mat>\"} - the answer ranks named locations by nearby spawn density",
         "get the unit there AND keep it gathering: order {\"bot\":\"<name>\",\"cmd\":\"farm <destination>\"} - the system travels it there and keeps the gather status re-armed so it stays put"
       ],
-      "notes": "Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is potential, not a guarantee. The gather status expires after 15 minutes (engine rule) and the system re-arms it - the bot stays in the zone until a stand-down. Narrate as '<bot> is farming <mat> in <destination>'."
+      "notes": "Gathering also levels the unit's profession skill. Nodes are dynamic spawns - the density answer is potential, not a guarantee. The gather STRATEGY (nc +new rpg,+gather,-follow) drives the gathering; the system re-asserts it periodically so the bot stays in the zone until a stand-down. Commands go through nc ONLY; 'rpg status' is read-only on this build. Narrate as '<bot> is farming <mat> in <destination>'."
     },
     {
       "id": "level_in_zone",
@@ -321,12 +321,9 @@
         {
           "cmd": "nc -new rpg,-grind,-gather",
           "note": "strips the task strategies; the bot keeps following its master, which is desired here"
-        },
-        {
-          "cmd": "rpg status idle",
-          "note": "returns the rpg engine to idle"
         }
-      ]
+      ],
+      "notes": "Commands go through nc ONLY (nc ? reads the current strategies, then -x/+y adjusts). 'rpg status' is read-only on this build - never send it as a command."
     },
     {
       "id": "quest_by_name",
@@ -419,9 +416,9 @@
       "when": "the master wants a bot to learn its class/profession skills from trainers",
       "steps": [
         "get the unit to a trainer city: order {\"bot\":\"<name>\",\"cmd\":\"travel <destination>\"} (Stormwind, Ironforge, Darnassus etc. - trainers cluster in cities)",
-        "start the rounds: order {\"bot\":\"<name>\",\"cmd\":\"rpg status wander npc\"} - the ENGINE visits nearby NPCs, and on reaching any trainer it can afford it auto-learns every spell and whispers the results"
+        "ensure the engine rounds are on: order {\"bot\":\"<name>\",\"cmd\":\"nc +new rpg\"} - the ENGINE autonomously visits nearby NPCs, and on reaching any trainer it can afford it auto-learns every spell and whispers the results"
       ],
-      "notes": "The engine picks nearby NPCs at random (trainers included), so a training session may take a few rounds - repeat the wander order if the unit idles before reaching a trainer. Learning is automatic, budget-limited by the unit's money. Results whisper through; confirm learning from the bot's whispers, never from the order alone. Narrate as '<bot> is training in <city>'."
+      "notes": "The engine picks nearby NPCs at random (trainers included), so a training session may take a few rounds. Learning is automatic, budget-limited by the unit's money. Results whisper through; confirm learning from the bot's whispers, never from the order alone. Commands go through nc ONLY (nc ? reads, -x/+y adjusts); 'rpg status' is read-only on this build - never send it as a command. Narrate as '<bot> is training in <city>'."
     },
     {
       "id": "mail",

@@ -940,7 +940,7 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
     """March one bot to (tx, ty) on map tmap. Runs in its own thread and
     reports to the master through the normal whisper path."""
     try:
-        for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
+        for c in ("nc -new rpg,-grind,-gather,-follow",):
             try:
                 send_order(bot, c)
             except Exception:
@@ -1024,7 +1024,7 @@ def _sidestep_probe(bot, pos, tx, ty):
 def _stand_down(bot):
     """Mission prologue: strip the engine's own agendas (follow-cling,
     grind/gather/rpg wander) so the bot obeys the mission alone."""
-    for c in ("nc -new rpg,-grind,-gather,-follow", "rpg status idle"):
+    for c in ("nc -new rpg,-grind,-gather,-follow",):
         try:
             send_order(bot, c)
         except Exception:
@@ -1097,10 +1097,11 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
     goes IDLE and RandomChangeStatus can fly the bot to a random
     level-appropriate destination (RPG_TRAVEL_FLIGHT, weight 15 - a lvl 60
     bot's optimal list is EPL-era zones). The keeper stands the bot down,
-    teleports it to the zone, arms the gather status, and re-arms it every
-    FARM_REFRESH seconds (default 600 < the 15-minute expiry) so it never
-    goes IDLE. A stand-down order (rpg status idle / nc -new rpg...) cancels
-    the keeper via validate()."""
+    teleports it to the zone, arms the GATHER STRATEGY (nc - owner 2026-11-12:
+    'rpg status' is READ-ONLY on this build; commands go through nc only),
+    and re-asserts the strategy line every FARM_REFRESH seconds so the bot
+    stays put. A stand-down order (nc -new rpg...) cancels the keeper via
+    validate()."""
     try:
         _stand_down(bot)
         t0 = time.time()
@@ -1108,7 +1109,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
             say(master, "%s did not arrive at %s - the move did not land; "
                         "whisper me to retry." % (bot, name))
             return
-        for c in ("nc +new rpg,+gather,-follow", "rpg status do gather"):
+        for c in ("nc +new rpg,+gather,-follow",):
             try:
                 send_order(bot, c)
             except Exception as e:
@@ -1124,7 +1125,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                 break
             if FARM_MAX and time.time() - t0 > FARM_MAX:
                 try:
-                    send_order(bot, "rpg status idle")
+                    send_order(bot, "nc -new rpg,-gather,-follow")
                 except Exception:
                     pass
                 say(master, "%s has farmed %s long enough - standing them "
@@ -1132,9 +1133,9 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                             % (bot, name, name))
                 break
             try:
-                send_order(bot, "rpg status do gather")
+                send_order(bot, "nc +new rpg,+gather,-follow")
                 misses = 0
-                print("daemon: farm %s: gather status re-armed" % bot)
+                print("daemon: farm %s: gather strategy re-asserted" % bot)
             except Exception:
                 misses += 1
                 if misses >= 3:
@@ -1684,8 +1685,15 @@ def validate(order, bots):
         order["cmd"] = "carriage %s" % canon
         order["_route"] = (dest, dest, "carriage")
         return None
-    if _lease_kind(bot) == "farm" and (low == "rpg status idle" or
-                                      (low.startswith("nc ") and "-new rpg" in low)):
+    if low.startswith("rpg status"):
+        # owner 2026-11-12: 'rpg status' is READ-ONLY on this build ("it
+        # doesnt work on playerbots AT ALL... its only for looking at what a
+        # bot is doing"); commands go through nc only (nc ? to read, then
+        # -x/+y to adjust). Never sendable as a bot command.
+        return ("SKIP %s: 'rpg status' is read-only on this build; adjust "
+                "strategies with 'nc' instead (nc ? to read, then -x/+y)"
+                % bot)
+    if _lease_kind(bot) == "farm" and low.startswith("nc ") and "-new rpg" in low:
         _release_lease(bot)
         print("daemon: farm keeper for %s cancelled by a stand-down order" % bot)
     if low == "farm" or low.startswith("farm "):
