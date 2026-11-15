@@ -390,6 +390,23 @@ def main():
               and all(r.get("status") == "sent" for r in sga.get("results", [])),
               json.dumps(sga)[:260])
 
+        st, on0, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "online"})
+        check("bring-online refuses a bot that is already online (census)",
+              on0.get("ok") is False
+              and "already online" in on0.get("result", {}).get("detail", ""),
+              json.dumps(on0)[:200])
+        st, on1, _ = http("POST", base + "/api/mission",
+                          {"bot": "Locke", "op": "online"})
+        check("bring-online sends the master command for an offline bot",
+              on1.get("ok") is True and on1.get("result", {}).get("status") == "sent",
+              json.dumps(on1)[:200])
+        st, on2, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "offline"})
+        check("take-offline sends the master command for an online bot",
+              on2.get("ok") is True and on2.get("result", {}).get("status") == "sent",
+              json.dumps(on2)[:200])
+
         st, mt, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "travel", "dest": "BootyBay"})
         check("travel order starts a mission (lease taken)",
