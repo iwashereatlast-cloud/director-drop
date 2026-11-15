@@ -202,6 +202,7 @@ def main():
             "DIRECTOR_DBSEARCH_SOCK": db_sock,
             "DIRECTOR_TUNNEL_URL": "http://127.0.0.1:%d/" % tunnel_port,
             "DIRECTOR_LEASES_FILE": leases_path,
+            "WEBGUI_AUDIT": os.path.join(tmp, "webgui-audit.jsonl"),
         }))
         check("web-gui came up", wait_port(port))
 
@@ -212,9 +213,11 @@ def main():
         check("page serves with the three panels",
               all(x in page for x in
                   ('id="panel-bots"', 'id="panel-feed"', 'id="panel-catalog"')))
-        check("page has the mission drawer markup + column (click target)",
-              'id="mission-drawer"' in page and "<th>mission</th>" in page
-              and "Click a toon's name" in page)
+        check("page has the toon modal + fleet controls + new columns",
+              'id="toon-modal"' in page and "<th>mission</th>" in page
+              and "<th>xp/hr</th>" in page and 'id="panic"' in page
+              and 'id="fleet-online"' in page and 'id="fleet-offline"' in page
+              and 'id="tab-audit"' in page and "Click a toon's name" in page)
 
         # --- 2. overview: census + leo row + leo group + session ---------
         st, o, _ = http("GET", base + "/api/overview")
@@ -488,6 +491,41 @@ def main():
         check("warnings endpoint answers (bag scan, no flags on the fixture)",
               st == 200 and wf.get("ok") is True and wf.get("warnings") == []
               and wf.get("census_ok") is True, json.dumps(wf)[:200])
+
+        # --- 6c2. progress + wallets + audit + fleet actions ----------------
+        check("overview carries leveling progress (xp/hr per toon)",
+              (o.get("progress") or {}).get("ok") is True
+              and any(r[0] == "Ayla" for r in (o.get("progress") or {}).get("rows", [])),
+              json.dumps(o.get("progress"))[:160])
+        check("overview carries wallets (money per toon)",
+              (o.get("wallets") or {}).get("ok") is True
+              and any(r[0] == "Ayla" and r[3] == "5000"
+                      for r in (o.get("wallets") or {}).get("rows", [])),
+              json.dumps(o.get("wallets"))[:160])
+        st, au0, _ = http("GET", base + "/api/audit?limit=100")
+        check("audit log records the GUI's write actions so far",
+              au0.get("ok") is True
+              and any(e.get("action") == "mission" for e in au0.get("entries", [])),
+              json.dumps(au0)[:200])
+        st, fall, _ = http("POST", base + "/api/mission",
+                           {"bot": "ALL", "op": "online"})
+        sent_cmds = [r for r in fall.get("results", []) if r.get("status") == "sent"]
+        check("fleet bring-all-online lands at least one add (skips expected)",
+              fall.get("ok") is True and sent_cmds
+              and all(r["cmd"] == "bot add" for r in sent_cmds),
+              json.dumps(fall)[:200])
+        st, fpd, _ = http("POST", base + "/api/mission",
+                          {"bot": "ALL", "op": "standdown"})
+        check("panic stand-down-all broadcasts the nc stand-down",
+              fpd.get("ok") is True
+              and any("nc -new rpg" in (r.get("detail") or "")
+                      for r in fpd.get("results", []) if r.get("status") == "sent"),
+              json.dumps(fpd)[:200])
+        st, au1, _ = http("GET", base + "/api/audit?limit=100")
+        check("audit log shows the fleet actions too",
+              sum(1 for e in au1.get("entries", [])
+                  if "ALL" in (e.get("detail") or "")) >= 2,
+              json.dumps(au1.get("entries", [])[-2:])[:200])
 
         # --- 6d. vendor run mission (the full-bags action) ----------------
         st, mv, _ = http("POST", base + "/api/mission",
