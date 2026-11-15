@@ -97,7 +97,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # The GUI's mission forms: ONLY these order shapes are ever built (the
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
-MISSION_OPS = ("travel", "farm", "walk", "state", "standdown")
+MISSION_OPS = ("travel", "farm", "walk", "state", "standdown",
+               "online", "offline")
 MISSION_DEST_OPS = ("travel", "farm", "walk")
 # The bot states, verbatim from lib/botcmd/states.sh (the proven preset path):
 # gather needs Herbalism/Mining and arms the 15-minute gather status;
@@ -346,6 +347,11 @@ def api_mission(bot, op, dest):
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
         orders = [{"bot": bot, "cmd": c} for c in STATE_PRESETS[preset]]
+    elif op in ("online", "offline"):
+        # master commands (.playerbots bot add/remove) - validate() checks
+        # the census state itself (refuses add-if-online / remove-if-offline)
+        cmd = "bot add" if op == "online" else "bot remove"
+        orders = [{"bot": bot, "cmd": cmd}]
     else:                                          # standdown
         orders = [{"bot": bot, "cmd": "rpg status idle"}]
     try:
@@ -570,6 +576,8 @@ async function openDrawer(name){
     +'<button id="op-travel" class="warn" disabled>travel there</button>'
     +'<button id="op-farm" class="warn" disabled>farm there</button>'
     +'<button id="op-standdown">stand down</button>'
+    +'<button id="op-online">bring online</button>'
+    +'<button id="op-offline">take offline</button>'
     +'<button id="op-close">close</button></div>'
     +'<p class="note" style="margin:8px 0 2px">states (botcmd presets, verbatim):</p>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
@@ -598,7 +606,7 @@ async function openDrawer(name){
       runMission(op,preset);
     };
   };
-  ['op-travel','op-farm','op-standdown'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  ['op-travel','op-farm','op-standdown','op-online','op-offline'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
   ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   $('op-close').onclick=()=>{d.style.display='none';selToon=null};
   async function runMission(op,preset){
