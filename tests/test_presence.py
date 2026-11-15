@@ -138,5 +138,55 @@ check("loner: Leo himself is never kicked", director._enforce_loner(), [])
 director.validate, director.census = real_validate, real_census
 director.group_members, director.send_order = real_members, real_send
 
+# level patrol (owner 2026-11-13: 'check every few minutes if a toon is
+# offline, bring it online and tell it to level'): the presence thread keeps
+# the fleet online and grinding - two-phase, evidence-based.
+print("== level patrol: fleet stays online and leveling ==")
+sent = []
+real_census, real_execute, real_lease = director.census, director.execute, director._lease_kind
+WORLD = {"Ayla": True, "Golbez": False, "Marle": False, "Leo": True,
+         "Cecil": False}          # Cecil = hand-play, Leo = the master
+
+def fake_census(online_only=True):
+    return {n: {"account": "i_was_cmd" if n == "Leo" else "bots",
+                "online": on}
+            for n, on in WORLD.items() if on or not online_only}
+
+def fake_execute(orders, bots, pace, dry, master=None):
+    for o in orders:
+        sent.append((o["bot"], o["cmd"]))
+        if o["cmd"] == "bot add":
+            WORLD[o["bot"]] = True    # the unit logs in
+    return orders
+
+director.census = fake_census
+director.execute = fake_execute
+director._lease_kind = lambda bot: "farm" if bot == "Marle" else None
+st = {"last_patrol": 0}
+director._patrol(st)
+check("patrol: an offline unit gets bot add (not the grind arm yet)",
+      (("Golbez", "bot add") in sent
+       and ("Golbez", "nc +new rpg,+grind,-follow") not in sent), True)
+check("patrol: a leased unit is left to its mission",
+      not any(b == "Marle" for b, c in sent), True)
+check("patrol: hand-play toons are never touched",
+      not any(b == "Cecil" for b, c in sent), True)
+check("patrol: Leo himself is never touched",
+      not any(b == "Leo" for b, c in sent), True)
+check("patrol: the add is remembered for the arm phase",
+      st["pending_arms"] == {"Golbez"}, True)
+st["last_patrol"] = 0                # force the next round
+director._patrol(st)
+check("patrol: once census confirms online, the grind arm goes out",
+      ("Golbez", "nc +new rpg,+grind,-follow") in sent, True)
+check("patrol: the pending arm is cleared after sending",
+      st["pending_arms"] == set(), True)
+sent2 = list(sent)
+st["last_patrol"] = 0
+director._patrol(st)
+check("patrol: a steady online fleet gets nothing",
+      sent == sent2, True)
+director.census, director.execute, director._lease_kind = real_census, real_execute, real_lease
+
 print("presence heartbeat tests: %s" % ("ALL PASS" if not FAILS else "FAILURES: " + ", ".join(FAILS)))
 sys.exit(1 if FAILS else 0)

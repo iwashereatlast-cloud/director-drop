@@ -2176,6 +2176,8 @@ def _hb_condition(facts, state):
 
 HB_MIN_INTERVAL = 300.0   # a standing alarm re-notifies at most every 5 min
 LONER = int(os.environ.get("DIRECTOR_LONER", "1"))
+PATROL = int(os.environ.get("DIRECTOR_PATROL", "1"))
+PATROL_MINS = float(os.environ.get("DIRECTOR_PATROL_MINS", "3"))
 HB_CONV = []              # heartbeat conversation (system prompt added lazily)
 
 def _hb_system(cfg):
@@ -2246,6 +2248,48 @@ def _hb_turn(facts, cond, cfg):
         sent = execute(bot_orders, census(), 1.0, dry=False)
         print("presence heartbeat: executed %d bot order(s)" % (len(sent) if sent else 0))
 
+def _patrol(state):
+    """Standing policy (owner 2026-11-13: 'check every few minutes if a toon
+    is offline, bring it online and tell it to level'): the fleet stays
+    online and grinding. Evidence-based two-phase - an offline unit gets
+    'bot add' this round; the grind arm goes out only AFTER census confirms
+    the unit is in world (a whisper sent before login lands nowhere). Units
+    with an active mission lease are left alone (their mission owns them),
+    and so are hand-play toons and shell accounts. The grind arm is sent
+    ONLY to units the patrol itself brought online - the rest of the fleet is
+    never touched."""
+    if time.time() - state.get("last_patrol", 0) < PATROL_MINS * 60:
+        return
+    state["last_patrol"] = time.time()
+    try:
+        bots = census(online_only=False)
+    except Exception:
+        return
+    shell_pfx = SHELL_ACCOUNT.lower().rstrip("%")
+    pending = state.setdefault("pending_arms", set())
+    adds, arms = [], []
+    for name, info in sorted(bots.items()):
+        if name.lower() in HANDPLAY or info.get("account", "").lower().startswith(shell_pfx):
+            continue
+        if _lease_kind(name):
+            continue
+        if not info.get("online") and name not in pending:
+            adds.append({"bot": name, "cmd": "bot add"})
+            pending.add(name)
+        elif info.get("online") and name in pending:
+            arms.append({"bot": name, "cmd": "nc +new rpg,+grind,-follow"})
+            pending.discard(name)
+    for o in adds:
+        print("presence: patrol - %s is offline; bringing it online" % o["bot"])
+    for o in arms:
+        print("presence: patrol - %s confirmed online; arming its grind cycle"
+              % o["bot"])
+    if adds:
+        execute(adds, census(online_only=False), 1.0, dry=False)
+    if arms:
+        execute(arms, census(online_only=False), 1.0, dry=False)
+
+
 def _enforce_loner():
     """Standing policy (owner 2026-11-12: 'Leo keeps forgetting to kick bots out
     of his party'): LEO SOLOS - no bot may linger in his group. Every presence
@@ -2288,6 +2332,8 @@ def presence_loop(interval=30.0):
         try:
             if LONER:
                 _enforce_loner()
+            if PATROL:
+                _patrol(state)
             leo, group_on, wanted, svc = _presence_facts(cfg)
             new_errors = max(0, BOTFB_SEQ[0] - state["last_err_seq"])
             if new_errors:
