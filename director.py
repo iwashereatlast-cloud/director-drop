@@ -2176,6 +2176,13 @@ def _hb_condition(facts, state):
 
 HB_MIN_INTERVAL = 300.0   # a standing alarm re-notifies at most every 5 min
 LONER = int(os.environ.get("DIRECTOR_LONER", "1"))
+# The LLM brain is DEAD by default (owner 2026-11-13: 'i think the LLM and
+# Leo are a dead end... lets kill the LLM and move things to the web gui').
+# The web GUI (services/web-gui) drives the mission engine through
+# submit_orders()/leases() - the exact same validate rails; whisper turns
+# and heartbeat LLM turns are gated off here. DIRECTOR_LLM=1 brings the old
+# whisper brain back if it is ever wanted again.
+LLM_ENABLED = int(os.environ.get("DIRECTOR_LLM", "0"))
 HB_CONV = []              # heartbeat conversation (system prompt added lazily)
 
 def _hb_system(cfg):
@@ -2296,7 +2303,11 @@ def presence_loop(interval=30.0):
             cond, changed = _hb_condition(facts, state)
             if cond and (changed or time.time() - last_hb >= HB_MIN_INTERVAL):
                 last_hb = time.time()
-                _hb_turn(facts, cond, cfg)
+                if LLM_ENABLED:
+                    _hb_turn(facts, cond, cfg)
+                else:
+                    print("presence: attention needed (LLM off, logged for "
+                          "the operator): %s" % cond)
         except Exception as e:
             print("presence: poll error: %s" % e)
         time.sleep(interval)
@@ -2495,6 +2506,13 @@ def daemon():
                 if CONFIRM and low in SKIP_WORDS and sender in pending:
                     pending.pop(sender)
                     say(sender, "plan discarded.")
+                    continue
+                if not LLM_ENABLED:
+                    # the brain is retired: orders come through the command
+                    # desk (web GUI). Pasted orders JSON above still executes
+                    # - it never needed the LLM.
+                    say(sender, "I take orders through the command desk "
+                                "(the web panel) now.")
                     continue
                 _run_turn(lambda: _turn(sender, channel, text, convs, pending),
                           sender)
