@@ -2,7 +2,10 @@
 Description=Leo director daemon (LLM brain)
 # the brain never starts before its hands: db-search (facts) and
 # chat-tunnel (sends/replies) come up first, and a restart of the
-# master restarts them too (they carry PartOf=leo-director.service)
+# NOTE (2026-11-15): the services no longer PartOf THIS unit - the
+# stack anchor is web-gui.service now (this daemon is retired as
+# the steering point; PartOf here dragged chat-tunnel/db-search
+# down when the operator disabled the daemon - live outage)
 Requires=db-search.service chat-tunnel.service
 After=network-online.target db-search.service chat-tunnel.service
 
