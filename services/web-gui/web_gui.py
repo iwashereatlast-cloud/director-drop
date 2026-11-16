@@ -77,6 +77,7 @@ DB_SOCK = os.environ.get("WEBGUI_DBSEARCH_SOCK", "/tmp/db-search.sock")
 LEO = os.environ.get("WEBGUI_LEO", "Leo")
 AUDIT = os.environ.get("WEBGUI_AUDIT",
                        os.path.expanduser("~/.webgui-audit.jsonl"))
+POS_POLL = float(os.environ.get("WEBGUI_POS_POLL", "300"))
 LEO_UNIT = os.environ.get("WEBGUI_LEO_UNIT", "leo.service")
 CENSUS = os.environ.get("WEBGUI_CENSUS", "i_was_here")
 TIMEOUT = float(os.environ.get("WEBGUI_TIMEOUT", "15"))
@@ -99,8 +100,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # The GUI's mission forms: ONLY these order shapes are ever built (the
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
-MISSION_OPS = ("travel", "farm", "walk", "vendor", "state", "standdown",
-               "online", "offline")
+MISSION_OPS = ("travel", "farm", "walk", "vendor", "vendor_all", "state",
+               "standdown", "online", "offline", "leave")
 MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
@@ -234,6 +235,73 @@ def leo_action(action):
 
 
 # ------------------------------------------------------------- handlers ----
+# --- live position poller: the zone column's true current location ------
+# The DB's map/zone are last-flushed NUMBERS (A5/A3 staleness); the live
+# truth is chat-tunnel's inspect position reply, which carries the zone
+# NAME in pipes (the same shape director's _live_position parses). A
+# background thread polls each online bot every WEBGUI_POS_POLL seconds
+# (default 300; 0 = off) and caches the latest answer per toon.
+POS_RE = __import__("re").compile(
+    r"([-\d.]+) ([-\d.]+) ([-\d.]+) (\d+) [-\d.]+ \|([^|]*)\|")
+POSITIONS = {}
+POSITIONS_LOCK = threading.Lock()
+
+
+def _pos_probe(bot):
+    """One inspect round-trip -> parsed (x, y, z, map, zone) or None."""
+    r = tunnel_call("inspect", {"bot": bot, "query": "position"})
+    if not r.get("ok"):
+        return None
+    cid = ((r.get("result") or {}).get("correlation_id"))
+    if not cid:
+        return None
+    for _ in range(5):
+        time.sleep(1)
+        rr = tunnel_call("get_reply", {"correlation_id": cid})
+        if not rr.get("ok"):
+            return None
+        rep = (rr.get("result") or {}).get("reply")
+        if rep:
+            m = POS_RE.match((rep.get("command") or "").strip())
+            if m:
+                return (float(m.group(1)), float(m.group(2)),
+                        float(m.group(3)), int(m.group(4)),
+                        m.group(5).strip())
+            return None
+        sent = (rr.get("result") or {}).get("sent") or {}
+        if sent.get("status") == "timeout":
+            return None
+    return None
+
+
+def _position_loop():
+    while True:
+        try:
+            cen = db_call("get_online_census", {"account_like": CENSUS})
+            if cen.get("ok"):
+                for row in cen.get("rows", []):
+                    name = row[0]
+                    if str(row[6]) != "1":
+                        continue
+                    pos = _pos_probe(name)
+                    if pos:
+                        with POSITIONS_LOCK:
+                            POSITIONS[name] = {"x": pos[0], "y": pos[1],
+                                               "map": pos[3],
+                                               "zone": pos[4],
+                                               "ts": time.time()}
+                    time.sleep(1)
+        except Exception:
+            pass
+        time.sleep(max(30.0, POS_POLL))
+
+
+def api_positions():
+    with POSITIONS_LOCK:
+        return {"ok": True, "queried_at": _now(),
+                "positions": {k: dict(v) for k, v in POSITIONS.items()}}
+
+
 def api_overview():
     return {"ok": True, "interface": INTERFACE, "queried_at": _now(),
             "census_prefix": CENSUS, "leo": LEO, "leo_unit": LEO_UNIT,
@@ -243,6 +311,7 @@ def api_overview():
             "leo_group": db_call("get_group_membership", {"toon": LEO}),
             "missions": api_missions(),
             "handplay": api_handplay(),
+            "positions": api_positions(),
             "progress": db_call("get_leveling_progress",
                                 {"account": CENSUS}),
             "wallets": db_call("get_wallets", {"account": CENSUS}),
@@ -430,6 +499,32 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_unavailable",
                           "message": "the mission engine is not loadable: %s" % e}}
+    if op == "vendor_all":
+        # one town, every bags-full toon: the bulk answer to a wall of
+        # bag alarms (each order still walks validate(); leased/offline
+        # bots come back refused per-bot, not fatal)
+        if not isinstance(dest, str) or not _DEST_RE.fullmatch(dest.strip()):
+            return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "vendor_all needs a destination name "
+                                     "(a town with vendors)"}}
+        flagged = [w["toon"] for w in api_warnings().get("warnings", [])
+                   if w.get("kind") == "bags_full"]
+        if not flagged:
+            return {"ok": True, "queried_at": _now(), "results": [],
+                    "note": "no bags-full toons right now"}
+        orders = [{"bot": t, "cmd": "vendor %s" % dest.strip()}
+                  for t in flagged]
+        results = d.submit_orders(orders, master=LEO)
+        ok = any(r.get("status") in ("started", "sent") for r in results)
+        _audit("mission", "ALL vendor_all %s -> %s"
+               % (dest, "; ".join("%s:%s" % (r.get("status"),
+                                             (r.get("detail") or "")[:80])
+                                  for r in results)))
+        return {"ok": ok, "queried_at": _now(),
+                "result": results[0] if results else
+                {"status": "failed", "detail": "no result"},
+                "results": results}
     if op in MISSION_DEST_OPS:
         if not isinstance(dest, str) or not _DEST_RE.fullmatch(dest.strip()):
             return {"ok": False, "queried_at": _now(),
@@ -445,6 +540,11 @@ def api_mission(bot, op, dest):
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
         orders = [{"bot": bot, "cmd": c} for c in STATE_PRESETS[preset]]
+    elif op == "leave":
+        # the plain 'leave' whisper (LeaveGroupAction - the whitelisted,
+        # no-GM-needed way a bot drops its party/raid; validate() checks
+        # census/whitelist as always)
+        orders = [{"bot": bot, "cmd": "leave"}]
     elif op in ("online", "offline"):
         # master commands (.playerbots bot add/remove) - validate() checks
         # the census state itself (refuses add-if-online / remove-if-offline)
@@ -666,7 +766,14 @@ async function loadOverview(){
   if(!m) return '<span class="off">&mdash;</span>';
   return '<span class="badge '+(m.kind==='farm'?'raid':'party')+'" title="pid '+esc(m.pid)+'">'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</span>';
 };
-const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'+esc(r[0])+'</a></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td><td>'+esc(r[5])+'</td>'
+function zoneCell(name, zoneId){
+  const p=(((overview.positions||{}).positions)||{})[name];
+  if(p && p.zone && (Date.now()/1000 - p.ts) < 1800){
+    return '<td class="on" title="live position: '+esc(p.x.toFixed(1)+', '+p.y.toFixed(1))+' (map '+esc(p.map)+')">'+esc(p.zone)+'</td>';
+  }
+  return '<td>'+esc(zoneId)+'</td>';
+}
+const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'+esc(r[0])+'</a></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td>'+zoneCell(r[0], r[5])+'</td>'
     +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
     +'<td>'+badge(r[0])+'</td><td>'+mbadge(r[0])+'</td>'
     +'<td>'+esc(xphr(r[0])!==null?Math.round(xphr(r[0])):'')+'</td>'
@@ -703,7 +810,8 @@ async function openModal(name){
     +'<div id="handplay-row" style="margin:6px 0"></div>'
     +'<div class="sect"><b>existence</b>'
     +'<button id="op-online">bring online</button> '
-    +'<button id="op-offline">take offline</button></div>'
+    +'<button id="op-offline">take offline</button> '
+    +'<button id="op-leave">leave party</button></div>'
     +'<div class="sect"><b>missions (destination required)</b>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px">'
     +'<input id="dest-in" placeholder="destination (game_tele), e.g. BootyBay" style="width:240px">'
@@ -760,13 +868,13 @@ async function openModal(name){
       runMission(op,preset);
     };
   };
-  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline']
+  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline','op-leave']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
   ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
-    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline')?undefined:selDest)});
+    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline'||op==='leave')?undefined:selDest)});
     const det=r.ok?((r.results||[]).map(x=>x.status+': '+x.detail).join(' | ')):((r.error||{}).message||(r.result||{}).detail);
     out.innerHTML=r.ok?'<span class="on">'+esc((r.results||[]).length+' order(s): '+det)+'</span>':'<span class="err">'+esc(det)+'</span>';
     setTimeout(loadOverview,1500);
@@ -915,8 +1023,19 @@ async function loadWarnings(){
   let w; try{ w=await jget('/api/warnings') }catch(e){ return }
   const el=$('warnings');
   if(!w.ok || !w.warnings.length){ el.innerHTML=''; return }
+  const full=w.warnings.filter(x=>x.kind==='bags_full');
   el.innerHTML='<p class="note" style="margin:2px 0">&#9888; '+w.warnings.map(x=>
-    '<span class="badge '+(x.kind==='bags_full'?'timeout':'pending')+'" title="'+esc(x.detail)+'">'+esc(x.toon)+': '+esc(x.kind==='bags_full'?'bags FULL - vendor run':'bags nearly full')+'</span>').join(' ')+'</p>';
+    '<a href="#" class="warnchip" data-n="'+esc(x.toon)+'"><span class="badge '+(x.kind==='bags_full'?'timeout':'pending')+'" title="'+esc(x.detail)+'">'+esc(x.toon)+': '+esc(x.kind==='bags_full'?'bags FULL - vendor run':'bags nearly full')+'</span></a>').join(' ')
+    +(full.length?' <input id="vendorall-town" placeholder="town, e.g. Stormwind" style="width:160px"><button id="vendorall-btn" class="warn">vendor run all '+full.length+'</button>':'')+'</p>';
+  el.querySelectorAll('a.warnchip').forEach(a=>a.onclick=(e)=>{e.preventDefault();openModal(a.dataset.n)});
+  const vb=$('vendorall-btn');
+  if(vb){vb.dataset.label=vb.textContent;vb.onclick=async()=>{
+    if(vb.dataset.armed!=='1'){vb.dataset.armed='1';vb.textContent='CONFIRM?';setTimeout(()=>{vb.dataset.armed='0';vb.textContent=vb.dataset.label},3000);return}
+    vb.dataset.armed='0';vb.textContent=vb.dataset.label;vb.disabled=true;
+    await jpost('/api/mission',{bot:'ALL',op:'vendor_all',dest:$('vendorall-town').value});
+    vb.disabled=false;
+    setTimeout(loadOverview,1500); setTimeout(loadWarnings,2000);
+  };}
 }
 async function tick(){ await loadOverview() }
 tick(); loadCatalogs(); loadWarnings();
@@ -1156,6 +1275,8 @@ def main():
                 + "!" * 70 + "\n") % (BIND, BIND, PORT)
         print(warn, file=sys.stderr)
         print(warn)
+    if POS_POLL > 0:
+        threading.Thread(target=_position_loop, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print("web-gui: http://%s:%d/ (tunnel %s, db-search %s, leo %s [%s], "
           "census prefix %r)" % (BIND, PORT, TUNNEL, DB_SOCK, LEO, LEO_UNIT,

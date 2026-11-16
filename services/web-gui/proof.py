@@ -203,8 +203,27 @@ def main():
             "DIRECTOR_TUNNEL_URL": "http://127.0.0.1:%d/" % tunnel_port,
             "DIRECTOR_LEASES_FILE": leases_path,
             "WEBGUI_AUDIT": os.path.join(tmp, "webgui-audit.jsonl"),
+            "WEBGUI_POS_POLL": "3600",   # one cycle at startup, then quiet
         }))
         check("web-gui came up", wait_port(port))
+
+        # --- the live position poller's first cycle (zone names) ----------
+        # it inspects every online census bot at startup; feed each probe
+        # the [System] position reply (zone name in pipes) and the overview
+        # should carry real zone names for the table's zone column
+        arm_arrival_reply(base, "Ayla", log)
+        arm_arrival_reply(base, "Gau", log)
+        pos_ok = False
+        for _ in range(40):
+            time.sleep(1)
+            st, po, _ = http("GET", base + "/api/overview")
+            pz = (po.get("positions") or {}).get("positions", {})
+            if pz.get("Ayla", {}).get("zone") == "Stranglethorn Vale" \
+                    and pz.get("Gau", {}).get("zone") == "Stranglethorn Vale":
+                pos_ok = True
+                break
+        check("live position poller fills zone names (not zone numbers)",
+              pos_ok, json.dumps(po.get("positions"))[:200])
 
         # --- 1. dashboard page ------------------------------------------
         req = urllib.request.Request(base + "/")
@@ -469,6 +488,15 @@ def main():
               and mdp.get("result", {}).get("status") == "started",
               json.dumps(mdp)[:200])
 
+        # --- 6b1. leave party (the whitelisted no-GM whisper) ------------
+        st, lv2, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "leave"})
+        check("leave party sends the whitelisted 'leave' whisper",
+              lv2.get("ok") is True
+              and lv2.get("result", {}).get("status") == "sent"
+              and "/w Ayla leave" in lv2.get("result", {}).get("detail", ""),
+              json.dumps(lv2)[:200])
+
         # --- 6b2. the hand-play lock is a live toggle ----------------------
         st, hl, _ = http("POST", base + "/api/handplay",
                          {"toon": "Gau", "on": True})
@@ -571,6 +599,21 @@ def main():
               sum(1 for e in au1.get("entries", [])
                   if "ALL" in (e.get("detail") or "")) >= 2,
               json.dumps(au1.get("entries", [])[-2:])[:200])
+
+        # --- 6c3. vendor_all: the bulk bag-alarm answer ------------------
+        st, va0, _ = http("POST", base + "/api/mission",
+                          {"bot": "ALL", "op": "vendor_all"})
+        check("vendor_all without a town is refused",
+              va0.get("ok") is False
+              and va0.get("error", {}).get("code") == "bad_request",
+              json.dumps(va0)[:160])
+        st, va1, _ = http("POST", base + "/api/mission",
+                          {"bot": "ALL", "op": "vendor_all",
+                           "dest": "BootyBay"})
+        check("vendor_all with no bags-full toons is a clean no-op",
+              va1.get("ok") is True and va1.get("results") == []
+              and "no bags-full" in va1.get("note", ""),
+              json.dumps(va1)[:160])
 
         # --- 6d. vendor run mission (the full-bags action) ----------------
         st, mv, _ = http("POST", base + "/api/mission",
