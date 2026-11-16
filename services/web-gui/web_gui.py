@@ -406,6 +406,7 @@ def api_warnings():
     census = db_call("get_online_census", {"account_like": CENSUS})
     out = []
     scan_errors = []
+    BAGS = {}
     if census.get("ok"):
         for r in census.get("rows", []):
             name = r[0]
@@ -426,6 +427,7 @@ def api_warnings():
                     cap, used, free = (int(float(x)) for x in bag["rows"][0])
                 except (ValueError, IndexError):
                     continue
+                BAGS[name] = {"cap": cap, "used": used, "free": free}
                 if free <= 0:
                     out.append({"toon": name, "kind": "bags_full",
                                 "detail": "0/%d bag slots free - needs a "
@@ -435,7 +437,7 @@ def api_warnings():
                                 "detail": "%d/%d bag slots free" % (free, cap)})
     return {"ok": True, "queried_at": _now(), "warnings": out,
             "scan_errors": scan_errors,
-            "census_ok": census.get("ok") is True}
+            "bags": BAGS, "census_ok": census.get("ok") is True}
 
 
 def api_audit(limit):
@@ -701,7 +703,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     <h2>Bots &mdash; census + groups + missions</h2>
     <p class="note">DB rows are last-flushed values (A3/A5 staleness). &ldquo;live&rdquo; asks chat-tunnel <code>inspect</code> for the position right now (offline truth is db-search). The group badge is Leo's group; &ldquo;group&rdquo; checks any toon's own party/raid. <b>Click a toon's name to give them a mission.</b></p>
     <table id="bots"><thead><tr>
-      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th>mission</th><th>xp/hr</th><th></th>
+      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th>mission</th><th>xp/hr</th><th>bags</th><th></th>
     </tr></thead><tbody></tbody></table>
     <div id="warnings" style="margin:6px 0"></div>
     <div id="toon-modal" class="modal" style="display:none"><div class="box" id="toon-modal-box"></div></div>
@@ -779,6 +781,13 @@ async function loadOverview(){
   if(!m) return '<span class="off">&mdash;</span>';
   return '<span class="badge '+(m.kind==='farm'?'raid':'party')+'" title="pid '+esc(m.pid)+'">'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</span>';
 };
+let bagsData={};
+function bagsCell(name){
+  const b=bagsData[name];
+  if(!b) return '<td class="off">?</td>';
+  const cls=(b.free<=0)?'timeout':(b.free<=2)?'pending':'on';
+  return '<td class="'+cls+'" title="capacity '+b.cap+' - used '+b.used+'">'+b.free+'/'+b.cap+'</td>';
+}
 function zoneCell(name, zoneId){
   const p=(((overview.positions||{}).positions)||{})[name];
   if(p && p.zone && (Date.now()/1000 - p.ts) < 1800){
@@ -790,6 +799,7 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
     +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
     +'<td>'+badge(r[0])+'</td><td>'+mbadge(r[0])+'</td>'
     +'<td>'+esc(xphr(r[0])!==null?Math.round(xphr(r[0])):'')+'</td>'
+    +bagsCell(r[0])
     +'<td><button data-name="'+esc(r[0])+'" class="livebtn">live</button> <button data-name="'+esc(r[0])+'" class="grpbtn">group</button></td></tr>';
   if((o.leo_char||{}).ok && (o.leo_char.rows||[]).length){
     const c=o.leo_char.rows[0];   // get_character: name,account,level,race,class,map,zone,money,totaltime,online
@@ -1034,6 +1044,7 @@ $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className=
 
 async function loadWarnings(){
   let w; try{ w=await jget('/api/warnings') }catch(e){ return }
+  bagsData=w.bags||{};
   const el=$('warnings');
   if(!w.ok || !w.warnings.length){ el.innerHTML=''; return }
   const full=w.warnings.filter(x=>x.kind==='bags_full');

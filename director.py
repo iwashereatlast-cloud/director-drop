@@ -1168,13 +1168,35 @@ def _vendor_mission(bot, tx, ty, tmap, name, master):
             say(master, "%s did not arrive at %s - the vendor run did not "
                         "land; whisper me to retry." % (bot, name))
             return
+        sold = None
         try:
-            send_order(bot, "s vendor")
+            res = send_order(bot, "s vendor")
+            # the sell is no longer fire-and-forget: correlate the bot's
+            # answer (live 2026-11-16: bots stood at the tele point not
+            # selling and the operator had NO evidence why - the reply is)
+            cid = (res or {}).get("correlation_id")
+            if cid:
+                for _ in range(5):
+                    time.sleep(2)
+                    got = tunnel("get_reply", correlation_id=cid)
+                    if got.get("reply"):
+                        sold = str(got["reply"].get("command") or "").strip()
+                        break
+                    if (got.get("sent") or {}).get("status") == "timeout":
+                        break
         except Exception as e:
             print("daemon: vendor sell failed for %s: %s" % (bot, e))
-        say(master, "%s is at %s and selling to the vendor." % (bot, name))
-        print("daemon: vendor %s -> %s: sold (%.0fs)"
-              % (bot, name, time.time() - t0))
+        if sold:
+            say(master, "%s sold at %s - the vendor answered: %s"
+                % (bot, name, sold[:140]))
+            print("daemon: vendor %s -> %s: sold (%.0fs)"
+                  % (bot, name, time.time() - t0))
+        else:
+            say(master, "%s did NOT sell at %s - no answer to the sell "
+                        "command; the spot may have no vendor in range. "
+                        "Whisper the bot directly to check." % (bot, name))
+            print("daemon: vendor %s -> %s: NO SELL EVIDENCE (%.0fs)"
+                  % (bot, name, time.time() - t0))
     except Exception as e:
         try:
             say(master, "the vendor run of %s to %s failed: %s" % (bot, name, e))
