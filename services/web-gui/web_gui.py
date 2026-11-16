@@ -405,10 +405,22 @@ def api_warnings():
     flagged for minutes (documented staleness, not an error)."""
     census = db_call("get_online_census", {"account_like": CENSUS})
     out = []
+    scan_errors = []
     if census.get("ok"):
         for r in census.get("rows", []):
             name = r[0]
             bag = db_call("get_bag_space", {"toon": name})
+            if not bag.get("ok"):
+                # NEVER silent: a toon whose bags cannot be read (scope
+                # gate, grant, flush error) is reported, not skipped - a
+                # missing alarm must be visible, not a mystery
+                scan_errors.append({"toon": name,
+                                    "code": (bag.get("error") or {}).get("code")
+                                    or (bag.get("code") or "error"),
+                                    "message": ((bag.get("error") or {})
+                                                .get("message")
+                                                or "bag scan failed")})
+                continue
             if bag.get("ok") and bag.get("rows"):
                 try:
                     cap, used, free = (int(float(x)) for x in bag["rows"][0])
@@ -422,6 +434,7 @@ def api_warnings():
                     out.append({"toon": name, "kind": "bags_tight",
                                 "detail": "%d/%d bag slots free" % (free, cap)})
     return {"ok": True, "queried_at": _now(), "warnings": out,
+            "scan_errors": scan_errors,
             "census_ok": census.get("ok") is True}
 
 
@@ -1024,7 +1037,10 @@ async function loadWarnings(){
   const el=$('warnings');
   if(!w.ok || !w.warnings.length){ el.innerHTML=''; return }
   const full=w.warnings.filter(x=>x.kind==='bags_full');
-  el.innerHTML='<p class="note" style="margin:2px 0">&#9888; '+w.warnings.map(x=>
+  const errs=(w.scan_errors||[]).map(x=>
+    '<a href="#" class="warnchip" data-n="'+esc(x.toon)+'"><span class="badge pending" title="'+esc(x.message)+'">'+esc(x.toon)+': bag scan FAILED ('+esc(x.code)+')</span></a>').join(' ');
+  const errrow=errs?'<p class="note" style="margin:2px 0" title="these toons can never raise a bag alarm until the scan works">&#9888; '+errs+'</p>':'';
+  el.innerHTML=errrow+'<p class="note" style="margin:2px 0">&#9888; '+w.warnings.map(x=>
     '<a href="#" class="warnchip" data-n="'+esc(x.toon)+'"><span class="badge '+(x.kind==='bags_full'?'timeout':'pending')+'" title="'+esc(x.detail)+'">'+esc(x.toon)+': '+esc(x.kind==='bags_full'?'bags FULL - vendor run':'bags nearly full')+'</span></a>').join(' ')
     +(full.length?' <input id="vendorall-town" placeholder="town, e.g. Stormwind" style="width:160px"><button id="vendorall-btn" class="warn">vendor run all '+full.length+'</button>':'')+'</p>';
   el.querySelectorAll('a.warnchip').forEach(a=>a.onclick=(e)=>{e.preventDefault();openModal(a.dataset.n)});

@@ -563,6 +563,7 @@ def main():
         st, wf, _ = http("GET", base + "/api/warnings")
         check("warnings endpoint answers (bag scan, no flags on the fixture)",
               st == 200 and wf.get("ok") is True and wf.get("warnings") == []
+              and wf.get("scan_errors") == []
               and wf.get("census_ok") is True, json.dumps(wf)[:200])
 
         # --- 6c2. progress + wallets + audit + fleet actions ----------------
