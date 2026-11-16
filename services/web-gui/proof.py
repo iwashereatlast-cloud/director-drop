@@ -469,6 +469,34 @@ def main():
               and mdp.get("result", {}).get("status") == "started",
               json.dumps(mdp)[:200])
 
+        # --- 6b2. the hand-play lock is a live toggle ----------------------
+        st, hl, _ = http("POST", base + "/api/handplay",
+                         {"toon": "Gau", "on": True})
+        check("hand-play lock engages via the API",
+              hl.get("ok") is True and "gau" in hl.get("handplay_list", []),
+              json.dumps(hl)[:160])
+        st, hr, _ = http("POST", base + "/api/mission",
+                         {"bot": "Gau", "op": "state", "dest": "grind"})
+        check("a locked hand-play toon refuses orders (the director rail)",
+              hr.get("ok") is False
+              and "hand-play toon" in hr.get("result", {}).get("detail", ""),
+              json.dumps(hr)[:200])
+        st, hu, _ = http("POST", base + "/api/handplay",
+                         {"toon": "Gau", "on": False})
+        check("hand-play lock releases via the API",
+              hu.get("ok") is True and "gau" not in hu.get("handplay_list", []),
+              json.dumps(hu)[:160])
+        st, hg, _ = http("POST", base + "/api/mission",
+                         {"bot": "Gau", "op": "state", "dest": "grind"})
+        check("an unlocked toon takes orders again",
+              hg.get("ok") is True
+              and hg.get("result", {}).get("status") == "sent",
+              json.dumps(hg)[:200])
+        st, hau, _ = http("GET", base + "/api/audit?limit=200")
+        check("hand-play toggles are audited",
+              any(e.get("action") == "handplay" for e in hau.get("entries", [])),
+              json.dumps(hau.get("entries", [])[-2:])[:160])
+
         st, mf, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})
         check("farm order starts the gather keeper",
