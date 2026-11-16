@@ -75,6 +75,8 @@ BIND = (os.environ.get("WEB_GUI_BIND") or os.environ.get("WEBGUI_ADDR")
 TUNNEL = os.environ.get("WEBGUI_TUNNEL", "http://127.0.0.1:8765").rstrip("/")
 DB_SOCK = os.environ.get("WEBGUI_DBSEARCH_SOCK", "/tmp/db-search.sock")
 LEO = os.environ.get("WEBGUI_LEO", "Leo")
+AUDIT = os.environ.get("WEBGUI_AUDIT",
+                       os.path.expanduser("~/.webgui-audit.jsonl"))
 LEO_UNIT = os.environ.get("WEBGUI_LEO_UNIT", "leo.service")
 CENSUS = os.environ.get("WEBGUI_CENSUS", "i_was_here")
 TIMEOUT = float(os.environ.get("WEBGUI_TIMEOUT", "15"))
@@ -128,6 +130,17 @@ def _director():
 
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _audit(action, detail):
+    """Every GUI write action, appended - the operator's own trail now that
+    the GUI is the steering point. Never blocks the action on failure."""
+    try:
+        with open(AUDIT, "a") as f:
+            f.write(json.dumps({"ts": _now(), "action": action,
+                                "detail": detail}) + "\n")
+    except OSError:
+        pass
 
 
 def _unreachable(source, e):
@@ -229,6 +242,9 @@ def api_overview():
             "leo_char": db_call("get_character", {"toon": LEO}),
             "leo_group": db_call("get_group_membership", {"toon": LEO}),
             "missions": api_missions(),
+            "progress": db_call("get_leveling_progress",
+                                {"account": CENSUS}),
+            "wallets": db_call("get_wallets", {"account": CENSUS}),
             "census": db_call("get_online_census",
                               {"account_like": CENSUS})}
 
@@ -339,6 +355,26 @@ def api_warnings():
             "census_ok": census.get("ok") is True}
 
 
+def api_audit(limit):
+    """The GUI's own write-action trail (see _audit)."""
+    try:
+        n = max(1, min(int(limit or 50), 500))
+    except (TypeError, ValueError):
+        n = 50
+    try:
+        with open(AUDIT) as f:
+            lines = f.readlines()[-n:]
+    except OSError:
+        lines = []
+    out = []
+    for ln in reversed(lines):
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            continue
+    return {"ok": True, "queried_at": _now(), "entries": out}
+
+
 def api_mission(bot, op, dest):
     """Submit ONE mission order through director's rails (submit_orders).
     The GUI only builds the five templated shapes; validate() re-checks
@@ -386,8 +422,15 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_error",
                           "message": "submitting the order failed: %s" % e}}
-    ok = bool(results) and all(r.get("status") in ("started", "sent")
-                               for r in results)
+    all_ok = bool(results) and all(r.get("status") in ("started", "sent")
+                                   for r in results)
+    any_ok = any(r.get("status") in ("started", "sent") for r in results)
+    # a fleet order (bot=ALL) is ok if ANY landed (per-bot skips like
+    # already-online are expected in a broadcast)
+    ok = all_ok if bot != "ALL" else any_ok
+    _audit("mission", "%s %s %s -> %s" % (bot, op, dest or "",
+           "; ".join("%s:%s" % (r.get("status"), (r.get("detail") or "")[:80])
+                     for r in results)))
     return {"ok": ok, "queried_at": _now(),
             "result": results[0] if results else
             {"status": "failed", "detail": "no result"},
@@ -481,6 +524,15 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
 .tabs button.sel{color:var(--acc);border-color:var(--acc)}
 .live{color:var(--acc);font-size:12px}
 @media(max-width:1000px){main{grid-template-columns:1fr}}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;
+align-items:center;justify-content:center;z-index:20}
+.modal .box{background:var(--panel);border:1px solid var(--line);
+border-radius:8px;padding:16px;width:680px;max-width:95vw;max-height:88vh;overflow:auto}
+.modal h3{margin:0 0 4px;font-size:16px;color:var(--acc)}
+.modal .meta{color:var(--dim);font-size:12px;margin-bottom:10px}
+.modal .sect{margin-top:12px;padding-top:8px;border-top:1px solid var(--line)}
+.modal .sect b{display:block;font-size:11px;text-transform:uppercase;
+letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
 </style></head><body>
 <header>
   <h1>director-drop</h1><span class="sub">web-gui/2 &middot; read-mostly</span>
@@ -488,7 +540,11 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
     <span class="chip" id="chip-tunnel">chat-tunnel ?</span>
     <span class="chip" id="chip-db">db-search ?</span>
     <span class="chip" id="chip-leo">Leo session ?</span>
+    <span class="chip" id="chip-gold">gold ?</span>
     <span class="chip" id="chip-refresh">updated ?</span>
+    <button id="fleet-online" class="warn">all online</button>
+    <button id="fleet-offline" class="warn">all offline</button>
+    <button id="panic" style="background:var(--err)">STAND DOWN ALL</button>
   </div>
 </header>
 <main>
@@ -496,10 +552,10 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
     <h2>Bots &mdash; census + groups + missions</h2>
     <p class="note">DB rows are last-flushed values (A3/A5 staleness). &ldquo;live&rdquo; asks chat-tunnel <code>inspect</code> for the position right now (offline truth is db-search). The group badge is Leo's group; &ldquo;group&rdquo; checks any toon's own party/raid. <b>Click a toon's name to give them a mission.</b></p>
     <table id="bots"><thead><tr>
-      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th>mission</th><th></th>
+      <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th>mission</th><th>xp/hr</th><th></th>
     </tr></thead><tbody></tbody></table>
     <div id="warnings" style="margin:6px 0"></div>
-    <div id="mission-drawer" style="display:none;border-top:1px solid var(--line);margin-top:8px;padding-top:8px"></div>
+    <div id="toon-modal" class="modal" style="display:none"><div class="box" id="toon-modal-box"></div></div>
     <p class="note" id="bots-note"></p>
   </section>
   <section class="panel" id="panel-feed">
@@ -512,12 +568,14 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
     <div class="tabs">
       <button id="tab-db" class="sel">db-search</button>
       <button id="tab-grammar">tunnel grammar</button>
+      <button id="tab-audit">action log</button>
     </div>
     <div class="cat-cols" id="cat-wrap">
       <div class="tools" id="tools"></div>
       <div id="tool-detail"><p class="note">pick a tool</p></div>
     </div>
     <div id="grammar-wrap" style="display:none"><pre id="grammar-out">...</pre></div>
+    <div id="audit-wrap" style="display:none"><pre id="audit-out">...</pre></div>
   </section>
 </main>
 <script>
@@ -530,7 +588,11 @@ async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content
 const CLASSES={1:'Warrior',2:'Paladin',3:'Hunter',4:'Rogue',5:'Priest',6:'Death Knight',7:'Shaman',8:'Mage',9:'Warlock',10:'Monk',11:'Druid'};
 
 let overview=null, selToon=null, selDest=null;
-const MVERBS={farm:'farming in',travel:'travelling to',walk:'marching to'};
+const MVERBS={farm:'farming in',travel:'travelling to',walk:'marching to',vendor:'selling in'};
+function xphr(name){const p=((overview.progress||{}).rows)||[];
+  for(const r of p){if(r[0]===name)return r[7]}return null}
+function gold(name){const w=((overview.wallets||{}).rows)||[];
+  for(const r of w){if(r[0]===name)return parseInt(r[3])||0}return 0}
 async function loadOverview(){
   let o; try{ o=await jget('/api/overview') }catch(e){ return }
   overview=o;
@@ -540,6 +602,9 @@ async function loadOverview(){
   chip('leo', o.leo_active===true, 'Leo session '+(o.leo_active?'up':'down'),
        o.leo_active?'stop':'start');
   chip('refresh', true, 'updated '+o.queried_at);
+  const tot=((o.wallets||{}).rows||[]).reduce((a,r)=>a+(parseInt(r[3])||0),0);
+  $('chip-gold').className='chip up';
+  $('chip-gold').textContent='gold '+(tot/10000).toFixed(1)+'g';
   const bl=$('btn-leo'); if(bl) bl.onclick=async()=>{
     bl.disabled=true;
     await jpost('/api/leo',{action: overview.leo_active?'stop':'start'});
@@ -568,6 +633,7 @@ async function loadOverview(){
 const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'+esc(r[0])+'</a></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td><td>'+esc(r[5])+'</td>'
     +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
     +'<td>'+badge(r[0])+'</td><td>'+mbadge(r[0])+'</td>'
+    +'<td>'+esc(xphr(r[0])!==null?Math.round(xphr(r[0])):'')+'</td>'
     +'<td><button data-name="'+esc(r[0])+'" class="livebtn">live</button> <button data-name="'+esc(r[0])+'" class="grpbtn">group</button></td></tr>';
   if((o.leo_char||{}).ok && (o.leo_char.rows||[]).length){
     const c=o.leo_char.rows[0];   // get_character: name,account,level,race,class,map,zone,money,totaltime,online
@@ -581,42 +647,53 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
   }
   tb.querySelectorAll('button.livebtn').forEach(b=>b.onclick=()=>livePos(b));
   tb.querySelectorAll('button.grpbtn').forEach(b=>b.onclick=()=>grpCheck(b));
-  tb.querySelectorAll('a.toonlink').forEach(a=>a.onclick=(e)=>{e.preventDefault();openDrawer(a.dataset.name)});
+  tb.querySelectorAll('a.toonlink').forEach(a=>a.onclick=(e)=>{e.preventDefault();openModal(a.dataset.name)});
 }
 
-// ---- mission drawer: give the selected toon an order (director's rails)
-async function openDrawer(name){
+// ---- toon modal: identity + grouped actions (director's rails) --------
+async function openModal(name){
   selToon=name; selDest=null;
-  const d=$('mission-drawer'); d.style.display='block';
-  const m=((overview.missions||{}).missions||{})[name];
-  d.innerHTML='<b style="color:var(--acc)">Mission: '+esc(name)+'</b>'
-    +(m?' &mdash; currently '+esc(MVERBS[m.kind]||m.kind)+' <b>'+esc(m.name)+'</b>':'')
-    +'<p class="note">orders go through the mission engine\u2019s own validate/lease rails; the destination must be a known teleport location</p>'
-    +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+  const o=overview||{};
+  const m=((o.missions||{}).missions||{})[name];
+  const w=((o.wallets||{}).rows||[]).find(r=>r[0]===name);
+  const x=xphr(name);
+  const box=$('toon-modal-box');
+  box.innerHTML='<h3>'+esc(name)+'</h3>'
+    +'<div class="meta">account '+esc((w&&w[1])||'?')+' &middot; lvl '+esc((w&&w[2])||'?')
+    +' &middot; '+(gold(name)/10000).toFixed(1)+'g'
+    +(x!==null?' &middot; '+Math.round(x)+' xp/hr':'')
+    +(m?' &middot; <b>'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</b>':'')
+    +'</div>'
+    +'<div class="sect"><b>existence</b>'
+    +'<button id="op-online">bring online</button> '
+    +'<button id="op-offline">take offline</button></div>'
+    +'<div class="sect"><b>missions (destination required)</b>'
+    +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px">'
     +'<input id="dest-in" placeholder="destination (game_tele), e.g. BootyBay" style="width:240px">'
     +'<button id="dest-search">find</button>'
     +'<input id="mat-in" placeholder="or farm what? (mat, e.g. Peacebloom)" style="width:240px">'
     +'<button id="mat-search">mats</button></div>'
-    +'<div id="dest-list" style="margin:6px 0"></div>'
-    +'<div id="dest-picked" style="margin:6px 0"></div>'
+    +'<div id="dest-list"></div><div id="dest-picked"></div>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<button id="op-travel" class="warn" disabled>travel there</button>'
     +'<button id="op-farm" class="warn" disabled>farm there</button>'
-    +'<button id="op-vendor" class="warn" disabled>vendor run</button>'
-    +'<button id="op-standdown">stand down</button>'
-    +'<button id="op-online">bring online</button>'
-    +'<button id="op-offline">take offline</button>'
-    +'<button id="op-close">close</button></div>'
-    +'<p class="note" style="margin:8px 0 2px">states (botcmd presets, verbatim):</p>'
+    +'<button id="op-vendor" class="warn" disabled>vendor run</button></div></div>'
+    +'<div class="sect"><b>states (nc-only presets)</b>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<button id="op-grind">grind</button>'
     +'<button id="op-quest">quest</button>'
     +'<button id="op-gather">gather</button>'
     +'<button id="op-leveling">leveling</button>'
     +'<button id="op-follow">follow</button>'
-    +'<button id="op-idle">idle</button></div>'
-    +'<p class="note" id="mission-result"></p>';
-  function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';$('op-travel').disabled=false;$('op-farm').disabled=false;$('op-vendor').disabled=false;}
+    +'<button id="op-idle">idle</button>'
+    +'<button id="op-standdown" style="background:var(--err)">stand down</button></div></div>'
+    +'<p class="note" id="mission-result"></p>'
+    +'<div style="margin-top:10px"><button id="op-close">close</button></div>';
+  $('toon-modal').style.display='flex';
+  $('toon-modal').onclick=(e)=>{if(e.target.id==='toon-modal')closeModal()};
+  $('op-close').onclick=closeModal;
+  function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';
+    ['op-travel','op-farm','op-vendor'].forEach(id=>$(id).disabled=false);}
   $('dest-search').onclick=async()=>{
     const q=await jpost('/api/query',{tool:'get_game_tele',params:{name:$('dest-in').value}});
     $('dest-list').innerHTML=(q.ok&&q.rows.length)?q.rows.map(r=>'<button class="destbtn" data-n="'+esc(r[0])+'">'+esc(r[0])+' (map '+esc(r[1])+')</button>').join(' '):'<span class="err">'+esc((q.error||{}).message||'no match')+'</span>';
@@ -634,17 +711,46 @@ async function openDrawer(name){
       runMission(op,preset);
     };
   };
-  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
-  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
-  $('op-close').onclick=()=>{d.style.display='none';selToon=null};
+  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline']
+    .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
+    .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
-    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown')?undefined:selDest)});
+    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline')?undefined:selDest)});
     const det=r.ok?((r.results||[]).map(x=>x.status+': '+x.detail).join(' | ')):((r.error||{}).message||(r.result||{}).detail);
-    out.innerHTML=r.ok?'<span class="on">'+esc(det)+'</span>':'<span class="err">'+esc(det)+'</span>';
+    out.innerHTML=r.ok?'<span class="on">'+esc((r.results||[]).length+' order(s): '+det)+'</span>':'<span class="err">'+esc(det)+'</span>';
     setTimeout(loadOverview,1500);
   }
 }
+function closeModal(){$('toon-modal').style.display='none';selToon=null}
+
+// ---- fleet-wide actions (ALL broadcast through the same rails) ----------
+async function fleetAction(op,label){
+  const b=$('panic');
+  if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM '+label+'?';
+    setTimeout(()=>{b.dataset.armed='0';b.textContent=b.dataset.label},3000);return}
+  b.dataset.armed='0';b.textContent=b.dataset.label;
+  b.disabled=true;
+  const r=await jpost('/api/mission',{bot:'ALL',op:op});
+  b.disabled=false;
+  if(r.ok){setTimeout(loadOverview,1500)}
+}
+$('panic').dataset.label='STAND DOWN ALL';
+$('panic').onclick=()=>fleetAction('standdown','stand-down-all');
+$('fleet-online').onclick=async()=>{
+  const b=$('fleet-online');
+  if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM all online?';setTimeout(()=>{b.dataset.armed='0';b.textContent='all online'},3000);return}
+  b.dataset.armed='0';b.textContent='all online';b.disabled=true;
+  await jpost('/api/mission',{bot:'ALL',op:'online'});b.disabled=false;setTimeout(loadOverview,1500);
+};
+$('fleet-offline').onclick=async()=>{
+  const b=$('fleet-offline');
+  if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM all offline?';setTimeout(()=>{b.dataset.armed='0';b.textContent='all offline'},3000);return}
+  b.dataset.armed='0';b.textContent='all offline';b.disabled=true;
+  await jpost('/api/mission',{bot:'ALL',op:'offline'});b.disabled=false;setTimeout(loadOverview,1500);
+};
+
 
 async function livePos(btn){
   const name=btn.dataset.name, cell=btn.parentElement;
@@ -749,7 +855,11 @@ async function loadGrammar(){
   $('grammar-out').textContent=g.ok?JSON.stringify(g.result,null,2):JSON.stringify(g,null,2);
 }
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('cat-wrap').style.display='grid';$('grammar-wrap').style.display='none'};
-$('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
+$('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('tab-audit').className='';$('cat-wrap').style.display='none';$('audit-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
+$('tab-audit').onclick=async()=>{$('tab-audit').className='sel';$('tab-db').className='';$('tab-grammar').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='block';
+  const a=await jget('/api/audit?limit=100');
+  $('audit-out').textContent=a.ok?a.entries.map(e=>e.ts+' '+e.action+' '+e.detail).join('\n')||'(no actions yet)':JSON.stringify(a);};
+$('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none'};
 
 async function loadWarnings(){
   let w; try{ w=await jget('/api/warnings') }catch(e){ return }
@@ -879,6 +989,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, api_missions())
         elif parsed.path == "/api/warnings":
             self.reply(200, api_warnings())
+        elif parsed.path == "/api/audit":
+            self.reply(200, api_audit((q.get("limit") or ["50"])[0]))
         elif parsed.path == "/api/leo":
             self.reply(200, {"ok": True, "queried_at": _now(),
                              "unit": LEO_UNIT, "active": leo_active()})
