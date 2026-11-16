@@ -100,7 +100,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
 MISSION_OPS = ("travel", "farm", "walk", "vendor", "state", "standdown",
-               "online", "offline")
+               "online", "offline", "leave")
 MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
@@ -445,6 +445,11 @@ def api_mission(bot, op, dest):
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
         orders = [{"bot": bot, "cmd": c} for c in STATE_PRESETS[preset]]
+    elif op == "leave":
+        # the plain 'leave' whisper (LeaveGroupAction - the whitelisted,
+        # no-GM-needed way a bot drops its party/raid; validate() checks
+        # census/whitelist as always)
+        orders = [{"bot": bot, "cmd": "leave"}]
     elif op in ("online", "offline"):
         # master commands (.playerbots bot add/remove) - validate() checks
         # the census state itself (refuses add-if-online / remove-if-offline)
@@ -703,7 +708,8 @@ async function openModal(name){
     +'<div id="handplay-row" style="margin:6px 0"></div>'
     +'<div class="sect"><b>existence</b>'
     +'<button id="op-online">bring online</button> '
-    +'<button id="op-offline">take offline</button></div>'
+    +'<button id="op-offline">take offline</button> '
+    +'<button id="op-leave">leave party</button></div>'
     +'<div class="sect"><b>missions (destination required)</b>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px">'
     +'<input id="dest-in" placeholder="destination (game_tele), e.g. BootyBay" style="width:240px">'
@@ -760,13 +766,13 @@ async function openModal(name){
       runMission(op,preset);
     };
   };
-  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline']
+  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline','op-leave']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
   ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
-    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline')?undefined:selDest)});
+    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline'||op==='leave')?undefined:selDest)});
     const det=r.ok?((r.results||[]).map(x=>x.status+': '+x.detail).join(' | ')):((r.error||{}).message||(r.result||{}).detail);
     out.innerHTML=r.ok?'<span class="on">'+esc((r.results||[]).length+' order(s): '+det)+'</span>':'<span class="err">'+esc(det)+'</span>';
     setTimeout(loadOverview,1500);

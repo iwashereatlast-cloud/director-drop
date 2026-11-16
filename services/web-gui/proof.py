@@ -469,6 +469,15 @@ def main():
               and mdp.get("result", {}).get("status") == "started",
               json.dumps(mdp)[:200])
 
+        # --- 6b1. leave party (the whitelisted no-GM whisper) ------------
+        st, lv2, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "leave"})
+        check("leave party sends the whitelisted 'leave' whisper",
+              lv2.get("ok") is True
+              and lv2.get("result", {}).get("status") == "sent"
+              and "/w Ayla leave" in lv2.get("result", {}).get("detail", ""),
+              json.dumps(lv2)[:200])
+
         # --- 6b2. the hand-play lock is a live toggle ----------------------
         st, hl, _ = http("POST", base + "/api/handplay",
                          {"toon": "Gau", "on": True})
