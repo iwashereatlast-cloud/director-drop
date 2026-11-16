@@ -1,9 +1,12 @@
 [Unit]
 Description=Leo db-search service (read-only query catalog, service 2/4)
 After=network-online.target
-# restart with the stack: `systemctl --user restart leo-director`
-# pulls this service too (the code it serves ships in the same repo)
-PartOf=leo-director.service
+# restart with the stack: `systemctl --user restart web-gui`
+# pulls this service too (the code it serves ships in the same repo).
+# PartOf anchor moved off leo-director (retired as the steering point,
+# 2026-11-15): stopping/disabling the daemon used to drag this service
+# down with it - a live outage on serverpc.
+PartOf=web-gui.service
 
 [Service]
 WorkingDirectory=%h/downloads/director-drop
