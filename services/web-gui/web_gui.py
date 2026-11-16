@@ -78,6 +78,15 @@ LEO = os.environ.get("WEBGUI_LEO", "Leo")
 AUDIT = os.environ.get("WEBGUI_AUDIT",
                        os.path.expanduser("~/.webgui-audit.jsonl"))
 POS_POLL = float(os.environ.get("WEBGUI_POS_POLL", "300"))
+# the hand-play registry, FILE-BACKED so toggles stick across restarts
+# (the live set in director.HANDPLAY is process memory; without this file
+# a systemd restart silently reset every toggle)
+HANDPLAY_FILE = os.environ.get(
+    "WEBGUI_HANDPLAY_FILE", os.path.expanduser("~/.webgui-handplay.json"))
+# the last state set per toon (states are fire-and-forget whispers with no
+# lease - without this registry the mission column cannot show them)
+STATES_FILE = os.environ.get(
+    "WEBGUI_STATES_FILE", os.path.expanduser("~/.webgui-states.json"))
 LEO_UNIT = os.environ.get("WEBGUI_LEO_UNIT", "leo.service")
 CENSUS = os.environ.get("WEBGUI_CENSUS", "i_was_here")
 TIMEOUT = float(os.environ.get("WEBGUI_TIMEOUT", "15"))
@@ -101,7 +110,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
 MISSION_OPS = ("travel", "farm", "walk", "vendor", "vendor_all", "state",
-               "standdown", "online", "offline", "leave")
+               "standdown", "online", "offline", "leave", "disband")
 MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
@@ -121,12 +130,58 @@ _DIRECTOR = {"mod": None}
 
 
 def _director():
-    """Lazy import of the mission engine (same process, shared lease file)."""
+    """Lazy import of the mission engine (same process, shared lease file).
+    The hand-play registry is reloaded from its file on first import so
+    operator toggles survive restarts."""
     if _DIRECTOR["mod"] is None:
         sys.path.insert(0, REPO_ROOT)
         import director
+        try:
+            with open(HANDPLAY_FILE) as f:
+                saved = json.load(f).get("handplay", [])
+            director.HANDPLAY.clear()
+            director.HANDPLAY.update(str(x).lower() for x in saved)
+        except (OSError, ValueError):
+            pass          # no file yet: the env defaults stand
         _DIRECTOR["mod"] = director
     return _DIRECTOR["mod"]
+
+
+def _handplay_save(d):
+    try:
+        with open(HANDPLAY_FILE, "w") as f:
+            json.dump({"handplay": sorted(d.HANDPLAY)}, f)
+    except OSError:
+        pass
+
+STATES = {}
+
+
+def _states_load():
+    try:
+        with open(STATES_FILE) as f:
+            for k, v in json.load(f).items():
+                STATES[str(k).lower()] = v
+    except (OSError, ValueError):
+        pass
+
+
+def _states_save():
+    try:
+        with open(STATES_FILE, "w") as f:
+            json.dump(STATES, f)
+    except OSError:
+        pass
+
+
+def _state_set(bot, state):
+    STATES[str(bot).lower()] = {"state": state, "ts": time.time()}
+    _states_save()
+
+
+def _state_clear(bot):
+    STATES.pop(str(bot).lower(), None)
+    _states_save()
 
 
 def _now():
@@ -280,9 +335,11 @@ def _position_loop():
             cen = db_call("get_online_census", {"account_like": CENSUS})
             if cen.get("ok"):
                 for row in cen.get("rows", []):
+                    # probe EVERY toon, not just the DB-online ones: the
+                    # online flag is an A5 hint (boot-reset, async on
+                    # login) - a bot answering a live probe IS online no
+                    # matter what the flag says
                     name = row[0]
-                    if str(row[6]) != "1":
-                        continue
                     pos = _pos_probe(name)
                     if pos:
                         with POSITIONS_LOCK:
@@ -311,6 +368,7 @@ def api_overview():
             "leo_group": db_call("get_group_membership", {"toon": LEO}),
             "missions": api_missions(),
             "handplay": api_handplay(),
+            "states": dict(STATES),
             "positions": api_positions(),
             "progress": db_call("get_leveling_progress",
                                 {"account": CENSUS}),
@@ -490,6 +548,7 @@ def api_handplay_set(toon, on):
         d.HANDPLAY.add(name)
     else:
         d.HANDPLAY.discard(name)
+    _handplay_save(d)
     _audit("handplay", "%s %s" % ("lock" if on else "unlock", toon))
     return {"ok": True, "queried_at": _now(), "toon": toon,
             "handplay": on, "handplay_list": sorted(d.HANDPLAY)}
@@ -555,6 +614,30 @@ def api_mission(bot, op, dest):
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
         orders = [{"bot": bot, "cmd": c} for c in STATE_PRESETS[preset]]
+    elif op == "disband":
+        # Leo's whole group, via the proven rails: a 'group remove' order
+        # per current member (validate() rewrites bots to the plain
+        # 'leave' whisper, humans to the GM remove, and checks live
+        # membership itself)
+        grp = db_call("get_group_membership", {"toon": LEO})
+        members = []
+        if grp.get("ok"):
+            members = [r[4] for r in grp.get("rows", [])
+                       if r[4] and r[4] != LEO]
+        if not members:
+            return {"ok": True, "queried_at": _now(), "results": [],
+                    "note": "%s is not in a group" % LEO}
+        orders = [{"bot": m, "cmd": "group remove"} for m in members]
+        results = d.submit_orders(orders, master=LEO)
+        ok = any(r.get("status") in ("started", "sent") for r in results)
+        _audit("mission", "ALL disband -> %s"
+               % "; ".join("%s:%s" % (r.get("status"),
+                                      (r.get("detail") or "")[:80])
+                           for r in results))
+        return {"ok": ok, "queried_at": _now(),
+                "result": results[0] if results else
+                {"status": "failed", "detail": "no result"},
+                "results": results}
     elif op == "leave":
         # the plain 'leave' whisper (LeaveGroupAction - the whitelisted,
         # no-GM-needed way a bot drops its party/raid; validate() checks
@@ -579,6 +662,15 @@ def api_mission(bot, op, dest):
     # a fleet order (bot=ALL) is ok if ANY landed (per-bot skips like
     # already-online are expected in a broadcast)
     ok = all_ok if bot != "ALL" else any_ok
+    if ok:
+        if op == "state" and isinstance(dest, str) and dest in STATE_PRESETS:
+            _state_set(bot, dest)
+        elif op == "standdown":
+            for r in results:
+                if r.get("status") == "sent":
+                    _state_set(r.get("bot", bot), "idle")
+        elif op in MISSION_DEST_OPS:
+            _state_clear(bot)
     _audit("mission", "%s %s %s -> %s" % (bot, op, dest or "",
            "; ".join("%s:%s" % (r.get("status"), (r.get("detail") or "")[:80])
                      for r in results)))
@@ -695,6 +787,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     <span class="chip" id="chip-refresh">updated ?</span>
     <button id="fleet-online" class="warn">all online</button>
     <button id="fleet-offline" class="warn">all offline</button>
+    <button id="disband" class="warn">disband party</button>
     <button id="panic" style="background:var(--err)">STAND DOWN ALL</button>
   </div>
 </header>
@@ -778,8 +871,10 @@ async function loadOverview(){
   const tb=$('bots').querySelector('tbody'); tb.innerHTML='';
   const mbadge=(name)=>{
   const m=((overview.missions||{}).missions||{})[name];
-  if(!m) return '<span class="off">&mdash;</span>';
-  return '<span class="badge '+(m.kind==='farm'?'raid':'party')+'" title="pid '+esc(m.pid)+'">'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</span>';
+  if(m) return '<span class="badge '+(m.kind==='farm'?'raid':'party')+'" title="pid '+esc(m.pid)+'">'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</span>';
+  const st=((overview.states||{})[name.toLowerCase()]||{});
+  if(st.state) return '<span class="badge sys" title="state set via the GUI">'+esc(st.state)+'</span>';
+  return '<span class="off">&mdash;</span>';
 };
 let bagsData={};
 function bagsCell(name){
@@ -787,6 +882,17 @@ function bagsCell(name){
   if(!b) return '<td class="off">?</td>';
   const cls=(b.free<=0)?'timeout':(b.free<=2)?'pending':'on';
   return '<td class="'+cls+'" title="capacity '+b.cap+' - used '+b.used+'">'+b.free+'/'+b.cap+'</td>';
+}
+function onlineCell(name, dbOnline){
+  const p=(((overview.positions||{}).positions)||{})[name];
+  const live=(p && (Date.now()/1000 - p.ts) < 1800);
+  if(live && dbOnline!=='1')
+    return '<td class="on" title="the DB flag says offline (A5 staleness) but the bot answered a live position probe just now">online (live)</td>';
+  if(!live && dbOnline==='1')
+    return '<td class="on" title="DB flag online (A5 hint); no live answer yet this cycle">online (DB)</td>';
+  if(dbOnline==='1')
+    return '<td class="on">online</td>';
+  return '<td class="off">offline</td>';
 }
 function zoneCell(name, zoneId){
   const p=(((overview.positions||{}).positions)||{})[name];
@@ -796,7 +902,7 @@ function zoneCell(name, zoneId){
   return '<td>'+esc(zoneId)+'</td>';
 }
 const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'+esc(r[0])+'</a></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td>'+zoneCell(r[0], r[5])+'</td>'
-    +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
+    +onlineCell(r[0], String(r[6]))+'<td>'+esc(r[7]||'')+'</td>'
     +'<td>'+badge(r[0])+'</td><td>'+mbadge(r[0])+'</td>'
     +'<td>'+esc(xphr(r[0])!==null?Math.round(xphr(r[0])):'')+'</td>'
     +bagsCell(r[0])
@@ -808,6 +914,10 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
   if(d.ok){
     for(const r of (d.rows||[])) tb.innerHTML+=row(r);
     $('bots-note').textContent=(d.row_count||0)+' bot rows - '+d.caveat;
+  const pnote=[];
+  if(!((o.progress||{}).ok)) pnote.push('leveling progress unavailable: '+esc(((o.progress||{}).error||{}).message||'db-search'));
+  if(!((o.missions||{}).ok)) pnote.push('mission registry unavailable: '+esc(((o.missions||{}).error||{}).message||'engine'));
+  if(pnote.length) $('bots-note').innerHTML+='<br><span class="err">'+pnote.join(' | ')+'</span>';
   } else if(!(o.leo_char||{}).ok) {
     $('bots-note').innerHTML='<span class="err">'+esc((d.error||{}).message||'db-search unreachable')+'</span>';
   }
@@ -867,7 +977,8 @@ async function openModal(name){
   hpbtn.onclick=()=>{
     if(hpbtn.dataset.armed!=='1'){hpbtn.dataset.armed='1';hpbtn.textContent='CONFIRM?';setTimeout(()=>{hpbtn.dataset.armed='0';hpbtn.textContent=hpbtn.dataset.label},2500);return}
     hpbtn.dataset.armed='0';hpbtn.textContent=hpbtn.dataset.label;hpbtn.disabled=true;
-    jpost('/api/handplay',{toon:name,on:hpbtn.id==='op-hplock'}).then(()=>openModal(name));
+    jpost('/api/handplay',{toon:name,on:hpbtn.id==='op-hplock'}).then(async()=>{
+      await loadOverview(); openModal(name);});
   };
   $('toon-modal').style.display='flex';
   $('toon-modal').onclick=(e)=>{if(e.target.id==='toon-modal')closeModal()};
@@ -923,6 +1034,12 @@ $('fleet-online').onclick=async()=>{
   if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM all online?';setTimeout(()=>{b.dataset.armed='0';b.textContent='all online'},3000);return}
   b.dataset.armed='0';b.textContent='all online';b.disabled=true;
   await jpost('/api/mission',{bot:'ALL',op:'online'});b.disabled=false;setTimeout(loadOverview,1500);
+};
+$('disband').onclick=async()=>{
+  const b=$('disband');
+  if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM disband?';setTimeout(()=>{b.dataset.armed='0';b.textContent='disband party'},3000);return}
+  b.dataset.armed='0';b.textContent='disband party';b.disabled=true;
+  await jpost('/api/mission',{bot:'Leo',op:'disband'});b.disabled=false;setTimeout(loadOverview,1500);
 };
 $('fleet-offline').onclick=async()=>{
   const b=$('fleet-offline');
@@ -1302,6 +1419,7 @@ def main():
                 + "!" * 70 + "\n") % (BIND, BIND, PORT)
         print(warn, file=sys.stderr)
         print(warn)
+    _states_load()
     if POS_POLL > 0:
         threading.Thread(target=_position_loop, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)

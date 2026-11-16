@@ -1978,8 +1978,13 @@ def submit_orders(orders, master=None):
             r["status"] = "refused" if err2 else "started"
             r["detail"] = err2 or ("%s -> %s" % (r["bot"], o["_walk"][1]))
         else:
+            # send the POST-VALIDATE order: validate() REWRITES commands
+            # (group remove -> 'leave' for bots, boat/carriage -> '.tele'
+            # legs) - sending the pre-validate snapshot silently undid
+            # every rewrite (live: disbands went out as GM removes)
+            r["cmd"] = str(o.get("cmd", ""))
             try:
-                res = send_order(r["bot"], r["cmd"])
+                res = send_order(str(o["bot"]), str(o["cmd"]))
                 r["status"], r["detail"] = "sent", res["line"]
             except Exception as e:
                 r["status"], r["detail"] = "failed", str(e)
