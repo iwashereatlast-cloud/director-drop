@@ -385,10 +385,16 @@ def main():
               json.dumps(sgr)[:200])
         st, sga, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "state", "dest": "gather"})
-        check("state gather sends both whispers (nc + status arm)",
-              sga.get("ok") is True and len(sga.get("results", [])) == 2
-              and all(r.get("status") == "sent" for r in sga.get("results", [])),
+        check("state gather sends the nc-only preset (rpg status is read-only)",
+              sga.get("ok") is True and len(sga.get("results", [])) == 1
+              and sga.get("results", [{}])[0].get("status") == "sent",
               json.dumps(sga)[:260])
+        st, sid, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "state", "dest": "idle"})
+        check("state idle sends the nc stand-down (read-only rpg status never sent)",
+              sid.get("ok") is True and len(sid.get("results", [])) == 1
+              and "-new rpg" in sid.get("results", [{}])[0].get("detail", ""),
+              json.dumps(sid)[:260])
 
         st, on0, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "online"})
@@ -459,10 +465,10 @@ def main():
             st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
             cmds = [x.get("command") for x in
                     (ev.get("result") or {}).get("events", [])]
-            if "rpg status do gather" in cmds:
+            if "nc +new rpg,+gather,-follow" in cmds:
                 armed = True
                 break
-        check("farm keeper arms the gather status (whisper seen in tunnel)",
+        check("farm keeper arms the gather strategy (nc-only, per the doctrine)",
               armed, json.dumps(cmds[-8:])[:200])
         st, msd, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "standdown"})
@@ -476,6 +482,46 @@ def main():
                 gone = True
                 break
         check("registry shows the farm lease gone after stand down", gone)
+
+        # --- 6c. warning flags: the bag scan ------------------------------
+        st, wf, _ = http("GET", base + "/api/warnings")
+        check("warnings endpoint answers (bag scan, no flags on the fixture)",
+              st == 200 and wf.get("ok") is True and wf.get("warnings") == []
+              and wf.get("census_ok") is True, json.dumps(wf)[:200])
+
+        # --- 6d. vendor run mission (the full-bags action) ----------------
+        st, mv, _ = http("POST", base + "/api/mission",
+                         {"bot": "Ayla", "op": "vendor", "dest": "BootyBay"})
+        check("vendor run starts (lease taken, kind vendor)",
+              mv.get("ok") is True and mv.get("result", {}).get("status") == "started"
+              and "BootyBay" in mv.get("result", {}).get("detail", ""),
+              json.dumps(mv)[:200])
+        st, mvv, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "travel", "dest": "BootyBay"})
+        check("a vendor lease refuses a second mission (one per bot)",
+              mvv.get("ok") is False
+              and "already selling in" in mvv.get("result", {}).get("detail", ""),
+              json.dumps(mvv)[:200])
+        arm_arrival_reply(base, "Ayla", log)
+        sold = False
+        for _ in range(30):
+            time.sleep(1)
+            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            cmds = [x.get("command") for x in
+                    (ev.get("result") or {}).get("events", [])]
+            if "s vendor" in cmds:
+                sold = True
+                break
+        check("vendor run sells after the arrival evidence (whisper seen)",
+              sold, json.dumps(cmds[-8:])[:200])
+        vgone = False
+        for _ in range(20):
+            time.sleep(1)
+            st, msz, _ = http("GET", base + "/api/missions")
+            if "Ayla" not in msz.get("missions", {}):
+                vgone = True
+                break
+        check("vendor run releases the lease when done", vgone)
 
         # --- 7. the Leo button --------------------------------------------
         st, ls, _ = http("GET", base + "/api/leo")

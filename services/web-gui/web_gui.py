@@ -97,21 +97,20 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # The GUI's mission forms: ONLY these order shapes are ever built (the
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
-MISSION_OPS = ("travel", "farm", "walk", "state", "standdown",
+MISSION_OPS = ("travel", "farm", "walk", "vendor", "state", "standdown",
                "online", "offline")
-MISSION_DEST_OPS = ("travel", "farm", "walk")
-# The bot states, verbatim from lib/botcmd/states.sh (the proven preset path):
-# gather needs Herbalism/Mining and arms the 15-minute gather status;
-# quest is nc-only ('rpg status do quest' was a dead round-trip, PR #34);
-# idle is the stand-down (and releases a farm lease via validate).
+MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
+# The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
+# commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
+# goes through nc. The gather preset needs Herbalism/Mining; the idle
+# preset is the stand-down and releases a farm lease via validate().
 STATE_PRESETS = {
     "grind": ("nc +new rpg,+grind,-quest,-gather,-follow",),
     "quest": ("nc +new rpg,+quest,-grind,-gather,-follow",),
-    "gather": ("nc +new rpg,+gather,-grind,-quest,-follow",
-               "rpg status do gather"),
+    "gather": ("nc +new rpg,+gather,-grind,-quest,-follow",),
     "leveling": ("nc +new rpg,+quest,+grind,+gather,-follow",),
     "follow": ("nc +follow",),
-    "idle": ("nc -new rpg,-grind,-quest,-gather,-follow", "rpg status idle"),
+    "idle": ("nc -new rpg,-grind,-quest,-gather,-follow",),
 }
 _DEST_RE = __import__("re").compile(r"^[A-Za-z0-9_' -]{1,40}$")
 
@@ -313,6 +312,33 @@ def api_missions():
     return {"ok": True, "queried_at": _now(), "missions": reg}
 
 
+def api_warnings():
+    """Per-toon warning flags from db-search (provable subset first):
+    full bags (0 free slots) / nearly full (<=2) - the vendor-run trigger.
+    Bag rows flush with the character save, so a just-sold bot can stay
+    flagged for minutes (documented staleness, not an error)."""
+    census = db_call("get_online_census", {"account_like": CENSUS})
+    out = []
+    if census.get("ok"):
+        for r in census.get("rows", []):
+            name = r[0]
+            bag = db_call("get_bag_space", {"toon": name})
+            if bag.get("ok") and bag.get("rows"):
+                try:
+                    cap, used, free = (int(float(x)) for x in bag["rows"][0])
+                except (ValueError, IndexError):
+                    continue
+                if free <= 0:
+                    out.append({"toon": name, "kind": "bags_full",
+                                "detail": "0/%d bag slots free - needs a "
+                                          "vendor run" % cap})
+                elif free <= 2:
+                    out.append({"toon": name, "kind": "bags_tight",
+                                "detail": "%d/%d bag slots free" % (free, cap)})
+    return {"ok": True, "queried_at": _now(), "warnings": out,
+            "census_ok": census.get("ok") is True}
+
+
 def api_mission(bot, op, dest):
     """Submit ONE mission order through director's rails (submit_orders).
     The GUI only builds the five templated shapes; validate() re-checks
@@ -352,8 +378,8 @@ def api_mission(bot, op, dest):
         # the census state itself (refuses add-if-online / remove-if-offline)
         cmd = "bot add" if op == "online" else "bot remove"
         orders = [{"bot": bot, "cmd": cmd}]
-    else:                                          # standdown
-        orders = [{"bot": bot, "cmd": "rpg status idle"}]
+    else:                                          # standdown (nc doctrine)
+        orders = [{"bot": bot, "cmd": "nc -new rpg,-grind,-quest,-gather,-follow"}]
     try:
         results = d.submit_orders(orders, master=LEO)
     except Exception as e:
@@ -472,6 +498,7 @@ pre{font:var(--mono);background:var(--bg);border:1px solid var(--line);border-ra
     <table id="bots"><thead><tr>
       <th>toon</th><th>account</th><th>lvl</th><th>class</th><th>map</th><th>zone</th><th>online (DB)</th><th>guild</th><th>group</th><th>mission</th><th></th>
     </tr></thead><tbody></tbody></table>
+    <div id="warnings" style="margin:6px 0"></div>
     <div id="mission-drawer" style="display:none;border-top:1px solid var(--line);margin-top:8px;padding-top:8px"></div>
     <p class="note" id="bots-note"></p>
   </section>
@@ -575,6 +602,7 @@ async function openDrawer(name){
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<button id="op-travel" class="warn" disabled>travel there</button>'
     +'<button id="op-farm" class="warn" disabled>farm there</button>'
+    +'<button id="op-vendor" class="warn" disabled>vendor run</button>'
     +'<button id="op-standdown">stand down</button>'
     +'<button id="op-online">bring online</button>'
     +'<button id="op-offline">take offline</button>'
@@ -588,7 +616,7 @@ async function openDrawer(name){
     +'<button id="op-follow">follow</button>'
     +'<button id="op-idle">idle</button></div>'
     +'<p class="note" id="mission-result"></p>';
-  function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';$('op-travel').disabled=false;$('op-farm').disabled=false;}
+  function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';$('op-travel').disabled=false;$('op-farm').disabled=false;$('op-vendor').disabled=false;}
   $('dest-search').onclick=async()=>{
     const q=await jpost('/api/query',{tool:'get_game_tele',params:{name:$('dest-in').value}});
     $('dest-list').innerHTML=(q.ok&&q.rows.length)?q.rows.map(r=>'<button class="destbtn" data-n="'+esc(r[0])+'">'+esc(r[0])+' (map '+esc(r[1])+')</button>').join(' '):'<span class="err">'+esc((q.error||{}).message||'no match')+'</span>';
@@ -606,7 +634,7 @@ async function openDrawer(name){
       runMission(op,preset);
     };
   };
-  ['op-travel','op-farm','op-standdown','op-online','op-offline'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
   ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle'].forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   $('op-close').onclick=()=>{d.style.display='none';selToon=null};
   async function runMission(op,preset){
@@ -723,8 +751,16 @@ async function loadGrammar(){
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('cat-wrap').style.display='grid';$('grammar-wrap').style.display='none'};
 $('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
 
+async function loadWarnings(){
+  let w; try{ w=await jget('/api/warnings') }catch(e){ return }
+  const el=$('warnings');
+  if(!w.ok || !w.warnings.length){ el.innerHTML=''; return }
+  el.innerHTML='<p class="note" style="margin:2px 0">&#9888; '+w.warnings.map(x=>
+    '<span class="badge '+(x.kind==='bags_full'?'timeout':'pending')+'" title="'+esc(x.detail)+'">'+esc(x.toon)+': '+esc(x.kind==='bags_full'?'bags FULL - vendor run':'bags nearly full')+'</span>').join(' ')+'</p>';
+}
 async function tick(){ await loadOverview() }
-tick(); loadCatalogs(); setInterval(tick,5000);
+tick(); loadCatalogs(); loadWarnings();
+setInterval(tick,5000); setInterval(loadWarnings,60000);
 </script></body></html>"""
 
 
@@ -841,6 +877,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, api_catalogs())
         elif parsed.path == "/api/missions":
             self.reply(200, api_missions())
+        elif parsed.path == "/api/warnings":
+            self.reply(200, api_warnings())
         elif parsed.path == "/api/leo":
             self.reply(200, {"ok": True, "queried_at": _now(),
                              "unit": LEO_UNIT, "active": leo_active()})

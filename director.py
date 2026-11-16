@@ -888,7 +888,7 @@ def _lease_kind(bot):
 
 
 _LEASE_VERBS = {"farm": "farming in", "travel": "travelling to",
-                "walk": "marching to"}
+                "walk": "marching to", "vendor": "selling in"}
 
 def _lease_busy(bot):
     """The refusal message naming what the bot is actually doing, or None."""
@@ -921,6 +921,9 @@ MISSION_EVIDENCE = {
     "travel": "live position within 500yd of the game_tele point, right map",
     "farm":   "same as travel, then the keeper's re-arm sends (3 failures stop)",
     "walk":   "live position progressing toward the target on every tick",
+    "vendor": "same as travel; the sell whisper itself is fire-and-forget "
+              "(no read-back proof exists for sells yet - the bags flag "
+              "clears when the character save flushes)",
 }
 
 
@@ -1151,17 +1154,54 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
         _release_lease(bot)
 
 
+def _vendor_mission(bot, tx, ty, tmap, name, master):
+    """Vendor run (web-gui op, the full-bags flag's action): stand the bot
+    down, teleport it to the town (arrival evidence-checked exactly like
+    travel), then whisper 's vendor'. The sell itself is fire-and-forget -
+    the same doctrine as strategy whispers: no read-back proof exists for
+    sells on this build yet, and the bags flag clears when the character
+    save flushes (minutes)."""
+    try:
+        _stand_down(bot)
+        t0 = time.time()
+        if not _teleport_leg(bot, tx, ty, tmap, name, master):
+            say(master, "%s did not arrive at %s - the vendor run did not "
+                        "land; whisper me to retry." % (bot, name))
+            return
+        try:
+            send_order(bot, "s vendor")
+        except Exception as e:
+            print("daemon: vendor sell failed for %s: %s" % (bot, e))
+        say(master, "%s is at %s and selling to the vendor." % (bot, name))
+        print("daemon: vendor %s -> %s: sold (%.0fs)"
+              % (bot, name, time.time() - t0))
+    except Exception as e:
+        try:
+            say(master, "the vendor run of %s to %s failed: %s" % (bot, name, e))
+        except Exception:
+            pass
+    finally:
+        _release_lease(bot)
+
+
 def _start_walk(o, master):
     """Launch (or refuse) the mission for a validated walk/travel/farm order.
     'travel' is the teleport mission; 'walk' is the ground march; 'farm' is
     the teleport + gather-keeper."""
     (tx, ty, tmap), name = o["_walk"]
-    kind = "farm" if o.get("_farm") else ("travel" if o.get("_travel") else "walk")
+    kind = ("farm" if o.get("_farm") else
+            "vendor" if o.get("_vendor") else
+            "travel" if o.get("_travel") else "walk")
     err = _take_lease(o["bot"], kind, name)
     if err:
         return err
     if kind == "farm":
         threading.Thread(target=_farm_mission,
+                         args=(o["bot"], tx, ty, tmap, name, master),
+                         daemon=True).start()
+        return None
+    if kind == "vendor":
+        threading.Thread(target=_vendor_mission,
                          args=(o["bot"], tx, ty, tmap, name, master),
                          daemon=True).start()
         return None
@@ -1713,6 +1753,25 @@ def validate(order, bots):
         if err:
             return "SKIP %s: %s" % (bot, err)
         order["_farm"] = True
+        order["_walk"] = (coords, _tele_canonical(dest) or dest)
+        return None
+    if low == "vendor" or low.startswith("vendor "):
+        dest = cmd.strip().split(" ", 1)[1].strip() if " " in cmd.strip() else ""
+        dest = ZONE_ABBREVIATIONS.get(dest.lower(), dest)
+        if not dest:
+            return "SKIP %s: vendor needs a destination name (a town with vendors)" % bot
+        canon = _resolve_dest(dest)
+        coords = _tele_coords(canon) if canon else None
+        if coords is None:
+            return ("SKIP %s: %r is not a known location (db-search game_tele)"
+                    % (bot, dest))
+        dest = canon
+        if bot not in bots:
+            return "SKIP %s: not online (census)" % bot
+        err = _lease_busy(bot)
+        if err:
+            return "SKIP %s: %s" % (bot, err)
+        order["_vendor"] = True
         order["_walk"] = (coords, _tele_canonical(dest) or dest)
         return None
     if low == "walk" or low.startswith("walk ") or low == "travel" or low.startswith("travel "):
