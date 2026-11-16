@@ -242,6 +242,7 @@ def api_overview():
             "leo_char": db_call("get_character", {"toon": LEO}),
             "leo_group": db_call("get_group_membership", {"toon": LEO}),
             "missions": api_missions(),
+            "handplay": api_handplay(),
             "progress": db_call("get_leveling_progress",
                                 {"account": CENSUS}),
             "wallets": db_call("get_wallets", {"account": CENSUS}),
@@ -373,6 +374,41 @@ def api_audit(limit):
         except ValueError:
             continue
     return {"ok": True, "queried_at": _now(), "entries": out}
+
+
+def api_handplay():
+    """The hand-play lock (director's HANDPLAY set): toons that are never
+    commanded or brought online as bots. Read + toggle - the GUI's director
+    instance is the mission engine, so this is the live registry."""
+    try:
+        d = _director()
+    except Exception as e:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "director_unavailable",
+                          "message": "the mission engine is not loadable: %s" % e}}
+    return {"ok": True, "queried_at": _now(),
+            "handplay": sorted(d.HANDPLAY)}
+
+
+def api_handplay_set(toon, on):
+    if not isinstance(toon, str) or not __import__("re").fullmatch(r"[A-Za-z]+", toon):
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "bad_request",
+                          "message": "bad toon name %r" % (toon,)}}
+    try:
+        d = _director()
+    except Exception as e:
+        return {"ok": False, "queried_at": _now(),
+                "error": {"code": "director_unavailable",
+                          "message": "the mission engine is not loadable: %s" % e}}
+    name = toon.strip().lower()
+    if on:
+        d.HANDPLAY.add(name)
+    else:
+        d.HANDPLAY.discard(name)
+    _audit("handplay", "%s %s" % ("lock" if on else "unlock", toon))
+    return {"ok": True, "queried_at": _now(), "toon": toon,
+            "handplay": on, "handplay_list": sorted(d.HANDPLAY)}
 
 
 def api_mission(bot, op, dest):
@@ -664,6 +700,7 @@ async function openModal(name){
     +(x!==null?' &middot; '+Math.round(x)+' xp/hr':'')
     +(m?' &middot; <b>'+esc(MVERBS[m.kind]||m.kind)+' '+esc(m.name)+'</b>':'')
     +'</div>'
+    +'<div id="handplay-row" style="margin:6px 0"></div>'
     +'<div class="sect"><b>existence</b>'
     +'<button id="op-online">bring online</button> '
     +'<button id="op-offline">take offline</button></div>'
@@ -689,6 +726,18 @@ async function openModal(name){
     +'<button id="op-standdown" style="background:var(--err)">stand down</button></div></div>'
     +'<p class="note" id="mission-result"></p>'
     +'<div style="margin-top:10px"><button id="op-close">close</button></div>';
+  const hp=(((o.handplay||{}).handplay)||[]);
+  $('handplay-row').innerHTML = hp.includes(name.toLowerCase())
+    ? '<span class="badge timeout">hand-play - commands refused</span> '
+      +'<button id="op-hpunlock">allow commands (remove lock)</button>'
+    : '<button id="op-hplock">mark hand-play (refuse commands)</button>';
+  const hpbtn=$('op-hpunlock')||$('op-hplock');
+  hpbtn.dataset.label=hpbtn.textContent;
+  hpbtn.onclick=()=>{
+    if(hpbtn.dataset.armed!=='1'){hpbtn.dataset.armed='1';hpbtn.textContent='CONFIRM?';setTimeout(()=>{hpbtn.dataset.armed='0';hpbtn.textContent=hpbtn.dataset.label},2500);return}
+    hpbtn.dataset.armed='0';hpbtn.textContent=hpbtn.dataset.label;hpbtn.disabled=true;
+    jpost('/api/handplay',{toon:name,on:hpbtn.id==='op-hplock'}).then(()=>openModal(name));
+  };
   $('toon-modal').style.display='flex';
   $('toon-modal').onclick=(e)=>{if(e.target.id==='toon-modal')closeModal()};
   $('op-close').onclick=closeModal;
@@ -988,6 +1037,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, api_catalogs())
         elif parsed.path == "/api/missions":
             self.reply(200, api_missions())
+        elif parsed.path == "/api/handplay":
+            self.reply(200, api_handplay())
         elif parsed.path == "/api/warnings":
             self.reply(200, api_warnings())
         elif parsed.path == "/api/audit":
@@ -1016,7 +1067,7 @@ class Handler(BaseHTTPRequestHandler):
                              "error": "not logged in (POST /login first)"})
             return
         if self.path not in ("/api/query", "/api/live", "/api/leo",
-                            "/api/mission"):
+                            "/api/mission", "/api/handplay"):
             self.reply(404, {"ok": False, "error": "no such path"})
             return
         try:
@@ -1032,6 +1083,8 @@ class Handler(BaseHTTPRequestHandler):
             resp = api_live(req.get("bot"), req.get("query"))
         elif self.path == "/api/mission":
             resp = api_mission(req.get("bot"), req.get("op"), req.get("dest"))
+        elif self.path == "/api/handplay":
+            resp = api_handplay_set(req.get("toon"), req.get("on") is True)
         else:
             resp = leo_action(req.get("action"))
         self.reply(200, resp)
