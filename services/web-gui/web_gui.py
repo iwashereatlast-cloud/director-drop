@@ -858,7 +858,8 @@ $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className=
 $('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('tab-audit').className='';$('cat-wrap').style.display='none';$('audit-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
 $('tab-audit').onclick=async()=>{$('tab-audit').className='sel';$('tab-db').className='';$('tab-grammar').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='block';
   const a=await jget('/api/audit?limit=100');
-  $('audit-out').textContent=a.ok?a.entries.map(e=>e.ts+' '+e.action+' '+e.detail).join('\n')||'(no actions yet)':JSON.stringify(a);};
+  const NL=String.fromCharCode(10);
+  $('audit-out').textContent=a.ok?(a.entries.map(e=>e.ts+' '+e.action+' '+e.detail).join(NL)||'(no actions yet)'):JSON.stringify(a);};
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none'};
 
 async function loadWarnings(){

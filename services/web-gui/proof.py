@@ -218,6 +218,23 @@ def main():
               and "<th>xp/hr</th>" in page and 'id="panic"' in page
               and 'id="fleet-online"' in page and 'id="fleet-offline"' in page
               and 'id="tab-audit"' in page and "Click a toon's name" in page)
+        # the SERVED script must parse: Python processes the source's
+        # escape sequences before the browser ever sees the bytes, so
+        # checking the source is worthless - a raw newline inside a JS
+        # string (an escape written one level short) broke EVERY browser
+        # while the source still looked fine. Check the real served bytes.
+        node = shutil.which("node")
+        if node:
+            jspath = os.path.join(tmp, "served-page.js")
+            with open(jspath, "w") as f:
+                f.write(page.split("<script>")[1].split("</script>")[0])
+            r = subprocess.run([node, "--check", jspath],
+                               capture_output=True, text=True)
+            check("the SERVED page script parses (node --check)",
+                  r.returncode == 0, (r.stderr or "")[:200])
+        else:
+            check("the SERVED page script parses (node unavailable - SKIP)",
+                  True, "node not installed; run the harness where it is")
 
         # --- 2. overview: census + leo row + leo group + session ---------
         st, o, _ = http("GET", base + "/api/overview")
