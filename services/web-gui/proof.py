@@ -563,7 +563,12 @@ def main():
         st, wf, _ = http("GET", base + "/api/warnings")
         check("warnings endpoint answers (bag scan, no flags on the fixture)",
               st == 200 and wf.get("ok") is True and wf.get("warnings") == []
+              and wf.get("scan_errors") == []
               and wf.get("census_ok") is True, json.dumps(wf)[:200])
+        check("the bag scan exposes per-toon capacity (the fill-up answer)",
+              (wf.get("bags") or {}).get("Ayla", {}).get("free", -1) > 0
+              and (wf.get("bags") or {}).get("Ayla", {}).get("cap", 0) >= 16,
+              json.dumps(wf.get("bags"))[:200])
 
         # --- 6c2. progress + wallets + audit + fleet actions ----------------
         check("overview carries leveling progress (xp/hr per toon)",
@@ -629,17 +634,34 @@ def main():
               and "already selling in" in mvv.get("result", {}).get("detail", ""),
               json.dumps(mvv)[:200])
         arm_arrival_reply(base, "Ayla", log)
+        # the sell whisper goes out; feed the bot's ANSWER (correlated
+        # whisper reply) - the mission must surface it as evidence
         sold = False
+        for _ in range(30):
+            time.sleep(1)
+            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            evs = (ev.get("result") or {}).get("events", [])
+            if any(x.get("direction") == "sent"
+                   and x.get("command") == "s vendor"
+                   and x.get("status") == "pending" for x in evs):
+                with open(log, "a") as f:
+                    f.write(display_line("[Ayla] [whisper]: sold 12 items") + "\n")
+                    f.flush()
+                sold = True
+                break
+        check("vendor run sends the sell whisper after arrival",
+              sold, json.dumps(cmds[-8:])[:200])
+        narrated = False
         for _ in range(30):
             time.sleep(1)
             st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
             cmds = [x.get("command") for x in
                     (ev.get("result") or {}).get("events", [])]
-            if "s vendor" in cmds:
-                sold = True
+            if any(c and "sold 12 items" in c for c in cmds):
+                narrated = True
                 break
-        check("vendor run sells after the arrival evidence (whisper seen)",
-              sold, json.dumps(cmds[-8:])[:200])
+        check("the bot's sell answer is captured and narrated (evidence)",
+              narrated, json.dumps(cmds[-8:])[:200])
         vgone = False
         for _ in range(20):
             time.sleep(1)
