@@ -204,6 +204,8 @@ def main():
             "DIRECTOR_LEASES_FILE": leases_path,
             "WEBGUI_AUDIT": os.path.join(tmp, "webgui-audit.jsonl"),
             "WEBGUI_POS_POLL": "3600",   # one cycle at startup, then quiet
+            "WEBGUI_HANDPLAY_FILE": os.path.join(tmp, "handplay.json"),
+            "WEBGUI_STATES_FILE": os.path.join(tmp, "webgui-states.json"),
         }))
         check("web-gui came up", wait_port(port))
 
@@ -434,6 +436,10 @@ def main():
               sid.get("ok") is True and len(sid.get("results", [])) == 1
               and "-new rpg" in sid.get("results", [{}])[0].get("detail", ""),
               json.dumps(sid)[:260])
+        st, sov, _ = http("GET", base + "/api/overview")
+        check("the state registry records the last state set (mission column)",
+              ((sov.get("states") or {}).get("ayla") or {}).get("state") == "idle",
+              json.dumps(sov.get("states"))[:160])
 
         st, on0, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "online"})
@@ -497,6 +503,19 @@ def main():
               and "/w Ayla leave" in lv2.get("result", {}).get("detail", ""),
               json.dumps(lv2)[:200])
 
+        # --- 6b1b. disband party (group remove per raid member) -----------
+        st, db_, _ = http("POST", base + "/api/mission",
+                          {"bot": "Leo", "op": "disband"})
+        left = [r for r in db_.get("results", []) if r.get("status") == "sent"]
+        skipped = [r for r in db_.get("results", []) if r.get("status") == "refused"]
+        check("disband leaves every ONLINE raid member; offline members refuse",
+              db_.get("ok") is True and len(left) == 2
+              and all((r.get("detail") or "").startswith("/w ")
+                      and r.get("cmd") == "leave" for r in left)
+              and len(skipped) == 1
+              and "not online" in skipped[0].get("detail", ""),
+              json.dumps(db_))
+
         # --- 6b2. the hand-play lock is a live toggle ----------------------
         st, hl, _ = http("POST", base + "/api/handplay",
                          {"toon": "Gau", "on": True})
@@ -524,6 +543,13 @@ def main():
         check("hand-play toggles are audited",
               any(e.get("action") == "handplay" for e in hau.get("entries", [])),
               json.dumps(hau.get("entries", [])[-2:])[:160])
+        # leave a lock on a third toon: the file must carry it to ANY
+        # process that starts later (persistence across restarts)
+        st, hp3, _ = http("POST", base + "/api/handplay",
+                          {"toon": "Crono", "on": True})
+        check("the hand-play registry is written to its file",
+              hp3.get("ok") is True and "crono" in hp3.get("handplay_list", []),
+              json.dumps(hp3)[:160])
 
         st, mf, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})
@@ -692,8 +718,13 @@ def main():
         dead_base = "http://127.0.0.1:%d" % dead_port
         procs.append(start_gui(dead_port, "127.0.0.1", {
             "WEBGUI_TUNNEL": "http://127.0.0.1:18999",
-            "WEBGUI_DBSEARCH_SOCK": os.path.join(tmp, "nope-db.sock")}))
+            "WEBGUI_DBSEARCH_SOCK": os.path.join(tmp, "nope-db.sock"),
+            "WEBGUI_HANDPLAY_FILE": os.path.join(tmp, "handplay.json")}))
         check("down-siblings web-gui instance came up", wait_port(dead_port))
+        st, dhp, _ = http("GET", dead_base + "/api/handplay")
+        check("hand-play locks persist into a freshly started process",
+              dhp.get("ok") is True and "crono" in dhp.get("handplay", []),
+              json.dumps(dhp)[:160])
         st, o2, _ = http("GET", dead_base + "/api/overview")
         check("degraded overview still answers 200 ok",
               st == 200 and o2.get("ok") is True)
