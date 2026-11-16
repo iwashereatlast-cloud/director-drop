@@ -335,9 +335,11 @@ def _position_loop():
             cen = db_call("get_online_census", {"account_like": CENSUS})
             if cen.get("ok"):
                 for row in cen.get("rows", []):
+                    # probe EVERY toon, not just the DB-online ones: the
+                    # online flag is an A5 hint (boot-reset, async on
+                    # login) - a bot answering a live probe IS online no
+                    # matter what the flag says
                     name = row[0]
-                    if str(row[6]) != "1":
-                        continue
                     pos = _pos_probe(name)
                     if pos:
                         with POSITIONS_LOCK:
@@ -881,6 +883,17 @@ function bagsCell(name){
   const cls=(b.free<=0)?'timeout':(b.free<=2)?'pending':'on';
   return '<td class="'+cls+'" title="capacity '+b.cap+' - used '+b.used+'">'+b.free+'/'+b.cap+'</td>';
 }
+function onlineCell(name, dbOnline){
+  const p=(((overview.positions||{}).positions)||{})[name];
+  const live=(p && (Date.now()/1000 - p.ts) < 1800);
+  if(live && dbOnline!=='1')
+    return '<td class="on" title="the DB flag says offline (A5 staleness) but the bot answered a live position probe just now">online (live)</td>';
+  if(!live && dbOnline==='1')
+    return '<td class="on" title="DB flag online (A5 hint); no live answer yet this cycle">online (DB)</td>';
+  if(dbOnline==='1')
+    return '<td class="on">online</td>';
+  return '<td class="off">offline</td>';
+}
 function zoneCell(name, zoneId){
   const p=(((overview.positions||{}).positions)||{})[name];
   if(p && p.zone && (Date.now()/1000 - p.ts) < 1800){
@@ -889,7 +902,7 @@ function zoneCell(name, zoneId){
   return '<td>'+esc(zoneId)+'</td>';
 }
 const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'+esc(r[0])+'</a></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(CLASSES[r[3]]||r[3])+'</td><td>'+esc(r[4])+'</td>'+zoneCell(r[0], r[5])+'</td>'
-    +'<td class="'+(String(r[6])==='1'?'on':'off')+'">'+(String(r[6])==='1'?'online':'offline')+'</td><td>'+esc(r[7]||'')+'</td>'
+    +onlineCell(r[0], String(r[6]))+'<td>'+esc(r[7]||'')+'</td>'
     +'<td>'+badge(r[0])+'</td><td>'+mbadge(r[0])+'</td>'
     +'<td>'+esc(xphr(r[0])!==null?Math.round(xphr(r[0])):'')+'</td>'
     +bagsCell(r[0])

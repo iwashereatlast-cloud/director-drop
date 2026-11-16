@@ -215,17 +215,24 @@ def main():
         # should carry real zone names for the table's zone column
         arm_arrival_reply(base, "Ayla", log)
         arm_arrival_reply(base, "Gau", log)
+        # the poller probes EVERY census toon - including DB-offline ones
+        # (the A5 trap: a stale offline flag must not hide a live bot)
+        arm_arrival_reply(base, "Locke", log)
         pos_ok = False
-        for _ in range(40):
+        for _ in range(60):
             time.sleep(1)
             st, po, _ = http("GET", base + "/api/overview")
             pz = (po.get("positions") or {}).get("positions", {})
             if pz.get("Ayla", {}).get("zone") == "Stranglethorn Vale" \
-                    and pz.get("Gau", {}).get("zone") == "Stranglethorn Vale":
+                    and pz.get("Gau", {}).get("zone") == "Stranglethorn Vale" \
+                    and pz.get("Locke", {}).get("zone") == "Stranglethorn Vale":
                 pos_ok = True
                 break
         check("live position poller fills zone names (not zone numbers)",
               pos_ok, json.dumps(po.get("positions"))[:200])
+        check("DB-offline toons are probed too (the A5 staleness trap)",
+              pz.get("Locke", {}).get("zone") == "Stranglethorn Vale",
+              json.dumps(pz.get("Locke", {}))[:120])
 
         # --- 1. dashboard page ------------------------------------------
         req = urllib.request.Request(base + "/")
