@@ -78,6 +78,10 @@ LEO = os.environ.get("WEBGUI_LEO", "Leo")
 AUDIT = os.environ.get("WEBGUI_AUDIT",
                        os.path.expanduser("~/.webgui-audit.jsonl"))
 POS_POLL = float(os.environ.get("WEBGUI_POS_POLL", "300"))
+# how long phase 2 waits for probe answers (the real relay can take
+# longer than a probe-a-time 5s window; live 2026-11-23: Edgar's answer
+# was matched by the tunnel AFTER the poller had already given up)
+POS_WAIT = float(os.environ.get("WEBGUI_POS_WAIT", "25"))
 # the hand-play registry, FILE-BACKED so toggles stick across restarts
 # (the live set in director.HANDPLAY is process memory; without this file
 # a systemd restart silently reset every toggle)
@@ -302,52 +306,53 @@ POSITIONS = {}
 POSITIONS_LOCK = threading.Lock()
 
 
-def _pos_probe(bot):
-    """One inspect round-trip -> parsed (x, y, z, map, zone) or None."""
-    r = tunnel_call("inspect", {"bot": bot, "query": "position"})
-    if not r.get("ok"):
-        return None
-    cid = ((r.get("result") or {}).get("correlation_id"))
-    if not cid:
-        return None
-    for _ in range(5):
-        time.sleep(1)
-        rr = tunnel_call("get_reply", {"correlation_id": cid})
-        if not rr.get("ok"):
-            return None
-        rep = (rr.get("result") or {}).get("reply")
-        if rep:
-            m = POS_RE.match((rep.get("command") or "").strip())
-            if m:
-                return (float(m.group(1)), float(m.group(2)),
-                        float(m.group(3)), int(m.group(4)),
-                        m.group(5).strip())
-            return None
-        sent = (rr.get("result") or {}).get("sent") or {}
-        if sent.get("status") == "timeout":
-            return None
-    return None
-
-
 def _position_loop():
+    """Two phases per cycle (live fix 2026-11-23):
+    1. FIRE - one paced pass, an inspect per census toon (every toon:
+       the A5 flag must never hide a live bot);
+    2. HARVEST - collect answers for POS_WAIT seconds, in ANY order they
+       arrive. Stragglers stay pending and get their chance again next
+       cycle - the old design waited ~5s per toon, serially, and the real
+       relay's latency exceeded the window, abandoning matched replies."""
+    pending = {}          # correlation_id -> toon (survives cycles)
     while True:
         try:
             cen = db_call("get_online_census", {"account_like": CENSUS})
             if cen.get("ok"):
                 for row in cen.get("rows", []):
-                    # probe EVERY toon, not just the DB-online ones: the
-                    # online flag is an A5 hint (boot-reset, async on
-                    # login) - a bot answering a live probe IS online no
-                    # matter what the flag says
                     name = row[0]
-                    pos = _pos_probe(name)
-                    if pos:
-                        with POSITIONS_LOCK:
-                            POSITIONS[name] = {"x": pos[0], "y": pos[1],
-                                               "map": pos[3],
-                                               "zone": pos[4],
-                                               "ts": time.time()}
-                    time.sleep(1)
+                    r = tunnel_call("inspect", {"bot": name,
+                                                "query": "position"})
+                    cid = ((r.get("result") or {})
+                           .get("correlation_id")) if r.get("ok") else None
+                    if cid:
+                        pending[cid] = name
+                    time.sleep(1)          # pace the FIFO writes
+            deadline = time.time() + max(10.0, POS_WAIT)
+            while pending and time.time() < deadline:
+                time.sleep(1)
+                for cid in list(pending):
+                    rr = tunnel_call("get_reply",
+                                     {"correlation_id": cid})
+                    if not rr.get("ok"):
+                        del pending[cid]          # server lost it
+                        continue
+                    rep = (rr.get("result") or {}).get("reply")
+                    if rep:
+                        m = POS_RE.match((rep.get("command") or "").strip())
+                        if m:
+                            with POSITIONS_LOCK:
+                                POSITIONS[pending[cid]] = {
+                                    "x": float(m.group(1)),
+                                    "y": float(m.group(2)),
+                                    "map": int(m.group(4)),
+                                    "zone": m.group(5).strip(),
+                                    "ts": time.time()}
+                        del pending[cid]
+                        continue
+                    sent = (rr.get("result") or {}).get("sent") or {}
+                    if sent.get("status") in ("timeout", "expired"):
+                        del pending[cid]
         except Exception:
             pass
         time.sleep(max(30.0, POS_POLL))
