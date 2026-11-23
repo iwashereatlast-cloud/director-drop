@@ -353,6 +353,45 @@ def _position_loop():
         time.sleep(max(30.0, POS_POLL))
 
 
+# last send/receipt per toon, fed by api_mission: a reply-matched command
+# is proof of life; the DB flag alone is only a hint (A5)
+RECEIPTS = {}
+
+
+def _receipt_note(bot, line, status):
+    RECEIPTS[str(bot)] = {"line": str(line)[:120], "status": status,
+                          "ts": time.time()}
+
+
+def api_truth(census):
+    """Tier 0: ONE reconciled presence state per toon. Signals, weakest to
+    strongest: the DB online flag (A5 hint - boot-reset, async on login),
+    a live position-probe answer (proof of life). Every gate should
+    consult THIS, never the raw flag.
+      live      - answered a probe within the last two poll cycles
+      db_online - flag says online, no live proof yet (verify soon)
+      offline   - no live proof and the flag says offline"""
+    out = {}
+    now = time.time()
+    horizon = max(120.0, 2 * max(30.0, POS_POLL))
+    with POSITIONS_LOCK:
+        pos = dict(POSITIONS)
+    rows = census.get("rows", []) if census.get("ok") else []
+    for r in rows:
+        name, flag = r[0], str(r[6]) == "1"
+        p = pos.get(name)
+        if p and now - p.get("ts", 0) < horizon:
+            out[name] = {"state": "live", "why": "answered a position probe",
+                         "zone": p.get("zone")}
+        elif flag:
+            out[name] = {"state": "db_online",
+                         "why": "DB flag online (A5 hint), no live proof yet"}
+        else:
+            out[name] = {"state": "offline",
+                         "why": "no live proof and the DB flag says offline"}
+    return {"ok": True, "queried_at": _now(), "truth": out}
+
+
 def api_positions():
     with POSITIONS_LOCK:
         return {"ok": True, "queried_at": _now(),
@@ -360,21 +399,23 @@ def api_positions():
 
 
 def api_overview():
-    return {"ok": True, "interface": INTERFACE, "queried_at": _now(),
-            "census_prefix": CENSUS, "leo": LEO, "leo_unit": LEO_UNIT,
-            "leo_active": leo_active(),
-            "tunnel": tunnel_health(),
-            "leo_char": db_call("get_character", {"toon": LEO}),
-            "leo_group": db_call("get_group_membership", {"toon": LEO}),
-            "missions": api_missions(),
-            "handplay": api_handplay(),
-            "states": dict(STATES),
-            "positions": api_positions(),
-            "progress": db_call("get_leveling_progress",
-                                {"account": CENSUS}),
-            "wallets": db_call("get_wallets", {"account": CENSUS}),
-            "census": db_call("get_online_census",
-                              {"account_like": CENSUS})}
+    out = {"ok": True, "interface": INTERFACE, "queried_at": _now(),
+           "census_prefix": CENSUS, "leo": LEO, "leo_unit": LEO_UNIT,
+           "leo_active": leo_active(),
+           "tunnel": tunnel_health(),
+           "leo_char": db_call("get_character", {"toon": LEO}),
+           "leo_group": db_call("get_group_membership", {"toon": LEO}),
+           "missions": api_missions(),
+           "handplay": api_handplay(),
+           "states": dict(STATES),
+           "positions": api_positions(),
+           "progress": db_call("get_leveling_progress",
+                               {"account": CENSUS}),
+           "wallets": db_call("get_wallets", {"account": CENSUS}),
+           "census": db_call("get_online_census",
+                             {"account_like": CENSUS})}
+    out["truth"] = api_truth(out["census"])["truth"]
+    return out
 
 
 def _tunnel_result(resp):
@@ -662,6 +703,9 @@ def api_mission(bot, op, dest):
     # a fleet order (bot=ALL) is ok if ANY landed (per-bot skips like
     # already-online are expected in a broadcast)
     ok = all_ok if bot != "ALL" else any_ok
+    for r in results:
+        _receipt_note(r.get("bot", bot), r.get("detail", ""),
+                      r.get("status", "unknown"))
     if ok:
         if op == "state" and isinstance(dest, str) and dest in STATE_PRESETS:
             _state_set(bot, dest)
@@ -884,15 +928,12 @@ function bagsCell(name){
   return '<td class="'+cls+'" title="capacity '+b.cap+' - used '+b.used+'">'+b.free+'/'+b.cap+'</td>';
 }
 function onlineCell(name, dbOnline){
-  const p=(((overview.positions||{}).positions)||{})[name];
-  const live=(p && (Date.now()/1000 - p.ts) < 1800);
-  if(live && dbOnline!=='1')
-    return '<td class="on" title="the DB flag says offline (A5 staleness) but the bot answered a live position probe just now">online (live)</td>';
-  if(!live && dbOnline==='1')
-    return '<td class="on" title="DB flag online (A5 hint); no live answer yet this cycle">online (DB)</td>';
-  if(dbOnline==='1')
-    return '<td class="on">online</td>';
-  return '<td class="off">offline</td>';
+  const t=(((overview.truth|| {}))&&overview.truth[name])||{};
+  if(t.state==='live')
+    return '<td class="on" title="answered a live position probe - proof of life, whatever the DB flag says">live</td>';
+  if(t.state==='db_online')
+    return '<td class="pending" title="'+esc(t.why||'')+' - the reconciler is verifying">online (DB)</td>';
+  return '<td class="off" title="'+esc(t.why||'offline')+'">offline</td>';
 }
 function zoneCell(name, zoneId){
   const p=(((overview.positions||{}).positions)||{})[name];
