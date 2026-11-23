@@ -78,6 +78,14 @@ LEO = os.environ.get("WEBGUI_LEO", "Leo")
 AUDIT = os.environ.get("WEBGUI_AUDIT",
                        os.path.expanduser("~/.webgui-audit.jsonl"))
 POS_POLL = float(os.environ.get("WEBGUI_POS_POLL", "300"))
+# how long phase 2 waits for probe answers (the real relay can take
+# longer than a probe-a-time 5s window; live 2026-11-23: Edgar's answer
+# was matched by the tunnel AFTER the poller had already given up)
+POS_WAIT = float(os.environ.get("WEBGUI_POS_WAIT", "25"))
+# the operator's review cursor: everything since the last 'mark reviewed'
+REVIEW_FILE = os.environ.get(
+    "WEBGUI_REVIEW_FILE",
+    os.path.expanduser("~/.webgui-last-review.json"))
 # the hand-play registry, FILE-BACKED so toggles stick across restarts
 # (the live set in director.HANDPLAY is process memory; without this file
 # a systemd restart silently reset every toggle)
@@ -302,52 +310,53 @@ POSITIONS = {}
 POSITIONS_LOCK = threading.Lock()
 
 
-def _pos_probe(bot):
-    """One inspect round-trip -> parsed (x, y, z, map, zone) or None."""
-    r = tunnel_call("inspect", {"bot": bot, "query": "position"})
-    if not r.get("ok"):
-        return None
-    cid = ((r.get("result") or {}).get("correlation_id"))
-    if not cid:
-        return None
-    for _ in range(5):
-        time.sleep(1)
-        rr = tunnel_call("get_reply", {"correlation_id": cid})
-        if not rr.get("ok"):
-            return None
-        rep = (rr.get("result") or {}).get("reply")
-        if rep:
-            m = POS_RE.match((rep.get("command") or "").strip())
-            if m:
-                return (float(m.group(1)), float(m.group(2)),
-                        float(m.group(3)), int(m.group(4)),
-                        m.group(5).strip())
-            return None
-        sent = (rr.get("result") or {}).get("sent") or {}
-        if sent.get("status") == "timeout":
-            return None
-    return None
-
-
 def _position_loop():
+    """Two phases per cycle (live fix 2026-11-23):
+    1. FIRE - one paced pass, an inspect per census toon (every toon:
+       the A5 flag must never hide a live bot);
+    2. HARVEST - collect answers for POS_WAIT seconds, in ANY order they
+       arrive. Stragglers stay pending and get their chance again next
+       cycle - the old design waited ~5s per toon, serially, and the real
+       relay's latency exceeded the window, abandoning matched replies."""
+    pending = {}          # correlation_id -> toon (survives cycles)
     while True:
         try:
             cen = db_call("get_online_census", {"account_like": CENSUS})
             if cen.get("ok"):
                 for row in cen.get("rows", []):
-                    # probe EVERY toon, not just the DB-online ones: the
-                    # online flag is an A5 hint (boot-reset, async on
-                    # login) - a bot answering a live probe IS online no
-                    # matter what the flag says
                     name = row[0]
-                    pos = _pos_probe(name)
-                    if pos:
-                        with POSITIONS_LOCK:
-                            POSITIONS[name] = {"x": pos[0], "y": pos[1],
-                                               "map": pos[3],
-                                               "zone": pos[4],
-                                               "ts": time.time()}
-                    time.sleep(1)
+                    r = tunnel_call("inspect", {"bot": name,
+                                                "query": "position"})
+                    cid = ((r.get("result") or {})
+                           .get("correlation_id")) if r.get("ok") else None
+                    if cid:
+                        pending[cid] = name
+                    time.sleep(1)          # pace the FIFO writes
+            deadline = time.time() + max(10.0, POS_WAIT)
+            while pending and time.time() < deadline:
+                time.sleep(1)
+                for cid in list(pending):
+                    rr = tunnel_call("get_reply",
+                                     {"correlation_id": cid})
+                    if not rr.get("ok"):
+                        del pending[cid]          # server lost it
+                        continue
+                    rep = (rr.get("result") or {}).get("reply")
+                    if rep:
+                        m = POS_RE.match((rep.get("command") or "").strip())
+                        if m:
+                            with POSITIONS_LOCK:
+                                POSITIONS[pending[cid]] = {
+                                    "x": float(m.group(1)),
+                                    "y": float(m.group(2)),
+                                    "map": int(m.group(4)),
+                                    "zone": m.group(5).strip(),
+                                    "ts": time.time()}
+                        del pending[cid]
+                        continue
+                    sent = (rr.get("result") or {}).get("sent") or {}
+                    if sent.get("status") in ("timeout", "expired"):
+                        del pending[cid]
         except Exception:
             pass
         time.sleep(max(30.0, POS_POLL))
@@ -414,7 +423,15 @@ def api_overview():
            "wallets": db_call("get_wallets", {"account": CENSUS}),
            "census": db_call("get_online_census",
                              {"account_like": CENSUS})}
-    out["truth"] = api_truth(out["census"])["truth"]
+    tr = api_truth(out["census"])
+    out["truth"] = tr["truth"]
+    horizon = max(120.0, 2 * max(30.0, POS_POLL))
+    freshest = max((v.get("ts", 0) for v in POSITIONS.values()), default=0)
+    with POSITIONS_LOCK:
+        nprobe = len(POSITIONS)
+    out["live_silent"] = bool(
+        POS_POLL > 0 and out.get("leo_active")
+        and (nprobe == 0 or time.time() - freshest > horizon))
     return out
 
 
@@ -595,6 +612,65 @@ def api_handplay_set(toon, on):
             "handplay": on, "handplay_list": sorted(d.HANDPLAY)}
 
 
+def _trusted_live():
+    """Toons the reconciler has live-verified (Tier 0 proof of life)."""
+    cen = db_call("get_online_census", {"account_like": CENSUS})
+    return [n for n, t in api_truth(cen).get("truth", {}).items()
+            if t.get("state") == "live"]
+
+
+def _review_load():
+    try:
+        with open(REVIEW_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _review_mark():
+    """Store the 'now' cursor: the newest event id + the wall clock."""
+    newest = 0
+    r = tunnel_call("get_recent_events", {"limit": 1})
+    if r.get("ok"):
+        evs = (r.get("result") or {}).get("events") or []
+        if evs:
+            newest = int(evs[0].get("id") or 0)
+    rv = {"ts": time.time(), "ts_str": _now(), "event_id": newest}
+    try:
+        with open(REVIEW_FILE, "w") as f:
+            json.dump(rv, f)
+    except OSError:
+        pass
+    return rv
+
+
+def api_review():
+    """The 'since your last review' digest: every GUI action (audit) and
+    every tunnel event since the operator last said 'mark reviewed' - so
+    nothing slips through the cracks between visits. First review (no
+    file) starts from the beginning of the audit."""
+    rv = _review_load()
+    since = float(rv.get("ts") or 0)
+    last_id = int(rv.get("event_id") or 0)
+    new_actions = []
+    for e in api_audit(500).get("entries", []):
+        try:
+            t = datetime.strptime(e.get("ts", ""),
+                                  "%Y-%m-%dT%H:%M:%SZ"
+                                  ).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        if t > since:
+            new_actions.append(e)
+    ev = api_events(str(last_id), "500")
+    new_events = (ev.get("result") or {}).get("events") or []
+    return {"ok": True, "queried_at": _now(),
+            "since": since, "since_str": rv.get("ts_str") or "",
+            "counts": {"actions": len(new_actions),
+                       "events": len(new_events)},
+            "new_actions": new_actions, "new_events": new_events}
+
+
 def api_mission(bot, op, dest):
     """Submit ONE mission order through director's rails (submit_orders).
     The GUI only builds the five templated shapes; validate() re-checks
@@ -614,6 +690,22 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_unavailable",
                           "message": "the mission engine is not loadable: %s" % e}}
+    if op in MISSION_DEST_OPS and bot != "ALL":
+        # Tier 1 (strict for missions): a mission costs a lease, a
+        # teleport and minutes - never spend it on a toon with neither
+        # live proof nor an online flag. Whispers stay permissive.
+        tr = api_truth(db_call("get_online_census",
+                               {"account_like": CENSUS}))
+        state = (tr.get("truth") or {}).get(bot, {}).get("state", "offline")
+        if state == "offline":
+            _audit("mission", "%s %s %s -> refused (Tier 1: no live proof "
+                   "and the DB flag says offline)" % (bot, op, dest or ""))
+            return {"ok": False, "queried_at": _now(),
+                "error": {"code": "refused",
+                          "message": "%s never answered a live probe and "
+                          "the DB flag says offline - missions are "
+                          "refused until the bot is verified (Tier 1)"
+                          % bot}}
     if op == "vendor_all":
         # one town, every bags-full toon: the bulk answer to a wall of
         # bag alarms (each order still walks validate(); leased/offline
@@ -630,7 +722,8 @@ def api_mission(bot, op, dest):
                     "note": "no bags-full toons right now"}
         orders = [{"bot": t, "cmd": "vendor %s" % dest.strip()}
                   for t in flagged]
-        results = d.submit_orders(orders, master=LEO)
+        results = d.submit_orders(orders, master=LEO,
+                                  trusted=_trusted_live())
         ok = any(r.get("status") in ("started", "sent") for r in results)
         _audit("mission", "ALL vendor_all %s -> %s"
                % (dest, "; ".join("%s:%s" % (r.get("status"),
@@ -669,7 +762,8 @@ def api_mission(bot, op, dest):
             return {"ok": True, "queried_at": _now(), "results": [],
                     "note": "%s is not in a group" % LEO}
         orders = [{"bot": m, "cmd": "group remove"} for m in members]
-        results = d.submit_orders(orders, master=LEO)
+        results = d.submit_orders(orders, master=LEO,
+                                  trusted=_trusted_live())
         ok = any(r.get("status") in ("started", "sent") for r in results)
         _audit("mission", "ALL disband -> %s"
                % "; ".join("%s:%s" % (r.get("status"),
@@ -692,7 +786,8 @@ def api_mission(bot, op, dest):
     else:                                          # standdown (nc doctrine)
         orders = [{"bot": bot, "cmd": "nc -new rpg,-grind,-quest,-gather,-follow"}]
     try:
-        results = d.submit_orders(orders, master=LEO)
+        results = d.submit_orders(orders, master=LEO,
+                                  trusted=_trusted_live())
     except Exception as e:
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_error",
@@ -955,6 +1050,9 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
   if(d.ok){
     for(const r of (d.rows||[])) tb.innerHTML+=row(r);
     $('bots-note').textContent=(d.row_count||0)+' bot rows - '+d.caveat;
+  if(o.live_silent){
+    $('warnings').innerHTML='<p class="err" style="margin:2px 0">&#9888; LIVE PROBES ARE SILENT - the Leo session or the whole fleet is not answering. Nothing is verified right now.</p>'+$('warnings').innerHTML;
+  }
   const pnote=[];
   if(!((o.progress||{}).ok)) pnote.push('leveling progress unavailable: '+esc(((o.progress||{}).error||{}).message||'db-search'));
   if(!((o.missions||{}).ok)) pnote.push('mission registry unavailable: '+esc(((o.missions||{}).error||{}).message||'engine'));
@@ -1195,9 +1293,21 @@ async function loadGrammar(){
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('cat-wrap').style.display='grid';$('grammar-wrap').style.display='none'};
 $('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('tab-audit').className='';$('cat-wrap').style.display='none';$('audit-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
 $('tab-audit').onclick=async()=>{$('tab-audit').className='sel';$('tab-db').className='';$('tab-grammar').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='block';
-  const a=await jget('/api/audit?limit=100');
   const NL=String.fromCharCode(10);
-  $('audit-out').textContent=a.ok?(a.entries.map(e=>e.ts+' '+e.action+' '+e.detail).join(NL)||'(no actions yet)'):JSON.stringify(a);};
+  const rv=await jget('/api/review');
+  const digest=(rv.ok&&rv.counts)?'<p style="margin:4px 0"><b>since '+(rv.since_str?esc(rv.since_str):'the beginning')+':</b> '
+    +rv.counts.actions+' raw actions, '+rv.counts.events+' chat events - <button id="mark-reviewed" class="warn">mark reviewed</button></p>'
+    +(rv.new_actions||[]).map(e=>esc(e.ts+' '+e.action+' '+e.detail)).join(NL):'';
+  const a=await jget('/api/audit?limit=100');
+  $('audit-out').textContent=(digest?digest+NL+NL:'')
+    +(a.ok?(a.entries.map(e=>e.ts+' '+e.action+' '+e.detail).join(NL)||'(no actions yet)'):JSON.stringify(a));
+  const mrb=$('mark-reviewed');
+  if(mrb){mrb.onclick=async()=>{
+    if(mrb.dataset.armed!=='1'){mrb.dataset.armed='1';mrb.textContent='CONFIRM?';setTimeout(()=>{mrb.dataset.armed='0';mrb.textContent='mark reviewed'},2500);return}
+    mrb.dataset.armed='0';mrb.textContent='mark reviewed';
+    await jpost('/api/review',{action:'mark'});
+    setTimeout(()=>$('tab-audit').onclick(),500);
+  };}};
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none'};
 
 async function loadWarnings(){
@@ -1345,6 +1455,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, api_handplay())
         elif parsed.path == "/api/warnings":
             self.reply(200, api_warnings())
+        elif parsed.path == "/api/review":
+            self.reply(200, api_review())
         elif parsed.path == "/api/audit":
             self.reply(200, api_audit((q.get("limit") or ["50"])[0]))
         elif parsed.path == "/api/leo":
@@ -1371,7 +1483,8 @@ class Handler(BaseHTTPRequestHandler):
                              "error": "not logged in (POST /login first)"})
             return
         if self.path not in ("/api/query", "/api/live", "/api/leo",
-                            "/api/mission", "/api/handplay"):
+                            "/api/mission", "/api/handplay",
+                            "/api/review"):
             self.reply(404, {"ok": False, "error": "no such path"})
             return
         try:
@@ -1389,6 +1502,14 @@ class Handler(BaseHTTPRequestHandler):
             resp = api_mission(req.get("bot"), req.get("op"), req.get("dest"))
         elif self.path == "/api/handplay":
             resp = api_handplay_set(req.get("toon"), req.get("on") is True)
+        elif self.path == "/api/review":
+            if req.get("action") == "mark":
+                rv = _review_mark()
+                _audit("review", "marked reviewed at %s (event_id %d)"
+                       % (rv.get("ts_str"), rv.get("event_id", 0)))
+                resp = {"ok": True, "queried_at": _now(), "review": rv}
+            else:
+                resp = api_review()
         else:
             resp = leo_action(req.get("action"))
         self.reply(200, resp)
