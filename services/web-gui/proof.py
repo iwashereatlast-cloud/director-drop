@@ -233,6 +233,13 @@ def main():
         check("DB-offline toons are probed too (the A5 staleness trap)",
               pz.get("Locke", {}).get("zone") == "Stranglethorn Vale",
               json.dumps(pz.get("Locke", {}))[:120])
+        st, tv, _ = http("GET", base + "/api/overview")
+        tt = tv.get("truth") or {}
+        check("the reconciler: a probed DB-offline toon is LIVE (Tier 0)",
+              tt.get("Ayla", {}).get("state") == "live"
+              and tt.get("Locke", {}).get("state") == "live"
+              and (tt.get("Ayla", {}).get("why") or "").startswith("answered"),
+              json.dumps(tt)[:200])
 
         # --- 1. dashboard page ------------------------------------------
         req = urllib.request.Request(base + "/")
