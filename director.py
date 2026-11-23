@@ -1956,7 +1956,7 @@ def execute(orders, bots, pace, dry, master=None):
 
 
 
-def submit_orders(orders, master=None):
+def submit_orders(orders, master=None, trusted=()):
     """Programmatic order seam (the web-gui mission forms - roadmap
     web-gui/2 contract, 2026-11-13): the SAME rails as execute() -
     expand_orders, validate(), the lease registry, mission threads,
@@ -1965,8 +1965,21 @@ def submit_orders(orders, master=None):
     {"status": "refused", "detail": <the SKIP reason>}. Missions launched
     here run as threads in the CALLING process and send through the
     chat-tunnel service (process-agnostic); the shared lease file is what
-    keeps the daemon and this caller from double-missioning a bot."""
+    keeps the daemon and this caller from double-missioning a bot.
+
+    trusted: toons the CALLER has live-verified (the web-gui's Tier-0
+    reconciler: an answered position probe is proof of life). They join
+    the online gate - the A5-stale DB flag alone must never hide a bot
+    that just answered a probe (live 2026-11-16: the operator's fleet
+    commanded toons the flag called offline). Every other rail
+    (whitelist, lease, membership...) applies unchanged."""
     bots = census(online_only=True)
+    if trusted:
+        allof = census(online_only=False)
+        for t in trusted:
+            n = str(t)
+            if n not in bots and n in allof:
+                bots[n] = allof[n]
     results = []
     for o in expand_orders(list(orders), census(online_only=False)):
         r = {"bot": str(o.get("bot", "")), "cmd": str(o.get("cmd", ""))}

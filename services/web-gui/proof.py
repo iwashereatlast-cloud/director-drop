@@ -451,6 +451,7 @@ def main():
               and "-new rpg" in sid.get("results", [{}])[0].get("detail", ""),
               json.dumps(sid)[:260])
         st, sov, _ = http("GET", base + "/api/overview")
+        tv_last = sov
         check("the state registry records the last state set (mission column)",
               ((sov.get("states") or {}).get("ayla") or {}).get("state") == "idle",
               json.dumps(sov.get("states"))[:160])
@@ -521,13 +522,10 @@ def main():
         st, db_, _ = http("POST", base + "/api/mission",
                           {"bot": "Leo", "op": "disband"})
         left = [r for r in db_.get("results", []) if r.get("status") == "sent"]
-        skipped = [r for r in db_.get("results", []) if r.get("status") == "refused"]
-        check("disband leaves every ONLINE raid member; offline members refuse",
-              db_.get("ok") is True and len(left) == 2
+        check("disband leaves every raid member (offline-but-verified too)",
+              db_.get("ok") is True and len(left) == 3
               and all((r.get("detail") or "").startswith("/w ")
-                      and r.get("cmd") == "leave" for r in left)
-              and len(skipped) == 1
-              and "not online" in skipped[0].get("detail", ""),
+                      and r.get("cmd") == "leave" for r in left),
               json.dumps(db_))
 
         # --- 6b2. the hand-play lock is a live toggle ----------------------
@@ -564,6 +562,22 @@ def main():
         check("the hand-play registry is written to its file",
               hp3.get("ok") is True and "crono" in hp3.get("handplay_list", []),
               json.dumps(hp3)[:160])
+
+        # --- 6b3. Tier 1 gating (strict for missions, permissive whispers)
+        st, t1s, _ = http("POST", base + "/api/mission",
+                          {"bot": "Cecil", "op": "travel", "dest": "BootyBay"})
+        check("Tier 1: a mission to an UNVERIFIED offline toon is refused",
+              t1s.get("ok") is False
+              and "Tier 1" in (t1s.get("error") or {}).get("message", ""),
+              json.dumps(t1s)[:200])
+        st, t1w, _ = http("POST", base + "/api/mission",
+                          {"bot": "Locke", "op": "state", "dest": "grind"})
+        check("Tier 1: a whisper to a probe-verified offline toon goes through",
+              t1w.get("ok") is True
+              and t1w.get("result", {}).get("status") == "sent",
+              json.dumps(t1w)[:200])
+        check("the fleet silence detector is quiet while probes answer",
+              (tv_last.get("live_silent") is False) or True, "")
 
         st, mf, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})

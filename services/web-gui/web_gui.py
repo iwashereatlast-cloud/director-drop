@@ -414,7 +414,15 @@ def api_overview():
            "wallets": db_call("get_wallets", {"account": CENSUS}),
            "census": db_call("get_online_census",
                              {"account_like": CENSUS})}
-    out["truth"] = api_truth(out["census"])["truth"]
+    tr = api_truth(out["census"])
+    out["truth"] = tr["truth"]
+    horizon = max(120.0, 2 * max(30.0, POS_POLL))
+    freshest = max((v.get("ts", 0) for v in POSITIONS.values()), default=0)
+    with POSITIONS_LOCK:
+        nprobe = len(POSITIONS)
+    out["live_silent"] = bool(
+        POS_POLL > 0 and out.get("leo_active")
+        and (nprobe == 0 or time.time() - freshest > horizon))
     return out
 
 
@@ -595,6 +603,13 @@ def api_handplay_set(toon, on):
             "handplay": on, "handplay_list": sorted(d.HANDPLAY)}
 
 
+def _trusted_live():
+    """Toons the reconciler has live-verified (Tier 0 proof of life)."""
+    cen = db_call("get_online_census", {"account_like": CENSUS})
+    return [n for n, t in api_truth(cen).get("truth", {}).items()
+            if t.get("state") == "live"]
+
+
 def api_mission(bot, op, dest):
     """Submit ONE mission order through director's rails (submit_orders).
     The GUI only builds the five templated shapes; validate() re-checks
@@ -614,6 +629,24 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_unavailable",
                           "message": "the mission engine is not loadable: %s" % e}}
+    if op in MISSION_DEST_OPS and bot != "ALL":
+        # Tier 1 (strict for missions): a mission costs a lease, a
+        # teleport and minutes - never spend it on a toon with neither
+        # live proof nor an online flag. Whispers stay permissive: they
+        # cost nothing; the validate() gate (now plus the trusted-live
+        # union) handles them below.
+        tr = api_truth(db_call("get_online_census",
+                               {"account_like": CENSUS}))
+        state = (tr.get("truth") or {}).get(bot, {}).get("state", "offline")
+        if state == "offline":
+            _audit("mission", "%s %s %s -> refused (Tier 1: no live proof "
+                   "and the DB flag says offline)" % (bot, op, dest or ""))
+            return {"ok": False, "queried_at": _now(),
+                "error": {"code": "refused",
+                          "message": "%s never answered a live probe and "
+                          "the DB flag says offline - missions are "
+                          "refused until the bot is verified (Tier 1)"
+                          % bot}}
     if op == "vendor_all":
         # one town, every bags-full toon: the bulk answer to a wall of
         # bag alarms (each order still walks validate(); leased/offline
@@ -630,7 +663,8 @@ def api_mission(bot, op, dest):
                     "note": "no bags-full toons right now"}
         orders = [{"bot": t, "cmd": "vendor %s" % dest.strip()}
                   for t in flagged]
-        results = d.submit_orders(orders, master=LEO)
+        results = d.submit_orders(orders, master=LEO,
+                                  trusted=_trusted_live())
         ok = any(r.get("status") in ("started", "sent") for r in results)
         _audit("mission", "ALL vendor_all %s -> %s"
                % (dest, "; ".join("%s:%s" % (r.get("status"),
@@ -669,7 +703,8 @@ def api_mission(bot, op, dest):
             return {"ok": True, "queried_at": _now(), "results": [],
                     "note": "%s is not in a group" % LEO}
         orders = [{"bot": m, "cmd": "group remove"} for m in members]
-        results = d.submit_orders(orders, master=LEO)
+        results = d.submit_orders(orders, master=LEO,
+                                  trusted=_trusted_live())
         ok = any(r.get("status") in ("started", "sent") for r in results)
         _audit("mission", "ALL disband -> %s"
                % "; ".join("%s:%s" % (r.get("status"),
@@ -692,7 +727,8 @@ def api_mission(bot, op, dest):
     else:                                          # standdown (nc doctrine)
         orders = [{"bot": bot, "cmd": "nc -new rpg,-grind,-quest,-gather,-follow"}]
     try:
-        results = d.submit_orders(orders, master=LEO)
+        results = d.submit_orders(orders, master=LEO,
+                                  trusted=_trusted_live())
     except Exception as e:
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_error",
@@ -955,6 +991,9 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
   if(d.ok){
     for(const r of (d.rows||[])) tb.innerHTML+=row(r);
     $('bots-note').textContent=(d.row_count||0)+' bot rows - '+d.caveat;
+  if(o.live_silent){
+    $('warnings').innerHTML='<p class="err" style="margin:2px 0">&#9888; LIVE PROBES ARE SILENT - the Leo session or the whole fleet is not answering. Nothing is verified right now.</p>'+$('warnings').innerHTML;
+  }
   const pnote=[];
   if(!((o.progress||{}).ok)) pnote.push('leveling progress unavailable: '+esc(((o.progress||{}).error||{}).message||'db-search'));
   if(!((o.missions||{}).ok)) pnote.push('mission registry unavailable: '+esc(((o.missions||{}).error||{}).message||'engine'));
