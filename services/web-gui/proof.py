@@ -153,6 +153,61 @@ def arm_arrival_reply(base, bot, log, deadline=40):
         time.sleep(0.5)
     return False
 
+def drain_pending_probes(base, bot, log, line):
+    """Answer every OUTSTANDING pending 'inspect position' probe for this
+    bot, until none remain. The tunnel binds replies oldest-pending-first:
+    stale probes left by earlier missions sit AHEAD of a new leg's probes
+    in the queue and eat its replies (live failure: the vendor leg starved
+    while its STV feeds bound to the farm keeper's leftovers). Call this
+    BEFORE starting a mission so the leg's probes are the oldest."""
+    for _ in range(20):
+        st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        evs = (ev.get("result") or {}).get("events", [])
+        pend = [x for x in evs
+                if x.get("direction") == "sent" and x.get("target") == bot
+                and x.get("command") == "inspect position"
+                and x.get("status") == "pending"]
+        if not pend:
+            return True
+        with open(log, "a") as f:
+            for _ in pend:
+                f.write(display_line(line) + "\n")
+            f.flush()
+        time.sleep(1.2)       # let the binds flip
+    return False
+
+
+def feed_all_pending(base, bot, log, line, deadline=40):
+    """Keep feeding ANY pending 'inspect position' probe for this bot with
+    the given position line, for the whole deadline. No id-guard: the real
+    mission leg fires its first probe BEFORE this helper starts, and the
+    tunnel binds a reply to the OLDEST pending - stale probes from earlier
+    segments steal single feeds. Feed, wait for the bind to flip the
+    pending's status, repeat. Returns the number of feeds."""
+    fed = 0
+    quiet = 0
+    for _ in range(deadline * 2):
+        st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        evs = (ev.get("result") or {}).get("events", [])
+        pend = [x for x in evs
+                if x.get("direction") == "sent" and x.get("target") == bot
+                and x.get("command") == "inspect position"
+                and x.get("status") == "pending"]
+        if pend:
+            with open(log, "a") as f:
+                f.write(display_line(line) + "\n")
+                f.flush()
+            fed += 1
+            quiet = 0
+            time.sleep(1.5)      # let the tunnel bind it
+        else:
+            quiet += 1
+            if fed and quiet >= 8:
+                return fed
+        time.sleep(0.5)
+    return fed
+
+
 def feed_position_reply(base, bot, log, line, deadline=60):
     """Answer a NEW pending 'inspect position' probe for this bot (one that
     APPEARS after this call starts) with an arbitrary position line. The
@@ -468,12 +523,14 @@ def main():
               json.dumps(sgr)[:200])
         st, sga, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "state", "dest": "gather"})
-        check("state gather sends the GATHER-ONLY doctrine (rpg engine off)",
-              sga.get("ok") is True and len(sga.get("results", [])) == 1
-              and sga.get("results", [{}])[0].get("status") == "sent"
-              and "/w Ayla nc -new rpg,-grind,-quest,-follow,+gather"
-                  in sga.get("results", [{}])[0].get("detail", ""),
-              json.dumps(sga)[:260])
+        check("state gather sends the wiki workflow (strategy + launcher)",
+              sga.get("ok") is True and len(sga.get("results", [])) == 2
+              and all(r.get("status") == "sent" for r in sga["results"])
+              and any("nc +new rpg,-grind,-quest,-follow,+gather"
+                      in (r.get("detail") or "") for r in sga["results"])
+              and any(r.get("cmd") == "rpg do gather"
+                      for r in sga["results"]),
+              json.dumps(sga)[:300])
         st, sid, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "state", "dest": "idle"})
         check("state idle sends the nc stand-down (read-only rpg status never sent)",
@@ -646,17 +703,41 @@ def main():
               (ms2.get("missions", {}).get("Ayla") or {}).get("kind") == "farm",
               json.dumps(ms2)[:200])
         arm_arrival_reply(base, "Ayla", log)
-        armed = False
+        ARM = "nc +new rpg,-grind,-quest,-follow,+gather"
+        asked = False
+        for _ in range(40):
+            time.sleep(1)
+            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            cmds = [x.get("command") for x in
+                    (ev.get("result") or {}).get("events", [])]
+            if ARM in cmds and "rpg do gather" in cmds:
+                # feed the rpg status readback its answer (the [whisper]
+                # reply shape) once the ask goes out
+                if "rpg status" in cmds and not asked:
+                    with open(log, "a") as f:
+                        f.write(display_line("[Ayla] [whisper]: doing gather")
+                                + "\n")
+                        f.flush()
+                    asked = True
+                continue
+            armed = ARM in cmds and "rpg do gather" in cmds
+            if armed and asked:
+                break
+        check("farm arms the wiki workflow: strategies + 'rpg do gather'",
+              ARM in cmds and "rpg do gather" in cmds,
+              json.dumps(cmds[-10:])[:240])
+        narr = False
         for _ in range(30):
             time.sleep(1)
             st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
             cmds = [x.get("command") for x in
                     (ev.get("result") or {}).get("events", [])]
-            if "nc -new rpg,-grind,-quest,-follow,+gather" in cmds:
-                armed = True
+            if any(c and "arrived at BootyBay and is gathering" in c
+                   for c in cmds):
+                narr = True
                 break
-        check("farm arms the GATHER-ONLY doctrine line (rpg engine off)",
-              armed, json.dumps(cmds[-8:])[:200])
+        check("the rpg status readback confirms gathering before narration",
+              narr, json.dumps(cmds[-6:])[:200])
         st, msd, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "standdown"})
         check("stand down releases the farm lease",
@@ -731,6 +812,23 @@ def main():
               and "no bags-full" in va1.get("note", ""),
               json.dumps(va1)[:160])
 
+        # drain the stale pending probes BEFORE the vendor leg starts
+        drain_pending_probes(base, "Ayla", log,
+                             "[System]: Ayla: -14420.0 480.0 26.0 0 "
+                             "0 |Stranglethorn Vale|")
+        # CURSOR: this section runs late; drain to the newest event first
+        vcur = 0
+        while True:
+            st, evx, _ = http("GET", base +
+                              "/api/events?after_id=%d&limit=1000" % vcur)
+            evr = evx.get("result") or {}
+            batch = evr.get("events") or []
+            if not batch:
+                break
+            vcur = evr.get("last_id") or vcur
+            if len(batch) < 1000:
+                break
+
         # --- 6d. vendor run mission (the full-bags action) ----------------
         st, mv, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "vendor", "dest": "BootyBay"})
@@ -744,13 +842,16 @@ def main():
               mvv.get("ok") is False
               and "already selling in" in mvv.get("result", {}).get("detail", ""),
               json.dumps(mvv)[:200])
-        arm_arrival_reply(base, "Ayla", log)
+        feed_all_pending(base, "Ayla", log,
+                         "[System]: Ayla: -14420.0 480.0 26.0 0 "
+                         "0 |Stranglethorn Vale|", deadline=30)
         # the sell whisper goes out; feed the bot's ANSWER (correlated
         # whisper reply) - the mission must surface it as evidence
         sold = False
         for _ in range(30):
             time.sleep(1)
-            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            st, ev, _ = http("GET", base +
+                             "/api/events?after_id=%d&limit=500" % vcur)
             evs = (ev.get("result") or {}).get("events", [])
             if any(x.get("direction") == "sent"
                    and x.get("command") == "s vendor"
@@ -761,18 +862,19 @@ def main():
                 sold = True
                 break
         check("vendor run sends the sell whisper after arrival",
-              sold, json.dumps(cmds[-8:])[:200])
+              sold, "vcur=%s cmds=%s" % (vcur, cmds[:20]))
         narrated = False
         for _ in range(30):
             time.sleep(1)
-            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            st, ev, _ = http("GET", base +
+                             "/api/events?after_id=%d&limit=500" % vcur)
             cmds = [x.get("command") for x in
                     (ev.get("result") or {}).get("events", [])]
             if any(c and "sold 12 items" in c for c in cmds):
                 narrated = True
                 break
         check("the bot's sell answer is captured and narrated (evidence)",
-              narrated, json.dumps(cmds[-8:])[:200])
+              narrated, "vcur=%s cmds=%s" % (vcur, cmds[:20]))
         vgone = False
         for _ in range(20):
             time.sleep(1)
@@ -782,15 +884,21 @@ def main():
                 break
         check("vendor run releases the lease when done", vgone)
 
-        # --- 6e. the farm drift watchdog (live 2026-11-23: a leased farm
+        # --- 6e. the farm drift watchdog (drain the stale probes first - see
+        # drain_pending_probes: the tunnel binds oldest-pending-first) (live 2026-11-23: a leased farm
         # bot was found standing in another city; the keeper must verify) --
+        drain_pending_probes(base, "Ayla", log,
+                             "[System]: Ayla: -14420.0 480.0 26.0 0 "
+                             "0 |Stranglethorn Vale|")
         st, fd1, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})
         check("drift test: the farm restarts for the watchdog probe",
               fd1.get("ok") is True
               and fd1.get("result", {}).get("status") == "started",
               json.dumps(fd1)[:160])
-        arm_arrival_reply(base, "Ayla", log)
+        feed_all_pending(base, "Ayla", log,
+                         "[System]: Ayla: -14420.0 480.0 26.0 0 "
+                         "0 |Stranglethorn Vale|", deadline=30)
         # CURSOR DISCIPLINE: this test runs late in the session and the
         # event stream is long - after_id=0 only returns the OLDEST 1000
         # events. Drain to the newest id first, then read fresh-only.
@@ -807,9 +915,9 @@ def main():
                 break
         # the keeper's first cycle probes the position: answer with a FAR
         # position (Stormwind) - the watchdog must catch the drift
-        fed = feed_position_reply(base, "Ayla", log,
-                                  "[System]: Ayla: -8800.0 700.0 100.0 0 "
-                                  "0 |Stormwind City|")
+        fed = feed_all_pending(base, "Ayla", log,
+                               "[System]: Ayla: -8800.0 700.0 100.0 0 "
+                               "0 |Stormwind City|", deadline=40)
         drift_seen, sold_back = False, False
         for _ in range(60):
             time.sleep(1)
@@ -824,11 +932,14 @@ def main():
                     drift_seen = True
                 if c.startswith(".tele") and "BootyBay" in c:
                     sold_back = True   # the travel order's wire form
+        dtail = ["%s|%s|%s" % (x.get("direction"), x.get("status"),
+                                (x.get("command") or "")[:70])
+                 for x in batch]
         check("the drift watchdog: a farmed bot caught in another city is "
               "sent back (narrated + travel order)",
               drift_seen and sold_back,
-              "fed=%s drift=%s sent_back=%s"
-              % (fed, drift_seen, sold_back))
+              "fed=%s drift=%s sent_back=%s fresh=%s"
+              % (fed, drift_seen, sold_back, dtail[-14:]))
         fled = False
         for _ in range(50):
             time.sleep(1)
