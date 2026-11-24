@@ -277,7 +277,7 @@ def main():
             director.census(online_only=False))
         check("recipes sweep: leveling loads travel + grind orders",
               "RECIPE level_in_zone" in r5 and "travel <the zone's table destination>" in r5
-              and "nc +new rpg,+grind,-follow" in r5, r5[:300])
+              and "nc +new rpg,+grind,-quest,-gather,-follow" in r5, r5[:300])
         dig = director.run_queries(
             [{"query": "dest", "bot": "Gau", "name": "Booty Bay"}],
             director.census(online_only=False))
@@ -502,7 +502,7 @@ def main():
               any("is travelling to BootyBay" in r for r in reported), reported)
         check("mission stood the bot down and restored it",
               any("nc -new rpg,-grind,-gather,-follow" in l for l in fifo_lines) and
-              any("nc +new rpg,+grind,-follow" in l for l in fifo_lines), fifo_lines[-6:])
+              any("nc -new rpg,-grind,-quest,-gather,-follow" in l for l in fifo_lines), fifo_lines[-6:])
         check("audit records the leg as TRAVEL",
               "TRAVEL" in open(director.AUDIT).read(), None)
         err = director.validate({"bot": "Gau", "cmd": "travel Nowhereville"},

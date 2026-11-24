@@ -125,6 +125,19 @@ MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
 # goes through nc. The gather preset needs Herbalism/Mining; the idle
 # preset is the stand-down and releases a farm lease via validate().
+# what 'nc ?' should mention when a preset has truly taken (the confirm
+# half of the operator's verify loop). idle's [""] = any answered readback
+# confirms (nothing-enabled is a negative state; the answer IS the proof)
+PRESET_MARKERS = {
+    "grind": ["grind"],
+    "quest": ["quest"],
+    "gather": ["gather"],
+    "leveling": ["quest", "grind"],
+    "follow": ["follow"],
+    "idle": [""],
+}
+
+
 STATE_PRESETS = {
     "grind": ("nc +new rpg,+grind,-quest,-gather,-follow",),
     "quest": ("nc +new rpg,+quest,-grind,-gather,-follow",),
@@ -924,11 +937,15 @@ def api_mission(bot, op, dest):
                 "error": {"code": "bad_request",
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
-        # operator 2026-11-24: multi-whisper presets must be paced - the
-        # client drops commands sent back-to-back to the same bot. Submit
-        # them one by one (in-branch) and fall through the shared result
-        # path by marking `orders` empty (the shared submit is skipped;
-        # audits, receipts and the state registry still apply).
+        # THE OPERATOR'S VERIFY LOOP (2026-11-24, verbatim): 'I send NC
+        # ?, read what it sends back, decide if its missing something, if
+        # it is I send the command THEN I DO A NC ? AGAIN TO CONFIRM.'
+        # Readback -> apply -> readback; both readbacks are shown in the
+        # response. A preset whose after-readback does not confirm is
+        # UNCONFIRMED, never sent-and-working.
+        before = d.ask_bot(bot, "nc ?", wait=3)
+        # multi-whisper presets are paced (back-to-back commands to the
+        # same bot get dropped by the client)
         paced = []
         for c in STATE_PRESETS[preset]:
             try:
@@ -940,22 +957,34 @@ def api_mission(bot, op, dest):
                               "detail": str(e)})
             if len(STATE_PRESETS[preset]) > 1:
                 time.sleep(4)
-        ok = bool(paced) and all(r.get("status") in ("started", "sent")
-                                 for r in paced)
+        time.sleep(2)
+        after = d.ask_bot(bot, "nc ?", wait=5)
+        sent = bool(paced) and all(r.get("status") in ("started", "sent")
+                                   for r in paced)
+        confirmed = after and any(w.lower() in after.lower()
+                                  for w in PRESET_MARKERS.get(preset, []))
+        ok = sent and bool(confirmed)
         for r in paced:
             _receipt_note(r.get("bot", bot), r.get("detail", ""),
                           r.get("status", "unknown"))
-        if ok:
+        if sent:
             _state_set(bot, preset)
-        _audit("mission", "%s state %s -> %s"
-               % (bot, preset,
-                  "; ".join("%s:%s" % (r.get("status"),
-                                       (r.get("detail") or "")[:80])
-                            for r in paced)))
+        _audit("mission", "%s state %s -> sent=%s confirmed=%s (before: %s; "
+               "after: %s)"
+               % (bot, preset, sent, bool(confirmed), (before or "?")[:80],
+                  (after or "?")[:80]))
+        detail = ("sent and nc ? CONFIRMS the strategy" if confirmed else
+                  ("sent but nc ? did not confirm (after: %s)"
+                   % ((after or "no answer")[:120]) if sent else
+                   "not sent - see the per-order results"))
         return {"ok": ok, "queried_at": _now(),
-                "result": paced[0] if paced else
-                {"status": "failed", "detail": "no result"},
-                "results": paced}
+                "result": {"bot": bot, "status":
+                           "confirmed" if ok else "unconfirmed",
+                           "detail": detail},
+                "results": paced,
+                "verify": {"before": before or "no answer",
+                           "after": after or "no answer",
+                           "confirmed": bool(confirmed)}}
     elif op == "disband":
         # Leo's whole group, via the proven rails: a 'group remove' order
         # per current member (validate() rewrites bots to the plain
@@ -1375,8 +1404,14 @@ async function openModal(name){
   };
   ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline','op-leave']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
-  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle','op-status']
+  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
+  $('op-status').onclick=async()=>{
+    const out=$('mission-result'); out.textContent='asking...';
+    const r=await jpost('/api/mission',{bot:selToon,op:'status'});
+    const det=r.ok?((r.result&&r.result.detail)||''):(r.error&&r.error.message)||'no answer';
+    out.innerHTML=r.ok?'<span class="on">'+esc(det)+'</span>':'<span class="err">'+esc(det)+'</span>';
+  };
   async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
     const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline'||op==='leave'||op==='status')?undefined:selDest)});

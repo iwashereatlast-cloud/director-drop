@@ -185,16 +185,16 @@ def drain_pending_probes(base, bot, log, line):
     return False
 
 
-def status_feeder_thread(base, log, mapping, stop):
-    """While a status POST is blocking, answer every pending 'rpg status'
-    ask for the mapped toons with a scripted reply line."""
+def status_feeder_thread(base, log, mapping, stop, command="rpg status"):
+    """While a status POST is blocking, answer every pending ask of
+    `command` for the mapped toons with a scripted reply line."""
     answered = set()
     while not stop["v"]:
         st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
         evs = (ev.get("result") or {}).get("events", [])
         for x in evs:
             if x.get("direction") == "sent" \
-                    and x.get("command") == "rpg status" \
+                    and x.get("command") == command \
                     and x.get("status") == "pending" \
                     and x.get("target") in mapping \
                     and x.get("target") not in answered:
@@ -264,6 +264,26 @@ def feed_position_reply(base, bot, log, line, deadline=60):
             return True
         time.sleep(0.5)
     return False
+
+
+def nc_feeder_loop(base, log, bots, stop):
+    """Answer EVERY pending 'nc ?' ask for the given bots with a strategy
+    readback - the verify loop's readback side in the fixture (replies to
+    EVERY ask, not one-shot: the loop needs before AND after readbacks)."""
+    while not stop["v"]:
+        st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        for x in (ev.get("result") or {}).get("events", []):
+            if x.get("direction") == "sent" \
+                    and x.get("command") == "nc ?" \
+                    and x.get("status") == "pending" \
+                    and x.get("target") in bots:
+                with open(log, "a") as f:
+                    f.write(display_line(
+                        "[{}] [whisper]: Strategies: +new rpg +grind +quest "
+                        "+gather -follow".format(x.get("target"))) + "\n")
+                    f.flush()
+                time.sleep(0.6)
+        time.sleep(0.4)
 
 
 def display_line(inner):
@@ -546,6 +566,12 @@ def main():
               sbad.get("ok") is False
               and sbad.get("error", {}).get("code") == "bad_request",
               json.dumps(sbad)[:200])
+        # the OPERATOR'S VERIFY LOOP needs readbacks: the nc ? answerer
+        # runs for the whole state-op section (before AND after asks)
+        ncstop = {"v": False}
+        threading.Thread(target=nc_feeder_loop,
+                         args=(base, log, {"Ayla", "Gau", "Locke"}, ncstop),
+                         daemon=True).start()
         st, sgr, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "state", "dest": "grind"})
         check("state grind sends the botcmd preset verbatim",
@@ -654,10 +680,12 @@ def main():
               json.dumps(hl)[:160])
         st, hr, _ = http("POST", base + "/api/mission",
                          {"bot": "Gau", "op": "state", "dest": "grind"})
+        hr0 = (hr.get("results") or [{}])[0]
         check("a locked hand-play toon refuses orders (the director rail)",
               hr.get("ok") is False
-              and "hand-play toon" in hr.get("result", {}).get("detail", ""),
-              json.dumps(hr)[:200])
+              and hr0.get("status") == "refused"
+              and "hand-play toon" in (hr0.get("detail") or ""),
+              json.dumps(hr)[:260])
         st, hu, _ = http("POST", base + "/api/handplay",
                          {"toon": "Gau", "on": False})
         check("hand-play lock releases via the API",
@@ -667,8 +695,8 @@ def main():
                          {"bot": "Gau", "op": "state", "dest": "grind"})
         check("an unlocked toon takes orders again",
               hg.get("ok") is True
-              and hg.get("result", {}).get("status") == "sent",
-              json.dumps(hg)[:200])
+              and hg.get("result", {}).get("status") == "confirmed",
+              json.dumps(hg)[:260])
         st, hau, _ = http("GET", base + "/api/audit?limit=200")
         check("hand-play toggles are audited",
               any(e.get("action") == "handplay" for e in hau.get("entries", [])),
@@ -716,6 +744,7 @@ def main():
               rv2.get("counts", {}).get("actions") == 0,
               json.dumps(rv2.get("counts"))[:160])
 
+        ncstop["v"] = True
         # --- 6b3. Tier 1 gating (strict for missions, permissive whispers)
         st, t1s, _ = http("POST", base + "/api/mission",
                           {"bot": "Cecil", "op": "travel", "dest": "BootyBay"})
@@ -723,12 +752,17 @@ def main():
               t1s.get("ok") is False
               and "Tier 1" in ((t1s.get("error") or {}).get("message") or ""),
               json.dumps(t1s)[:200])
+        nc2stop = {"v": False}
+        threading.Thread(target=nc_feeder_loop,
+                         args=(base, log, {"Ayla", "Gau", "Locke"}, nc2stop),
+                         daemon=True).start()
         st, t1w, _ = http("POST", base + "/api/mission",
                           {"bot": "Locke", "op": "state", "dest": "grind"})
         check("Tier 1: a whisper to a probe-verified offline toon goes through",
               t1w.get("ok") is True
-              and t1w.get("result", {}).get("status") == "sent",
-              json.dumps(t1w)[:200])
+              and t1w.get("result", {}).get("status") == "confirmed",
+              json.dumps(t1w)[:260])
+        nc2stop["v"] = True
 
         st, mf, _ = http("POST", base + "/api/mission",
                          {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})

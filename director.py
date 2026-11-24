@@ -315,7 +315,7 @@ ORDER_RULES = """Reply with ONE JSON object as the LAST thing in your reply, ins
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Core rules:
 - Only name bots from the live roster (the system validates it against the live roster from the DB service and skips others).
-- cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
+- cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-quest,-gather,-follow".
 - Allowed command prefixes: %(wl)s.
 - Mission orders (validated separately from the prefix list, always available): "travel <destination>" (the system moves the bot to a named location), "farm <destination>" (the system moves it there AND keeps it gathering - herbs/ore), "walk <destination>" (ground march).
 - RECIPES: for any TASK the master asks for (travel, farming, leveling, silent bots, groups, casting, presence, coming to you, boats), attach query {"query":"recipes","text":"<the master's words>"} FIRST - the results return the exact command structures, zone translation table and gotchas for the matched skills. Use them verbatim; do not improvise command shapes. If nothing matches, fall back to these core rules and say what you lack.
@@ -352,13 +352,13 @@ FEWSHOT = [
     {"role": "user", "content": "send golbez to stv"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is travelling to Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel Booty Bay\"}]}\n```"},
     {"role": "user", "content": "send Golbez to the Barrens to grind"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel TheCrossroads\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel TheCrossroads\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-quest,-gather,-follow\"}]}\n```"},
     {"role": "user", "content": "have golbez go to stv and gather herbs"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is off to Stranglethorn Vale to gather herbs.\", \"queries\": [{\"query\": \"skills\", \"bot\": \"Golbez\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "DB query results (read-only):\nskills: Golbez - herb 300/300, mine 0/1\nGive your final reply now, with orders if any. (Further queries this turn are ignored.)"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is farming herbs in Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"farm Booty Bay\"}]}\n```"},
     {"role": "user", "content": "have all the bots start leveling"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to their grind cycles.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to their grind cycles.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+grind,-quest,-gather,-follow\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "make everyone quest in Westfall"},
@@ -968,7 +968,7 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
                 return
             hx, hy, dist = _next_hop(pos[0], pos[1], tx, ty)
             if dist <= WALK_ARRIVE:
-                for c in (restore or ("nc +new rpg,+grind,-follow",)):
+                for c in (restore or ("nc -new rpg,-grind,-quest,-gather,-follow",)):
                     try:
                         send_order(bot, c)
                     except Exception as e:
@@ -1054,8 +1054,12 @@ def _teleport_leg(bot, tx, ty, tmap, name, master, timeout=30):
 
 
 def _restore(bot, restore=None):
-    """Mission epilogue: hand the bot back to its normal engine life."""
-    for c in (restore or ("nc +new rpg,+grind,-follow",)):
+    """Mission epilogue: hand the bot back its NEUTRAL life (everything
+    off). The OLD default re-armed the wander engine + grind the moment
+    a travel ended - live 2026-11-24: a summoned bot ran off the instant
+    its teleport completed. Operators set their own state with the pills;
+    the mission leaves the bot where it was put (idle)."""
+    for c in (restore or ("nc -new rpg,-grind,-quest,-gather,-follow",)):
         try:
             send_order(bot, c)
         except Exception as e:
@@ -2567,7 +2571,7 @@ def _patrol(state):
             adds.append({"bot": name, "cmd": "bot add"})
             pending.add(name)
         elif info.get("online") and name in pending:
-            arms.append({"bot": name, "cmd": "nc +new rpg,+grind,-follow"})
+            arms.append({"bot": name, "cmd": "nc +new rpg,+grind,-quest,-gather,-follow"})
             pending.discard(name)
     for o in adds:
         print("presence: patrol - %s is offline; bringing it online" % o["bot"])
