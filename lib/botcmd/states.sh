@@ -10,7 +10,7 @@ Built-in presets (conf value = the preset word):
   grind    nc +new rpg,+grind,-quest,-gather,-follow
   quest    nc +new rpg,+quest,-grind,-gather,-follow     (nc-only since PR #34: 'rpg status do quest' removed - only works with a quest+POI already in the log, else it just asks for an id)
   gather   nc +new rpg,-grind,-quest,-follow,+gather ; rpg do gather (the wiki workflow 2026-11-23: the launcher is separate - strategies alone idle the bot; read back with 'rpg status'; needs Herbalism/Mining + a pick for miners)
-  leveling nc +new rpg,+quest,+grind,+gather,-follow   (quest+grind+gather combined; the gather
+  leveling nc +new rpg,+quest,+grind,-follow   (quest+grind ONLY - gather is NOT part of it, operator 2026-11-24: it filled bags with mats and split focus)
            strategy no-ops on bots without Herbalism/Mining, so it is safe fleet-wide)
   follow   nc +follow                 (follow-duty: cling to master; NOTE "+new +follow" is a silent no-op - strategies split on ',' only)
   idle     nc -new rpg,-grind,-quest,-gather,-follow ; rpg status idle   (stand down)
@@ -63,7 +63,7 @@ state_expand() {  # $1 = conf value
     grind)  printf '%s\n' 'nc +new rpg,+grind,-quest,-gather,-follow' ;;
     quest)  printf '%s\n' 'nc +new rpg,+quest,-grind,-gather,-follow' ;;
     gather) printf '%s\n' 'nc +new rpg,+gather,-grind,-quest,-follow' 'rpg status do gather' ;;
-    leveling) printf '%s\n' 'nc +new rpg,+quest,+grind,+gather,-follow' ;;
+    leveling) printf '%s\n' 'nc +new rpg,+quest,+grind,-follow' ;;
     follow) printf '%s\n' 'nc +follow' ;;
     idle)   printf '%s\n' 'nc -new rpg,-grind,-quest,-gather,-follow' 'rpg status idle' ;;
     *)      printf '%s\n' "$1" | sed 's/ *;; */\n/g' ;;

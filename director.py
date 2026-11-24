@@ -1131,7 +1131,9 @@ def _bot_ask(bot, question, want, wait=None):
         newest = 0
     try:
         send_order(bot, question)
-    except Exception:
+    except Exception as e:
+        print("director: ask_bot send failed for %s (%r): %s"
+              % (bot, question, e), flush=True)
         return None
     txt = _watch_reply(bot, wait or 5)
     if txt is None:
@@ -1171,6 +1173,61 @@ def _bot_ask(bot, question, want, wait=None):
     return None
 
 
+def ask_bot(bot, question, wait=5):
+    """Public readback seam (the web-gui 'status' op): send a query whisper
+    and return the bot's reply text, or None if it never answers. See
+    _watch_reply for why the answer is content-matched. Mission-internal:
+    bypasses validate() by design - it is a READ, never a command (the
+    'rpg status is read-only' doctrine forbids SENDING it as an order;
+    reading via it is exactly its purpose per the owner note)."""
+    if not re.fullmatch(r"[A-Za-z]+", str(bot or "")):
+        return None
+    try:
+        send_order(bot, question)
+    except Exception:
+        return None
+    return _watch_reply(bot, wait)
+
+
+def ask_all_bots(names, question, wait=8):
+    """The fleet readback (the web-gui status sweep): send the question to
+    every name (paced - same-bot commands need seconds between them, and
+    even different bots share the FIFO), then collect each bot's reply
+    from the event stream. Returns {name: reply or None}."""
+    try:
+        evs = tunnel("get_recent_events", limit=1)["events"]
+        newest = int(evs[0]["id"]) if evs else 0
+    except Exception:
+        newest = 0
+    todo = set(names)
+    for n in sorted(todo):
+        try:
+            send_order(n, question)
+        except Exception as e:
+            print("director: ask_all_bots send failed for %s: %s"
+                  % (n, e), flush=True)
+            todo.discard(n)
+        time.sleep(1.2)
+    answers = {n: None for n in names}
+    for _ in range(wait):
+        time.sleep(2)
+        try:
+            evs = tunnel("get_events_since",
+                         after_id=newest, limit=200)["events"]
+        except Exception:
+            continue
+        for x in evs:
+            if x.get("direction") != "reply":
+                continue
+            who = str(x.get("sender") or "")
+            if who in todo:
+                answers[who] = str(x.get("command") or "")
+                todo.discard(who)
+        if not todo:
+            break
+    return answers
+
+
 def _farm_mission(bot, tx, ty, tmap, name, master):
     """Gather-keeper (live 2026-11-11: 'sent golbez to stv, told her to gather,
     now shes back in EPL'): 'rpg status do gather' lasts exactly 15 minutes
@@ -1207,7 +1264,11 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                 send_order(bot, c)
             except Exception as e:
                 print("daemon: farm arm failed for %s: %s" % (bot, e))
-            time.sleep(1)
+            # operator 2026-11-24: commands to the same bot need SECONDS
+            # between them - 1s was too fast and the launcher was dropped
+            # by the client before the strategy reloaded (live: gather
+            # never started)
+            time.sleep(4)
         gathering = _bot_ask(bot, "rpg status", "gather")
         say(master, "%s has arrived at %s and %s."
             % (bot, name,

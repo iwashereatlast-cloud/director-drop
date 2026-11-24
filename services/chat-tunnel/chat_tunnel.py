@@ -92,7 +92,7 @@ MASTER_CMDS = ("bot add", "bot remove", "bot" )
 # but failed to parse - these are the A14 red flag.
 STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_noise": 0,
          "lines_garbled": 0, "lines_filtered": 0, "sends_refused": 0,
-         "lines_system": 0,
+         "lines_system": 0, "lines_echo_skipped": 0,
          "replies_matched": 0, "replies_unmatched": 0,
          "sends_ok": 0, "sends_failed": 0, "started_at": time.time()}
 
@@ -347,6 +347,16 @@ def handle_reply_line(raw_line, t):
     allow = allowed_names()
     if allow and sender.lower() not in allow:
         STATS["lines_filtered"] += 1   # outside the roster: dropped, never matched
+        return None
+    if channel == "whisper_inform" and sender.lower() == MASTER.lower():
+        # the mod's delivery echo: every outgoing whisper from Leo comes
+        # back a second time as '[Leo] [whisper_inform]'. The '[whisper]'
+        # echo already carries the delivery evidence; the inform line
+        # doubled every narration in the feed (live 2026-11-24, operator:
+        # 'do we really need two replies saying the same thing?'). No
+        # event for the master's own echoes - a BOT's whisper_inform stays
+        # (that is a real reply from a real sender).
+        STATS["lines_echo_skipped"] += 1
         return None
     STATS["lines_parsed"] += 1
     return match_reply(sender, channel, text, raw_line.rstrip("\n"), t)

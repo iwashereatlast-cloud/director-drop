@@ -118,7 +118,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # client never supplies a free-form cmd); director's validate() is the
 # second wall either way.
 MISSION_OPS = ("travel", "farm", "walk", "vendor", "vendor_all", "state",
-               "standdown", "online", "offline", "leave", "disband")
+               "standdown", "online", "offline", "leave", "disband",
+               "status")
 MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
@@ -133,7 +134,9 @@ STATE_PRESETS = {
     # gathering, and 'rpg status' is the readback
     "gather": ("nc +new rpg,-grind,-quest,-follow,+gather",
                "rpg do gather"),
-    "leveling": ("nc +new rpg,+quest,+grind,+gather,-follow",),
+    # operator 2026-11-24: leveling is quest+grind ONLY - gather is not
+    # part of it (it filled the fleet's bags with mats and split focus)
+    "leveling": ("nc +new rpg,+quest,+grind,-follow",),
     "follow": ("nc +follow",),
     "idle": ("nc -new rpg,-grind,-quest,-gather,-follow",),
 }
@@ -800,6 +803,45 @@ def api_mission(bot, op, dest):
                           "the DB flag says offline - missions are "
                           "refused until the bot is verified (Tier 1)"
                           % bot}}
+    if op == "status":
+        # the readback op (operator ask: 'a function that does rpg status
+        # so i can see what the bots are doing'): one toon, or the whole
+        # flag-online census. A READ via the read-only command - never an
+        # order; ask_bot bypasses validate() by design. Defensive: an ask
+        # failure must answer the request, never kill the handler.
+        try:
+            if bot == "ALL":
+                cen = db_call("get_online_census", {"account_like": CENSUS})
+                names = [r[0] for r in (cen.get("rows") or [])
+                         if str(r[6]) == "1"]
+                got = d.ask_all_bots(names, "rpg status")
+                answers = [{"bot": n,
+                            "status": "answered" if got.get(n) else "no answer",
+                            "detail": got.get(n) or ""} for n in names]
+                ok = any(x["status"] == "answered" for x in answers)
+                _audit("mission", "ALL status sweep -> %d answered of %d"
+                       % (sum(1 for x in answers
+                              if x["status"] == "answered"), len(answers)))
+                return {"ok": ok, "queried_at": _now(), "results": answers,
+                        "result": answers[0] if answers else
+                        {"status": "failed",
+                         "detail": "no online census toons"}}
+            a = d.ask_bot(bot, "rpg status")
+        except Exception as e:
+            _audit("mission", "%s status -> ASK CRASHED: %s" % (bot, e))
+            return {"ok": False, "queried_at": _now(),
+                    "result": {"bot": bot, "status": "error",
+                               "detail": "the ask crashed: %s" % e},
+                    "results": [{"bot": bot, "status": "error",
+                                 "detail": str(e)}]}
+        _audit("mission", "%s status -> %s" % (bot, a or "no answer"))
+        return {"ok": a is not None, "queried_at": _now(),
+                "result": {"bot": bot,
+                           "status": "answered" if a else "no answer",
+                           "detail": a or ""},
+                "results": [{"bot": bot,
+                             "status": "answered" if a else "no answer",
+                             "detail": a or ""}]}
     if op == "vendor_all":
         # one town, every bags-full toon: the bulk answer to a wall of
         # bag alarms (each order still walks validate(); leased/offline
@@ -841,7 +883,38 @@ def api_mission(bot, op, dest):
                 "error": {"code": "bad_request",
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
-        orders = [{"bot": bot, "cmd": c} for c in STATE_PRESETS[preset]]
+        # operator 2026-11-24: multi-whisper presets must be paced - the
+        # client drops commands sent back-to-back to the same bot. Submit
+        # them one by one (in-branch) and fall through the shared result
+        # path by marking `orders` empty (the shared submit is skipped;
+        # audits, receipts and the state registry still apply).
+        paced = []
+        for c in STATE_PRESETS[preset]:
+            try:
+                paced.extend(d.submit_orders(
+                    [{"bot": bot, "cmd": c}], master=LEO,
+                    trusted=_trusted_live()))
+            except Exception as e:
+                paced.append({"bot": bot, "cmd": c, "status": "failed",
+                              "detail": str(e)})
+            if len(STATE_PRESETS[preset]) > 1:
+                time.sleep(4)
+        ok = bool(paced) and all(r.get("status") in ("started", "sent")
+                                 for r in paced)
+        for r in paced:
+            _receipt_note(r.get("bot", bot), r.get("detail", ""),
+                          r.get("status", "unknown"))
+        if ok:
+            _state_set(bot, preset)
+        _audit("mission", "%s state %s -> %s"
+               % (bot, preset,
+                  "; ".join("%s:%s" % (r.get("status"),
+                                       (r.get("detail") or "")[:80])
+                            for r in paced)))
+        return {"ok": ok, "queried_at": _now(),
+                "result": paced[0] if paced else
+                {"status": "failed", "detail": "no result"},
+                "results": paced}
     elif op == "disband":
         # Leo's whole group, via the proven rails: a 'group remove' order
         # per current member (validate() rewrites bots to the plain
@@ -1021,6 +1094,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     <button id="fleet-online" class="warn">all online</button>
     <button id="fleet-offline" class="warn">all offline</button>
     <button id="disband" class="warn">disband party</button>
+    <button id="status-sweep" class="warn">status sweep</button>
     <button id="panic" style="background:var(--err)">STAND DOWN ALL</button>
   </div>
 </header>
@@ -1199,7 +1273,8 @@ async function openModal(name){
     +'<button id="op-leveling">leveling</button>'
     +'<button id="op-follow">follow</button>'
     +'<button id="op-idle">idle</button>'
-    +'<button id="op-standdown" style="background:var(--err)">stand down</button></div></div>'
+    +'<button id="op-standdown" style="background:var(--err)">stand down</button> '
+    +'<button id="op-status">what are you doing?</button></div></div>'
     +'<p class="note" id="mission-result"></p>'
     +'<div style="margin-top:10px"><button id="op-close">close</button></div>';
   const hp=(((o.handplay||{}).handplay)||[]);
@@ -1239,11 +1314,11 @@ async function openModal(name){
   };
   ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline','op-leave']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
-  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
+  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle','op-status']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
-    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline'||op==='leave')?undefined:selDest)});
+    const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline'||op==='leave'||op==='status')?undefined:selDest)});
     const det=r.ok?((r.results||[]).map(x=>x.status+': '+x.detail).join(' | ')):((r.error||{}).message||(r.result||{}).detail);
     out.innerHTML=r.ok?'<span class="on">'+esc((r.results||[]).length+' order(s): '+det)+'</span>':'<span class="err">'+esc(det)+'</span>';
     setTimeout(loadOverview,1500);
@@ -1269,6 +1344,14 @@ $('fleet-online').onclick=async()=>{
   if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM all online?';setTimeout(()=>{b.dataset.armed='0';b.textContent='all online'},3000);return}
   b.dataset.armed='0';b.textContent='all online';b.disabled=true;
   await jpost('/api/mission',{bot:'ALL',op:'online'});b.disabled=false;setTimeout(loadOverview,1500);
+};
+$('status-sweep').onclick=async()=>{
+  const b=$('status-sweep');
+  if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='CONFIRM sweep?';setTimeout(()=>{b.dataset.armed='0';b.textContent='status sweep'},3000);return}
+  b.dataset.armed='0';b.textContent='status sweep';b.disabled=true;
+  const r=await jpost('/api/mission',{bot:'ALL',op:'status'});
+  b.disabled=false;
+  if(r.ok){setTimeout(loadOverview,1500)}
 };
 $('disband').onclick=async()=>{
   const b=$('disband');
