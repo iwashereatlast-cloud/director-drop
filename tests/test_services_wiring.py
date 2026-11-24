@@ -540,7 +540,7 @@ def main():
                     m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
                     if m and m.group(1) == "BootyBay":
                         sim2["x"], sim2["y"] = -14420.0, 480.0
-                    if "/w Ayla nc +new rpg,-grind,-quest,-follow,+gather" in line:
+                    if "/w Ayla nc +new rpg,-follow" in line:
                         farm_state["gathers"] += 1
 
         def farm_replier():
@@ -585,7 +585,9 @@ def main():
         err3 = director._start_walk(fo, "Cecil")
         check("second farm order for the same bot is refused",
               "already farming" in str(err3), err3)
-        deadline = time.time() + 30
+        # the arm pace is 5s live (operator measured) + the activity
+        # monitor's readbacks - a keeper cycle takes ~15s now
+        deadline = time.time() + 75
         while time.time() < deadline and farm_state["gathers"] < 3:
             time.sleep(0.2)
         check("farm mission armed and re-armed the gather status",

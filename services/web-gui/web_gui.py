@@ -141,12 +141,11 @@ PRESET_MARKERS = {
 STATE_PRESETS = {
     "grind": ("nc +new rpg,+grind,-quest,-gather,-follow",),
     "quest": ("nc +new rpg,+quest,-grind,-gather,-follow",),
-    # operator steps 2026-11-23 (the wiki workflow): the engine stays ON
-    # and the ACTION LAUNCHER is sent - strategies alone idle the bot
-    # (live: the whole fleet stood still); 'rpg do gather' is what starts
-    # gathering, and 'rpg status' is the readback
-    "gather": ("nc +new rpg,-grind,-quest,-follow,+gather",
-               "rpg do gather"),
+    # operator PROVEN sequence (live 2026-11-24, executed by hand from
+    # Golbez in Westfall: 'nc +new rpg,-follow' then 'rpg do gather' =
+    # she gathered the zone on her mount): engine ON, follow off, then
+    # the ACTION LAUNCHER; no strategy toggles needed
+    "gather": ("nc +new rpg,-follow", "rpg do gather"),
     # operator 2026-11-24: leveling is quest+grind ONLY - gather is not
     # part of it (it filled the fleet's bags with mats and split focus)
     "leveling": ("nc +new rpg,+quest,+grind,-follow",),
@@ -956,7 +955,7 @@ def api_mission(bot, op, dest):
                 paced.append({"bot": bot, "cmd": c, "status": "failed",
                               "detail": str(e)})
             if len(STATE_PRESETS[preset]) > 1:
-                time.sleep(4)
+                time.sleep(5)
         time.sleep(2)
         after = d.ask_bot(bot, "nc ?", wait=5)
         sent = bool(paced) and all(r.get("status") in ("started", "sent")

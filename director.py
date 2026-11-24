@@ -1262,7 +1262,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
         # Caveat the operator documented: node usability is gated by the
         # bot's mining/herbalism SKILL (and a mining pick for miners), not
         # level - farm bots need the professions to actually gather.
-        for c in ("nc +new rpg,-grind,-quest,-follow,+gather",
+        for c in ("nc +new rpg,-follow",
                   "rpg do gather"):
             try:
                 send_order(bot, c)
@@ -1272,7 +1272,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
             # between them - 1s was too fast and the launcher was dropped
             # by the client before the strategy reloaded (live: gather
             # never started)
-            time.sleep(4)
+            time.sleep(5)
         gathering = _bot_ask(bot, "rpg status", "gather")
         say(master, "%s has arrived at %s and %s."
             % (bot, name,
@@ -1341,7 +1341,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                 except Exception:
                     pass
             try:
-                send_order(bot, "nc +new rpg,-grind,-quest,-follow,+gather")
+                send_order(bot, "nc +new rpg,-follow")
                 misses = 0
             except Exception:
                 misses += 1

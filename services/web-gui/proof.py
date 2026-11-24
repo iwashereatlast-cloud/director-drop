@@ -584,7 +584,7 @@ def main():
         check("state gather sends the wiki workflow (strategy + launcher)",
               sga.get("ok") is True and len(sga.get("results", [])) == 2
               and all(r.get("status") == "sent" for r in sga["results"])
-              and any("nc +new rpg,-grind,-quest,-follow,+gather"
+              and any("nc +new rpg,-follow"
                       in (r.get("detail") or "") for r in sga["results"])
               and any(r.get("cmd") == "rpg do gather"
                       for r in sga["results"]),
@@ -774,7 +774,7 @@ def main():
               (ms2.get("missions", {}).get("Ayla") or {}).get("kind") == "farm",
               json.dumps(ms2)[:200])
         arm_arrival_reply(base, "Ayla", log)
-        ARM = "nc +new rpg,-grind,-quest,-follow,+gather"
+        ARM = "nc +new rpg,-follow"
         asked = False
         for _ in range(40):
             time.sleep(1)
