@@ -36,6 +36,7 @@ Exit code 0 = all proofs pass. Run: python3 proof.py
 import json
 import os
 import shutil
+import threading
 import socket
 import sqlite3
 import subprocess
@@ -175,6 +176,30 @@ def drain_pending_probes(base, bot, log, line):
             f.flush()
         time.sleep(1.2)       # let the binds flip
     return False
+
+
+def status_feeder_thread(base, log, mapping, stop):
+    """While a status POST is blocking, answer every pending 'rpg status'
+    ask for the mapped toons with a scripted reply line."""
+    answered = set()
+    while not stop["v"]:
+        st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        evs = (ev.get("result") or {}).get("events", [])
+        for x in evs:
+            if x.get("direction") == "sent" \
+                    and x.get("command") == "rpg status" \
+                    and x.get("status") == "pending" \
+                    and x.get("target") in mapping \
+                    and x.get("target") not in answered:
+                bot = x.get("target")
+                with open(log, "a") as f:
+                    f.write(display_line("[{}] [whisper]: {}"
+                                         .format(bot, mapping[bot])) + "\n")
+                    f.flush()
+                answered.add(bot)
+        if len(answered) >= len(mapping):
+            return
+        time.sleep(0.4)
 
 
 def feed_all_pending(base, bot, log, line, deadline=40):
@@ -883,6 +908,50 @@ def main():
                 vgone = True
                 break
         check("vendor run releases the lease when done", vgone)
+
+        # --- 6d2. the rpg status readback + the echo dedup ----------------
+        stop1 = {"v": False}
+        th = threading.Thread(target=status_feeder_thread,
+            args=(base, log, {"Ayla": "I am doing gather"}, stop1))
+        th.start()
+        st, rs1, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "status"})
+        stop1["v"] = True
+        th.join(timeout=2)
+        check("the status op asks and returns the bot's rpg status answer",
+              rs1.get("ok") is True
+              and "doing gather" in rs1.get("result", {}).get("detail", ""),
+              json.dumps(rs1)[:200])
+
+        stop2 = {"v": False}
+        th2 = threading.Thread(target=status_feeder_thread,
+            args=(base, log, {"Ayla": "gathering in Stranglethorn",
+                              "Gau": "grinding gnolls"}, stop2))
+        th2.start()
+        st, rs2, _ = http("POST", base + "/api/mission",
+                          {"bot": "ALL", "op": "status"})
+        stop2["v"] = True
+        th2.join(timeout=6)
+        names = {x.get("bot"): x for x in rs2.get("results", [])}
+        check("the fleet status sweep answers every online toon",
+              rs2.get("ok") is True
+              and (names.get("Ayla", {}).get("status") == "answered"
+                   and "gathering" in (names.get("Ayla", {}).get("detail") or ""))
+              and (names.get("Gau", {}).get("status") == "answered"
+                   and "gnolls" in (names.get("Gau", {}).get("detail") or "")),
+              json.dumps(rs2)[:240])
+
+        # the master's whisper_inform echo must NOT become an event
+        with open(log, "a") as f:
+            f.write(display_line(
+                "[Leo] [whisper_inform]: ECHOxDEADxBEEF test line") + "\n")
+            f.flush()
+        time.sleep(3)
+        st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        check("Leo's own whisper_inform echo is deduped (no event)",
+              not any("ECHOxDEADxBEEF" in (x.get("command") or "")
+                      for x in (ev.get("result") or {}).get("events", [])),
+              "the echo line must never appear in the event stream")
 
         # --- 6e. the farm drift watchdog (drain the stale probes first - see
         # drain_pending_probes: the tunnel binds oldest-pending-first) (live 2026-11-23: a leased farm
