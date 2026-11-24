@@ -919,7 +919,8 @@ def _release_lease(bot):
 
 MISSION_EVIDENCE = {
     "travel": "live position within 500yd of the game_tele point, right map",
-    "farm":   "same as travel, then the keeper's re-arm sends (3 failures stop)",
+    "farm":   "same as travel, then the keeper's re-arm sends (3 failures stop) "
+              "and the drift watchdog re-verifies the position every cycle",
     "walk":   "live position progressing toward the target on every tick",
     "vendor": "same as travel; the sell whisper itself is fire-and-forget "
               "(no read-back proof exists for sells yet - the bags flag "
@@ -1112,7 +1113,13 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
             say(master, "%s did not arrive at %s - the move did not land; "
                         "whisper me to retry." % (bot, name))
             return
-        for c in ("nc +new rpg,+gather,-follow",):
+        # operator doctrine 2026-11-23: farm = gather ONLY
+        # (nc -new rpg,-grind,-quest,-follow,+gather). With
+        # "+new rpg" left on, the rpg engine's RandomChangeStatus
+        # flies the bot to random destinations MID-FARM - live:
+        # a bot leased to farm Westfall was standing idle in
+        # Stormwind.
+        for c in ("nc -new rpg,-grind,-quest,-follow,+gather",):
             try:
                 send_order(bot, c)
             except Exception as e:
@@ -1135,8 +1142,32 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                             "down; whisper 'farm %s' to send them back."
                             % (bot, name, name))
                 break
+            # THE DRIFT WATCHDOG: an armed strategy is NOT proof the bot
+            # stayed - the rpg engine can fly it anywhere at any moment
+            # (live 2026-11-23: a bot leased 'farming in Westfall' was
+            # found standing in Stormwind doing nothing, and nothing ever
+            # checked). Each keep-alive cycle verifies the bot is still AT
+            # the spot it was sent to - same evidence predicate as the
+            # arrival check - and sends it back if it drifted.
+            pos = _live_position(bot)
+            if pos is None:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry."
+                                % (bot, name))
+                    break
+                continue
+            if pos[3] != tmap or \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 >= 500.0 ** 2:
+                say(master, "%s has drifted away from %s - sending them "
+                            "back." % (bot, name))
+                if not _teleport_leg(bot, tx, ty, tmap, name, master):
+                    say(master, "%s did not come back to %s - ending their "
+                                "farm." % (bot, name))
+                    break
             try:
-                send_order(bot, "nc +new rpg,+gather,-follow")
+                send_order(bot, "nc -new rpg,-grind,-quest,-follow,+gather")
                 misses = 0
                 print("daemon: farm %s: gather strategy re-asserted" % bot)
             except Exception:
