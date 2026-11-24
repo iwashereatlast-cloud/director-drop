@@ -1094,6 +1094,83 @@ def _travel_mission(bot, tx, ty, tmap, name, master, restore=None):
         _release_lease(bot)
 
 
+def _watch_reply(bot, wait=5):
+    """Return the next reply FROM this bot (its text), or None. Content
+    scanned from the event stream - NOT correlation matched: the tunnel
+    binds a bot's whisper reply to the OLDEST pending whisper to that
+    bot, so arms sent within the 30s reply window steal the binding
+    (live: sell answers and status answers bound to strategy arms and
+    the real ask always timed out). The tunnel records the reply event
+    regardless of binding - watch for THAT."""
+    try:
+        evs = tunnel("get_recent_events", limit=1)["events"]
+        newest = int(evs[0]["id"]) if evs else 0
+    except Exception:
+        newest = 0
+    for _ in range(wait):
+        time.sleep(2)
+        try:
+            evs = tunnel("get_events_since",
+                         after_id=newest, limit=50)["events"]
+        except Exception:
+            continue
+        for x in evs:
+            if x.get("direction") == "reply" and \
+                    str(x.get("sender") or "").lower() == bot.lower():
+                return str(x.get("command") or "")
+    return None
+
+
+def _bot_ask(bot, question, want, wait=None):
+    """Mission-internal readback (see _watch_reply for why the answer is
+    content-matched): ask, wait for the bot's reply, check its text."""
+    try:
+        evs = tunnel("get_recent_events", limit=1)["events"]
+        newest = int(evs[0]["id"]) if evs else 0
+    except Exception:
+        newest = 0
+    try:
+        send_order(bot, question)
+    except Exception:
+        return None
+    txt = _watch_reply(bot, wait or 5)
+    if txt is None:
+        return None
+    return want.lower() in txt.lower()
+    """Mission-internal readback: send a query whisper (e.g. 'rpg status'),
+    then watch the event stream for the bot's REPLY and check its content.
+    The readback is the difference between commanding a bot and KNOWING
+    what it is doing (operator 2026-11-23: 'are you pinging rpg status to
+    see if they are doing what they are told?').
+    Content-matched, not correlation-matched: the tunnel binds a bot's
+    whisper reply to the OLDEST pending whisper to that bot - arms sent
+    within the 30s reply window steal the binding (live: the status
+    answer bound to the strategy arm and the ask always timed out). The
+    tunnel records the reply event regardless of binding, so watching for
+    a reply FROM this bot after the ask is older-proof."""
+    try:
+        evs = tunnel("get_recent_events", limit=1)["events"]
+        newest = int(evs[0]["id"]) if evs else 0
+    except Exception:
+        newest = 0
+    try:
+        send_order(bot, question)
+    except Exception:
+        return None
+    for _ in range(wait or 5):
+        time.sleep(2)
+        try:
+            evs = tunnel("get_events_since",
+                         after_id=newest, limit=50)["events"]
+        except Exception:
+            continue
+        for x in evs:
+            if x.get("direction") == "reply" and \
+                    str(x.get("sender") or "").lower() == bot.lower():
+                return want.lower() in str(x.get("command") or "").lower()
+    return None
+
+
 def _farm_mission(bot, tx, ty, tmap, name, master):
     """Gather-keeper (live 2026-11-11: 'sent golbez to stv, told her to gather,
     now shes back in EPL'): 'rpg status do gather' lasts exactly 15 minutes
@@ -1113,19 +1190,30 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
             say(master, "%s did not arrive at %s - the move did not land; "
                         "whisper me to retry." % (bot, name))
             return
-        # operator doctrine 2026-11-23: farm = gather ONLY
-        # (nc -new rpg,-grind,-quest,-follow,+gather). With
-        # "+new rpg" left on, the rpg engine's RandomChangeStatus
-        # flies the bot to random destinations MID-FARM - live:
-        # a bot leased to farm Westfall was standing idle in
-        # Stormwind.
-        for c in ("nc -new rpg,-grind,-quest,-follow,+gather",):
+        # operator steps 2026-11-23 (the mod-playerbots wiki workflow):
+        #   1. strategies: 'nc +new rpg,-follow' (ENGINE ON - a bare
+        #      '+gather' with the engine off makes bots stand still, live:
+        #      the whole fleet idled; grind/quest off so gather is the
+        #      only enabled strategy)
+        #   2. the ACTION LAUNCHER: 'rpg do gather' - strategies alone do
+        #      not start anything
+        #   3. verify with the 'rpg status' readback (expect do_gather)
+        # Caveat the operator documented: node usability is gated by the
+        # bot's mining/herbalism SKILL (and a mining pick for miners), not
+        # level - farm bots need the professions to actually gather.
+        for c in ("nc +new rpg,-grind,-quest,-follow,+gather",
+                  "rpg do gather"):
             try:
                 send_order(bot, c)
             except Exception as e:
                 print("daemon: farm arm failed for %s: %s" % (bot, e))
             time.sleep(1)
-        say(master, "%s has arrived at %s and is gathering." % (bot, name))
+        gathering = _bot_ask(bot, "rpg status", "gather")
+        say(master, "%s has arrived at %s and %s."
+            % (bot, name,
+               "is gathering" if gathering
+               else "did not confirm gathering - watch the rpg "
+                    "status; the bot may lack the profession skill"))
         print("daemon: farm %s -> %s: gathering (keeper re-arms every %ds)"
               % (bot, name, FARM_REFRESH))
         misses = 0
@@ -1166,10 +1254,30 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                     say(master, "%s did not come back to %s - ending their "
                                 "farm." % (bot, name))
                     break
+            # THE ACTIVITY MONITOR (operator 2026-11-23: 'are you pinging
+            # rpg status to see if they are doing what they are told?'):
+            # read back what the bot is DOING each cycle - if the status
+            # is not gather, kick the action launcher again (strategies
+            # alone do not keep a bot gathering).
+            act = _bot_ask(bot, "rpg status", "gather")
+            if act is None:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry."
+                                % (bot, name))
+                    break
+                continue
+            if act is False:
+                say(master, "%s is not gathering in %s anymore - kicking "
+                            "'rpg do gather' again." % (bot, name))
+                try:
+                    send_order(bot, "rpg do gather")
+                except Exception:
+                    pass
             try:
-                send_order(bot, "nc -new rpg,-grind,-quest,-follow,+gather")
+                send_order(bot, "nc +new rpg,-grind,-quest,-follow,+gather")
                 misses = 0
-                print("daemon: farm %s: gather strategy re-asserted" % bot)
             except Exception:
                 misses += 1
                 if misses >= 3:
@@ -1201,20 +1309,12 @@ def _vendor_mission(bot, tx, ty, tmap, name, master):
             return
         sold = None
         try:
-            res = send_order(bot, "s vendor")
-            # the sell is no longer fire-and-forget: correlate the bot's
-            # answer (live 2026-11-16: bots stood at the tele point not
-            # selling and the operator had NO evidence why - the reply is)
-            cid = (res or {}).get("correlation_id")
-            if cid:
-                for _ in range(5):
-                    time.sleep(2)
-                    got = tunnel("get_reply", correlation_id=cid)
-                    if got.get("reply"):
-                        sold = str(got["reply"].get("command") or "").strip()
-                        break
-                    if (got.get("sent") or {}).get("status") == "timeout":
-                        break
+            send_order(bot, "s vendor")
+            # the sell is no longer fire-and-forget: watch the stream for
+            # the bot's answer (content-matched - see _watch_reply; the
+            # tunnel's oldest-pending binding makes correlation asking
+            # miss answers stolen by the mission's own stand-down arm)
+            sold = _watch_reply(bot, 5)
         except Exception as e:
             print("daemon: vendor sell failed for %s: %s" % (bot, e))
         if sold:

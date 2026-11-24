@@ -9,7 +9,7 @@ states_presets() {
 Built-in presets (conf value = the preset word):
   grind    nc +new rpg,+grind,-quest,-gather,-follow
   quest    nc +new rpg,+quest,-grind,-gather,-follow     (nc-only since PR #34: 'rpg status do quest' removed - only works with a quest+POI already in the log, else it just asks for an id)
-  gather   nc -new rpg,-grind,-quest,-follow,+gather (needs Herbalism/Mining; operator doctrine 2026-11-23: the rpg engine stays OFF or its wander flies the bot away)
+  gather   nc +new rpg,-grind,-quest,-follow,+gather ; rpg do gather (the wiki workflow 2026-11-23: the launcher is separate - strategies alone idle the bot; read back with 'rpg status'; needs Herbalism/Mining + a pick for miners)
   leveling nc +new rpg,+quest,+grind,+gather,-follow   (quest+grind+gather combined; the gather
            strategy no-ops on bots without Herbalism/Mining, so it is safe fleet-wide)
   follow   nc +follow                 (follow-duty: cling to master; NOTE "+new +follow" is a silent no-op - strategies split on ',' only)
@@ -40,7 +40,7 @@ remove it as the single token "-new rpg", never "-new,-rpg".
 Zone recipes (go travel FIRST - the engine level-filters destinations and rpg
 scans near the bot's position; see 'botcmd states zones' for the table):
   Gau:  go travel Westfall ;; nc +new rpg,+grind,-follow
-  Marle: go travel Feralas ;; nc -new rpg,-grind,-quest,-follow,+gather
+  Marle: go travel Feralas ;; nc +new rpg,-grind,-quest,-follow,+gather ;; rpg do gather
   (one-shot instead: botcmd go Gau Westfall)
 EOF
 }

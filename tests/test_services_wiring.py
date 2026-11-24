@@ -540,7 +540,7 @@ def main():
                     m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
                     if m and m.group(1) == "BootyBay":
                         sim2["x"], sim2["y"] = -14420.0, 480.0
-                    if "/w Ayla nc -new rpg,-grind,-quest,-follow,+gather" in line:
+                    if "/w Ayla nc +new rpg,-grind,-quest,-follow,+gather" in line:
                         farm_state["gathers"] += 1
 
         def farm_replier():
@@ -549,13 +549,20 @@ def main():
                 time.sleep(0.05)
                 for line in fifo_lines[seen:]:
                     seen += 1
-                    if ".playerbots inspect Ayla position" not in line:
-                        continue
-                    with open(log_path, "a") as f:
-                        f.write("2026-11-11 22:00:00.000 | MESSAGES | "
-                                "headless.world.chat.chat:display:124 - "
-                                "[System]: Ayla: %.1f %.1f 26.0 0 0.5 |Stranglethorn Vale|\n"
-                                % (sim2["x"], sim2["y"]))
+                    if ".playerbots inspect Ayla position" in line:
+                        with open(log_path, "a") as f:
+                            f.write("2026-11-11 22:00:00.000 | MESSAGES | "
+                                    "headless.world.chat.chat:display:124 - "
+                                    "[System]: Ayla: %.1f %.1f 26.0 0 0.5 |Stranglethorn Vale|\n"
+                                    % (sim2["x"], sim2["y"]))
+                    elif "/w Ayla rpg status" in line:
+                        # the activity monitor's readback answer (the
+                        # [whisper] reply shape - [System] is the inspect
+                        # reply family, whisper sends match whisper replies)
+                        with open(log_path, "a") as f:
+                            f.write("2026-11-11 22:00:01.000 | MESSAGES | "
+                                    "headless.world.chat.chat:display:124 - "
+                                    "[Ayla] [whisper]: doing gather\n")
 
         threading.Thread(target=farm_world, daemon=True).start()
         threading.Thread(target=farm_replier, daemon=True).start()
