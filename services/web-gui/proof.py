@@ -153,6 +153,32 @@ def arm_arrival_reply(base, bot, log, deadline=40):
         time.sleep(0.5)
     return False
 
+def feed_position_reply(base, bot, log, line, deadline=60):
+    """Answer a NEW pending 'inspect position' probe for this bot (one that
+    APPEARS after this call starts) with an arbitrary position line. The
+    id-guard is the point: earlier probes that are still awaiting their
+    status flip must not be answered instead (live race: the Stormwind
+    answer was consumed by the ARRIVAL probe's pending window and the
+    keeper's real probe died unheard)."""
+    start = 0
+    st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+    for x in (ev.get("result") or {}).get("events", []):
+        start = max(start, int(x.get("id") or 0))
+    for _ in range(deadline * 2):
+        st, ev, _ = http("GET", base + "/api/events?after_id=%d&limit=500"
+                         % start)
+        evs = (ev.get("result") or {}).get("events", [])
+        if any(x.get("direction") == "sent" and x.get("target") == bot
+               and x.get("command") == "inspect position"
+               and x.get("status") == "pending" for x in evs):
+            with open(log, "a") as f:
+                f.write(display_line(line) + "\n")
+                f.flush()
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def display_line(inner):
     """A loguru-shaped chat display line, the A14 anchor the parser needs."""
     return ("2026-11-12 10:00:00.123 | INFO | MESSAGES | "
@@ -202,6 +228,7 @@ def main():
             "DIRECTOR_DBSEARCH_SOCK": db_sock,
             "DIRECTOR_TUNNEL_URL": "http://127.0.0.1:%d/" % tunnel_port,
             "DIRECTOR_LEASES_FILE": leases_path,
+            "DIRECTOR_FARM_REFRESH": "20",
             "WEBGUI_AUDIT": os.path.join(tmp, "webgui-audit.jsonl"),
             "WEBGUI_POS_POLL": "3600",   # one cycle at startup, then quiet
             "WEBGUI_HANDPLAY_FILE": os.path.join(tmp, "handplay.json"),
@@ -615,10 +642,10 @@ def main():
             st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
             cmds = [x.get("command") for x in
                     (ev.get("result") or {}).get("events", [])]
-            if "nc +new rpg,+gather,-follow" in cmds:
+            if "nc -new rpg,-grind,-quest,-follow,+gather" in cmds:
                 armed = True
                 break
-        check("farm keeper arms the gather strategy (nc-only, per the doctrine)",
+        check("farm arms the GATHER-ONLY doctrine line (rpg engine off)",
               armed, json.dumps(cmds[-8:])[:200])
         st, msd, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "standdown"})
@@ -744,6 +771,63 @@ def main():
                 vgone = True
                 break
         check("vendor run releases the lease when done", vgone)
+
+        # --- 6e. the farm drift watchdog (live 2026-11-23: a leased farm
+        # bot was found standing in another city; the keeper must verify) --
+        st, fd1, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "farm", "dest": "BootyBay"})
+        check("drift test: the farm restarts for the watchdog probe",
+              fd1.get("ok") is True
+              and fd1.get("result", {}).get("status") == "started",
+              json.dumps(fd1)[:160])
+        arm_arrival_reply(base, "Ayla", log)
+        # CURSOR DISCIPLINE: this test runs late in the session and the
+        # event stream is long - after_id=0 only returns the OLDEST 1000
+        # events. Drain to the newest id first, then read fresh-only.
+        cur = 0
+        while True:
+            st, evx, _ = http("GET", base +
+                              "/api/events?after_id=%d&limit=1000" % cur)
+            evr = evx.get("result") or {}
+            batch = evr.get("events") or []
+            if not batch:
+                break
+            cur = evr.get("last_id") or cur
+            if len(batch) < 1000:
+                break
+        # the keeper's first cycle probes the position: answer with a FAR
+        # position (Stormwind) - the watchdog must catch the drift
+        fed = feed_position_reply(base, "Ayla", log,
+                                  "[System]: Ayla: -8800.0 700.0 100.0 0 "
+                                  "0 |Stormwind City|")
+        drift_seen, sold_back = False, False
+        for _ in range(60):
+            time.sleep(1)
+            st, evx, _ = http("GET", base +
+                              "/api/events?after_id=%d&limit=500" % cur)
+            evr = evx.get("result") or {}
+            batch = evr.get("events") or []
+            cur = max(cur, evr.get("last_id") or cur)
+            for x in batch:
+                c = x.get("command") or ""
+                if "drifted away from BootyBay" in c:
+                    drift_seen = True
+                if c.startswith(".tele") and "BootyBay" in c:
+                    sold_back = True   # the travel order's wire form
+        check("the drift watchdog: a farmed bot caught in another city is "
+              "sent back (narrated + travel order)",
+              drift_seen and sold_back,
+              "fed=%s drift=%s sent_back=%s"
+              % (fed, drift_seen, sold_back))
+        fled = False
+        for _ in range(50):
+            time.sleep(1)
+            st, msz, _ = http("GET", base + "/api/missions")
+            if "Ayla" not in msz.get("missions", {}):
+                fled = True
+                break
+        check("the drift watchdog ends the farm when the bot will not return",
+              fled, json.dumps(msz.get("missions", {}))[:160])
 
         # --- 7. the Leo button --------------------------------------------
         st, ls, _ = http("GET", base + "/api/leo")

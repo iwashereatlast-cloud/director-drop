@@ -540,7 +540,7 @@ def main():
                     m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
                     if m and m.group(1) == "BootyBay":
                         sim2["x"], sim2["y"] = -14420.0, 480.0
-                    if "/w Ayla nc +new rpg,+gather,-follow" in line:
+                    if "/w Ayla nc -new rpg,-grind,-quest,-follow,+gather" in line:
                         farm_state["gathers"] += 1
 
         def farm_replier():
