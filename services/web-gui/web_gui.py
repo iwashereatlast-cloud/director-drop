@@ -673,6 +673,95 @@ def api_review():
             "new_actions": new_actions, "new_events": new_events}
 
 
+def api_doctor():
+    """One sweep of every subsystem the dashboard depends on, each timed,
+    each PASS/FAIL with its real error string - the operator pastes ONE
+    block instead of spelunking a browser console (live 2026-11-23:
+    'bags not populating' took four rounds of remote-controlled
+    evidence gathering; never again - the GUI diagnoses itself)."""
+    rows = []
+
+    def probe(name, fn):
+        t0 = time.time()
+        try:
+            detail = fn()
+            rows.append({"name": name, "ok": True,
+                         "ms": int((time.time() - t0) * 1000),
+                         "detail": str(detail)[:200]})
+        except Exception as e:
+            rows.append({"name": name, "ok": False,
+                         "ms": int((time.time() - t0) * 1000),
+                         "detail": str(e)[:200]})
+
+    def _census():
+        r = db_call("get_online_census", {"account_like": CENSUS})
+        if not r.get("ok"):
+            raise RuntimeError(json.dumps(r)[:160])
+        return "%d toon rows" % len(r.get("rows", []))
+
+    probe("db-search census", _census)
+
+    def _bags():
+        r = db_call("get_online_census", {"account_like": CENSUS})
+        if not r.get("ok"):
+            raise RuntimeError("census unavailable")
+        bad, seen = [], 0
+        names = {}
+        for row in r.get("rows", []):
+            names[row[0]] = True
+        wf = api_warnings()
+        for name in list(names)[:100]:
+            seen += 1
+            b = (wf.get("bags") or {}).get(name)
+            if b is None:
+                bad.append(name)
+        if bad:
+            raise RuntimeError("no bag data for: %s" % ", ".join(bad[:8])
+                               + (" (+%d more)" % (len(bad) - 8)
+                                  if len(bad) > 8 else ""))
+        return "%d toons, all scanned" % seen
+
+    probe("bag scan (per toon)", _bags)
+
+    def _prog():
+        r = db_call("get_leveling_progress", {"account": CENSUS})
+        if not r.get("ok"):
+            raise RuntimeError(json.dumps(r.get("error") or r)[:160])
+        return "%d toon rows" % len(r.get("rows", []))
+
+    probe("leveling progress (xp/hr)", _prog)
+
+    def _wallets():
+        r = db_call("get_wallets", {"account": CENSUS})
+        if not r.get("ok"):
+            raise RuntimeError(json.dumps(r.get("error") or r)[:160])
+        return "%d wallets" % len(r.get("rows", []))
+
+    probe("wallets (gold)", _wallets)
+
+    def _tunnel():
+        r = tunnel_health()
+        if not r.get("ok"):
+            raise RuntimeError(json.dumps(r)[:160])
+        return "healthy"
+
+    probe("chat-tunnel", _tunnel)
+
+    def _engine():
+        r = api_missions()
+        if not r.get("ok"):
+            raise RuntimeError(json.dumps(r.get("error") or r)[:160])
+        return "%d active leases" % len(r.get("missions", {}))
+
+    probe("mission engine (leases)", _engine)
+
+    text = "director-drop doctor %s\n" % _now()
+    for r in rows:
+        text += "%s  %-28s %5dms  %s\n" % (
+            "PASS" if r["ok"] else "FAIL", r["name"], r["ms"], r["detail"])
+    return {"ok": True, "queried_at": _now(), "rows": rows, "text": text}
+
+
 def api_mission(bot, op, dest):
     """Submit ONE mission order through director's rails (submit_orders).
     The GUI only builds the five templated shapes; validate() re-checks
@@ -954,6 +1043,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
       <button id="tab-db" class="sel">db-search</button>
       <button id="tab-grammar">tunnel grammar</button>
       <button id="tab-audit">action log</button>
+      <button id="tab-doctor">doctor</button>
     </div>
     <div class="cat-cols" id="cat-wrap">
       <div class="tools" id="tools"></div>
@@ -961,6 +1051,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     </div>
     <div id="grammar-wrap" style="display:none"><pre id="grammar-out">...</pre></div>
     <div id="audit-wrap" style="display:none"><pre id="audit-out">...</pre></div>
+    <div id="doctor-wrap" style="display:none"><pre id="doctor-out">...</pre></div>
   </section>
 </main>
 <script>
@@ -1293,8 +1384,8 @@ async function loadGrammar(){
   $('grammar-out').textContent=g.ok?JSON.stringify(g.result,null,2):JSON.stringify(g,null,2);
 }
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('cat-wrap').style.display='grid';$('grammar-wrap').style.display='none'};
-$('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('tab-audit').className='';$('cat-wrap').style.display='none';$('audit-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
-$('tab-audit').onclick=async()=>{$('tab-audit').className='sel';$('tab-db').className='';$('tab-grammar').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='block';
+$('tab-grammar').onclick=()=>{$('tab-grammar').className='sel';$('tab-db').className='';$('tab-audit').className='';$('tab-doctor').className='';$('cat-wrap').style.display='none';$('audit-wrap').style.display='none';$('doctor-wrap').style.display='none';$('grammar-wrap').style.display='block';loadGrammar()};
+$('tab-audit').onclick=async()=>{$('tab-audit').className='sel';$('tab-db').className='';$('tab-grammar').className='';$('tab-doctor').className='';$('cat-wrap').style.display='none';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='block';$('doctor-wrap').style.display='none';
   const NL=String.fromCharCode(10);
   const rv=await jget('/api/review');
   const digest=(rv.ok&&rv.counts)?'<p style="margin:4px 0"><b>since '+(rv.since_str?esc(rv.since_str):'the beginning')+':</b> '
@@ -1310,7 +1401,16 @@ $('tab-audit').onclick=async()=>{$('tab-audit').className='sel';$('tab-db').clas
     await jpost('/api/review',{action:'mark'});
     setTimeout(()=>$('tab-audit').onclick(),500);
   };}};
-$('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none'};
+$('tab-doctor').onclick=async()=>{
+  $('tab-doctor').className='sel';$('tab-db').className='';$('tab-grammar').className='';$('tab-audit').className='';
+  $('cat-wrap').style.display='none';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none';
+  $('doctor-wrap').style.display='block';
+  $('doctor-out').textContent='running the sweep... (the bag scan can take a moment)';
+  const d=await jget('/api/doctor');
+  $('doctor-out').textContent=(d.ok?d.text:JSON.stringify(d));
+  $('doctor-out').style.whiteSpace='pre';
+};
+$('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('tab-doctor').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none';$('doctor-wrap').style.display='none'};
 
 async function loadWarnings(){
   let w; try{ w=await jget('/api/warnings') }catch(e){ return }
@@ -1457,6 +1557,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, api_handplay())
         elif parsed.path == "/api/warnings":
             self.reply(200, api_warnings())
+        elif parsed.path == "/api/doctor":
+            self.reply(200, api_doctor())
         elif parsed.path == "/api/review":
             self.reply(200, api_review())
         elif parsed.path == "/api/audit":

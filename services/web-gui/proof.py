@@ -592,6 +592,14 @@ def main():
               hp3.get("ok") is True and "crono" in hp3.get("handplay_list", []),
               json.dumps(hp3)[:160])
 
+        # --- 6b4b. the doctor sweep (self-diagnosis) ----------------------
+        st, doc_, _ = http("GET", base + "/api/doctor")
+        check("the doctor sweep passes every subsystem on a healthy stack",
+              doc_.get("ok") is True
+              and doc_.get("rows") and all(r.get("ok") for r in doc_["rows"])
+              and "FAIL" not in doc_.get("text", ""),
+              json.dumps(doc_.get("rows"))[:260])
+
         # --- 6b4. the log review digest (nothing through the cracks) ---
         st, rv0, _ = http("GET", base + "/api/review")
         check("review digest answers with everything before the first mark",
