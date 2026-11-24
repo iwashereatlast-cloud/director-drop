@@ -468,9 +468,11 @@ def main():
               json.dumps(sgr)[:200])
         st, sga, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "state", "dest": "gather"})
-        check("state gather sends the nc-only preset (rpg status is read-only)",
+        check("state gather sends the GATHER-ONLY doctrine (rpg engine off)",
               sga.get("ok") is True and len(sga.get("results", [])) == 1
-              and sga.get("results", [{}])[0].get("status") == "sent",
+              and sga.get("results", [{}])[0].get("status") == "sent"
+              and "/w Ayla nc -new rpg,-grind,-quest,-follow,+gather"
+                  in sga.get("results", [{}])[0].get("detail", ""),
               json.dumps(sga)[:260])
         st, sid, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "state", "dest": "idle"})

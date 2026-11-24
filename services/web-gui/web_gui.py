@@ -127,7 +127,9 @@ MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 STATE_PRESETS = {
     "grind": ("nc +new rpg,+grind,-quest,-gather,-follow",),
     "quest": ("nc +new rpg,+quest,-grind,-gather,-follow",),
-    "gather": ("nc +new rpg,+gather,-grind,-quest,-follow",),
+    # operator doctrine 2026-11-23: gather = the rpg engine OFF and only
+    # gather on (+new rpg left on lets RandomChangeStatus fly the bot away)
+    "gather": ("nc -new rpg,-grind,-quest,-follow,+gather",),
     "leveling": ("nc +new rpg,+quest,+grind,+gather,-follow",),
     "follow": ("nc +follow",),
     "idle": ("nc -new rpg,-grind,-quest,-gather,-follow",),
