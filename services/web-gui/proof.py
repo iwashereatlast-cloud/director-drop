@@ -127,6 +127,13 @@ def build_fixture(tmp):
         sql = sql.replace("ATTACH DATABASE 'fixture_",
                           "ATTACH DATABASE '" + tmp + os.sep + "fixture_")
         con.executescript(sql)
+        # a fresh worldserver heartbeat row for the world-liveness signal
+        # (the fixture ships a static ancient row by design; this one is
+        # now-relative so the GUI's verdict computes 'up')
+        import time as _t
+        con.execute("INSERT OR REPLACE INTO acore_characters.uptime "
+                    "VALUES (1, ?, ?, 30)",
+                    (int(_t.time()) - 5400, 5400))
         con.commit()
     finally:
         con.close()
@@ -676,6 +683,11 @@ def main():
 
         # --- 6b4b. the doctor sweep (self-diagnosis) ----------------------
         st, doc_, _ = http("GET", base + "/api/doctor")
+        st, wv, _ = http("GET", base + "/api/overview")
+        check("the world liveness signal reads the heartbeat (verdict up)",
+              (wv.get("world") or {}).get("state") == "up"
+              and (wv.get("world") or {}).get("uptime_s") == 5400,
+              json.dumps(wv.get("world"))[:160])
         check("the doctor sweep passes every subsystem on a healthy stack",
               doc_.get("ok") is True
               and doc_.get("rows") and all(r.get("ok") for r in doc_["rows"])

@@ -405,6 +405,27 @@ CATALOG = {
     "fill": lambda p: {"account": _p("get_wallets", p, "account")},
   },
 
+  "get_worldserver_uptime": {
+    "sql": ("SELECT realmid, starttime, uptime, maxplayers FROM "
+            "acore_characters.uptime ORDER BY starttime DESC LIMIT 1"),
+    "params": {},
+    "fill": lambda p: {},
+    "timeout": 10,
+    "can": "the worldserver's heartbeat row: realmid, starttime (when this "
+           "server run began, unixtime), uptime (seconds since), "
+           "maxplayers ( busiest this run) - how long the server has been "
+           "up and WHEN its heartbeat last wrote",
+    "cannot": "why it went down (the DB keeps only the heartbeat); "
+              "real-time process liveness",
+    "caveat": "the worldserver rewrites its row roughly every 10-15 "
+              "minutes; fresh = now() - (starttime + uptime) is inside "
+              "that interval. An older last-write means the server "
+              "stopped writing - down or frozen. A NEW starttime = the "
+              "server RESTARTED.",
+    "scope_note": "server-wide read: no toon/account param (the web-gui's "
+                  "world liveness chip); no gate - the scope rules key on "
+                  "subject params, this has none",
+  },
   "get_game_tele": {
     # live game_tele names are concatenated ("BootyBay", "MenethilHarbor" -
     # live 2026-11-10: LIKE '%Booty Bay%' returned 0 rows while '%Booty%' hit

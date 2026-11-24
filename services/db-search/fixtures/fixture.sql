@@ -232,3 +232,10 @@ INSERT INTO acore_world.creature VALUES
   (2, 353, 0, -14400.0, 500.0, 20.0),
   (3, 354, 0, -9460.0, 90.0, 56.0),
   (4, 355, 0, -9800.0, 60.0, 56.0);
+
+-- the worldserver heartbeat (the web-gui's world liveness chip; static
+-- timestamps = the verdict computes 'silent' at runtime by design)
+CREATE TABLE acore_characters.uptime (
+  realmid INT, starttime INT, uptime INT, maxplayers SMALLINT);
+INSERT INTO acore_characters.uptime VALUES
+  (1, 1766000000, 43200, 30);

@@ -415,6 +415,38 @@ def api_positions():
                 "positions": {k: dict(v) for k, v in POSITIONS.items()}}
 
 
+WORLD_SEEN = {"starttime": None}
+
+
+def api_world_uptime():
+    """The worldserver liveness signal (operator ask: 'does the web-gui
+    have any way to tell if ac-worldserver is down or up'): the server
+    rewrites its uptime heartbeat row every ~10-15 minutes; the verdict
+    is the age of that last write. A NEW starttime = the server
+    RESTARTED (detected across polls; audited once)."""
+    r = db_call("get_worldserver_uptime", {})
+    if not r.get("ok") or not r.get("rows"):
+        return {"ok": False, "state": "unknown",
+                "reason": "uptime unavailable: %s"
+                          % ((r.get("error") or {}).get("message")
+                             or "no rows")}
+    try:
+        st, up = int(r["rows"][0][1]), int(r["rows"][0][2])
+        maxp = int(r["rows"][0][3])
+    except (ValueError, IndexError):
+        return {"ok": False, "state": "unknown",
+                "reason": "bad heartbeat row"}
+    age = time.time() - (st + up)
+    out = {"ok": True, "state": "up" if age <= 900 else "silent",
+           "age_s": int(age), "starttime": st, "uptime_s": up,
+           "maxplayers": maxp}
+    if WORLD_SEEN["starttime"] is not None and st != WORLD_SEEN["starttime"]:
+        out["restarted"] = True
+        _audit("world", "the worldserver RESTARTED (new starttime %d)" % st)
+    WORLD_SEEN["starttime"] = st
+    return out
+
+
 def api_overview():
     out = {"ok": True, "interface": INTERFACE, "queried_at": _now(),
            "census_prefix": CENSUS, "leo": LEO, "leo_unit": LEO_UNIT,
@@ -433,6 +465,7 @@ def api_overview():
                              {"account_like": CENSUS})}
     tr = api_truth(out["census"])
     out["truth"] = tr["truth"]
+    out["world"] = api_world_uptime()
     horizon = max(120.0, 2 * max(30.0, POS_POLL))
     freshest = max((v.get("ts", 0) for v in POSITIONS.values()), default=0)
     with POSITIONS_LOCK:
@@ -750,6 +783,14 @@ def api_doctor():
         if not r.get("ok"):
             raise RuntimeError(json.dumps(r)[:160])
         return "healthy"
+
+    def _world():
+        r = api_world_uptime()
+        if not r.get("ok") or r.get("state") != "up":
+            raise RuntimeError(json.dumps(r)[:160])
+        return "up %dm, heartbeat fresh" % (r.get("uptime_s", 0) // 60)
+
+    probe("worldserver heartbeat", _world)
 
     probe("chat-tunnel", _tunnel)
 
@@ -1090,6 +1131,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     <span class="chip" id="chip-db">db-search ?</span>
     <span class="chip" id="chip-leo">Leo session ?</span>
     <span class="chip" id="chip-gold">gold ?</span>
+    <span class="chip" id="chip-world">world ?</span>
     <span class="chip" id="chip-refresh">updated ?</span>
     <button id="fleet-online" class="warn">all online</button>
     <button id="fleet-offline" class="warn">all offline</button>
@@ -1156,6 +1198,22 @@ async function loadOverview(){
        o.leo_active?'stop':'start');
   chip('refresh', true, 'updated '+o.queried_at);
   const tot=((o.wallets||{}).rows||[]).reduce((a,r)=>a+(parseInt(r[3])||0),0);
+  const w=o.world||{};
+  const wch=$('chip-world');
+  if(w.state==='up'){
+    wch.className='chip up';
+    const upm=Math.floor((w.uptime_s||0)/60);
+    wch.textContent='world up '+(upm>=60?Math.floor(upm/60)+'h'+(upm%60)+'m':upm+'m');
+  }else if(w.state==='silent'){
+    wch.className='chip down';
+    const agm=Math.floor((w.age_s||0)/60);
+    wch.textContent='world SILENT '+agm+'m';
+    wch.title='the worldserver last wrote its heartbeat '+agm+' minutes ago - it is down or frozen';
+  }else{
+    wch.className='chip down';
+    wch.textContent='world ?';
+    wch.title=(w.reason||'uptime unavailable');
+  }
   $('chip-gold').className='chip up';
   $('chip-gold').textContent='gold '+(tot/10000).toFixed(1)+'g';
   const bl=$('btn-leo'); if(bl) bl.onclick=async()=>{
@@ -1221,7 +1279,10 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
     for(const r of (d.rows||[])) tb.innerHTML+=row(r);
     $('bots-note').textContent=(d.row_count||0)+' bot rows - '+d.caveat;
   if(o.live_silent){
-    $('warnings').innerHTML='<p class="err" style="margin:2px 0">&#9888; LIVE PROBES ARE SILENT - the Leo session or the whole fleet is not answering. Nothing is verified right now.</p>'+$('warnings').innerHTML;
+    const ws=(o.world||{}).state==='silent'
+      ? ' THE WORLDSERVER ITSELF has stopped writing its heartbeat (last '+Math.floor((o.world.age_s||0)/60)+'m ago) - the server is down or frozen, not just the fleet.'
+      : ' The Leo session or the fleet is not answering; the worldserver heartbeat is fresh.';
+    $('warnings').innerHTML='<p class="err" style="margin:2px 0">&#9888; LIVE PROBES ARE SILENT.'+ws+' Nothing is verified right now.</p>'+$('warnings').innerHTML;
   }
   const pnote=[];
   if(!((o.progress||{}).ok)) pnote.push('leveling progress unavailable: '+esc(((o.progress||{}).error||{}).message||'db-search'));
