@@ -154,6 +154,122 @@ class Tunnel:
             self.proc.kill()
 
 
+def s_perbot_queue(t):
+    # 1. a second command for the same bot QUEUES: it does not create a
+    # second live pending (no bind-steal), and it sends after the first
+    # reply lands, binding to its OWN reply.
+    cid1 = t.send("Gau", "who")
+    out = {}
+
+    def queued():
+        out["cid2"] = t.send("Gau", "wts")
+
+    th = threading.Thread(target=queued, daemon=True)
+    th.start()
+    time.sleep(0.8)
+    # the queued send must still be waiting: cid2 not issued yet
+    check("out" not in out or "cid2" not in out,
+          "second same-bot send created a second live pending")
+    ev = t.call("get_recent_events", {"limit": 20})["result"]["events"]
+    live = [e for e in ev if e.get("direction") == "sent"
+            and e.get("status") == "pending" and e.get("target") == "Gau"]
+    check(len(live) == 1, "expected exactly ONE live pending, saw %d"
+          % len(live))
+    t.reply("Gau", "answer to who")
+    t.sync("answer to who")
+    th.join(timeout=8)
+    check("cid2" in out, "queued send never completed after the reply")
+    t.reply("Gau", "answer to wts")
+    t.sync("answer to wts")
+    r1 = t.wait_for(lambda: t.get_reply(cid1)["reply"], 5, "first reply")
+    r2 = t.wait_for(lambda: t.get_reply(out["cid2"])["reply"], 5,
+                    "queued command's reply")
+    check(r1["matched_correlation_id"] == cid1,
+          "reply 1 bound to the wrong command")
+    check(r2["matched_correlation_id"] == out["cid2"],
+          "the QUEUED command's reply bound to the wrong command")
+    check(r2["command"] == "answer to wts",
+          "the queued command's reply text mismatched")
+
+
+def s_perbot_ttm_release(t):
+    # 2. the TTM timeout releases the queue: an unanswered pending sweeps
+    # (WINDOW=3s here), the queued command then sends and binds.
+    t.send("Gau", "who")
+    out = {}
+
+    def queued():
+        out["res"] = t.call("send_command", {"bot": "Gau", "cmd": "wts"})
+
+    th = threading.Thread(target=queued, daemon=True)
+    th.start()
+    time.sleep(0.8)
+    # NO reply for the first pending: the WINDOW sweep (3s) is the only
+    # release. The queued send completes once the slot frees; ONLY THEN
+    # does the reply land (feeding it earlier would legitimately bind it
+    # to the still-live first pending).
+    th.join(timeout=10)
+    check("res" in out and out["res"]["ok"],
+          "queued send did not complete after the TTM sweep: %r"
+          % (out.get("res") or {}))
+    t.reply("Gau", "answer to wts")
+    t.sync("answer to wts")
+    r = t.wait_for(lambda: t.get_reply(out["res"]["result"]
+                                       ["correlation_id"])["reply"],
+                   5, "the TTM-released command's reply")
+    check(r["command"] == "answer to wts",
+          "the TTM-released command's reply bound to the wrong text")
+
+
+def s_perbot_starvation(t):
+    # 3. the PR #160 starvation trap, WITHOUT the drain: the farm keeper's
+    # leftover unanswered pending + the vendor leg's 's vendor' - the new
+    # command queues, the TTM sweep frees the slot, the sell reply binds
+    # to the SELL command. No drain step anywhere.
+    t.send("Ayla", "nc +new rpg,-follow")     # the keeper's leftover
+    out = {}
+
+    def vendor():
+        out["res"] = t.call("send_command", {"bot": "Ayla",
+                                             "cmd": "s vendor"})
+
+    th = threading.Thread(target=vendor, daemon=True)
+    th.start()
+    time.sleep(0.8)
+    # NO drain, NO reply for the leftover: the WINDOW sweep (3s) is the
+    # only release; the sell reply lands only AFTER the sell command has
+    # actually gone out
+    th.join(timeout=10)
+    check("res" in out and out["res"]["ok"],
+          "the vendor send starved behind the leftover pending: %r"
+          % (out.get("res") or {}))
+    t.reply("Ayla", "sold 12 items")
+    t.sync("sold 12 items")
+    r = t.wait_for(lambda: t.get_reply(out["res"]["result"]
+                                       ["correlation_id"])["reply"],
+                   5, "the sell evidence")
+    check(r["command"] == "sold 12 items",
+          "the sell evidence bound to the wrong command (steal class)")
+
+
+def s_perbot_parallel(t):
+    # 4. two different bots run fully parallel: one bot's queue never
+    # delays another bot's send.
+    t.send("Gau", "who")            # Gau holds a live pending
+    t0 = time.time()
+    cid = t.send("Mog", "wts")       # Mog must NOT queue behind Gau
+    dt = time.time() - t0
+    check(dt < 2.0, "Mog's send queued behind Gau's pending (%.1fs)" % dt)
+    t.reply("Mog", "answer to wts")
+    t.sync("answer to wts")
+    r = t.wait_for(lambda: t.get_reply(cid)["reply"], 5, "Mog's reply")
+    check(r["matched_correlation_id"] == cid,
+          "Mog's reply bound to the wrong command")
+    # clean up Gau's pending so the next scenario starts empty
+    t.reply("Gau", "answer to who")
+    t.sync("answer to who")
+
+
 RESULTS = []
 
 
@@ -234,9 +350,15 @@ def s_late(t):
 
 
 def s_ordered(t):
+    # RE-MARKED (perbot send discipline): the old mechanism - two LIVE
+    # pendings for one bot - is structurally gone (one-in-flight-per-bot;
+    # the second send queues behind the first). The assertion is NOT
+    # weakened: each reply still binds its own command, in order; the
+    # bind is now BY CONSTRUCTION instead of oldest-pending-first.
     cid1 = t.send("Gau", "who")
-    cid2 = t.send("Gau", "wts")
     t.reply("Gau", "answer to who")
+    t.sync("answer to who")
+    cid2 = t.send("Gau", "wts")
     t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
                  " headless.world.chat.chat:display:124 - [Mog] [party]: loot roll")
     t.append_log("2026-11-09 19:26:21.153 | MESSAGES |"
@@ -449,6 +571,14 @@ SCENARIOS = [
     ("verify - delivery + garble check against the chat log", s_verify),
     ("allowlist - non-roster send refused, non-roster chatter dropped", s_allowlist),
     ("inspect - [System] replies correlate, channels never cross-steal", s_inspect),
+    ("perbot-queue - a second same-bot send queues, no bind-steal",
+     s_perbot_queue),
+    ("perbot-ttm - the TTM timeout releases the queue; the queued send binds",
+     s_perbot_ttm_release),
+    ("perbot-starvation - the #160 vendor-leg trap runs green WITHOUT a drain",
+     s_perbot_starvation),
+    ("perbot-parallel - one bot's queue never delays another bot",
+     s_perbot_parallel),
 ]
 
 

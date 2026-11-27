@@ -316,10 +316,18 @@ def main():
         tunnel_port = 18765
         procs.append(subprocess.Popen(
             [sys.executable, os.path.join(CHATTUNNEL, "chat_tunnel.py")],
+            # WINDOW/QUEUE_TIMEOUT small = TEST TIMING ONLY (the
+            # one-in-flight-per-bot discipline holds a bot's slot until
+            # its reply, its TTM sweep, or - live - the bot's own
+            # whisper_inform delivery echo; the fixture does not feed
+            # echoes, so a small window keeps the harness fast. Production
+            # pacing is unaffected.)
             env=dict(os.environ, CHAT_TUNNEL_LOG=log, CHAT_TUNNEL_FIFO=fifo,
                      CHAT_TUNNEL_PORT=str(tunnel_port),
                      CHAT_TUNNEL_DB=os.path.join(tmp, "tunnel.db"),
-                     CHAT_TUNNEL_ALLOW="Leo,Ayla,Gau,Locke,Vivi"),
+                     CHAT_TUNNEL_ALLOW="Leo,Ayla,Gau,Locke,Vivi",
+                     CHAT_TUNNEL_WINDOW="3",
+                     CHAT_TUNNEL_QUEUE_TIMEOUT="6"),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         check("chat-tunnel fixture mode came up", wait_port(tunnel_port))
 

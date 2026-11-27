@@ -51,6 +51,16 @@ FIFO = os.environ.get("CHAT_TUNNEL_FIFO", "/tmp/leo.in")
 DB = os.environ.get("CHAT_TUNNEL_DB", os.path.join(HERE, "tunnel.db"))
 PORT = int(os.environ.get("CHAT_TUNNEL_PORT", "8765"))
 WINDOW = float(os.environ.get("CHAT_TUNNEL_WINDOW", "30"))
+# one-in-flight-per-bot send discipline (PR #160's live traps: the tunnel
+# bound a bot's whisper reply to the OLDEST pending whisper, so mission
+# arms stole correlation bindings and the vendor leg starved while its
+# replies bound to the farm keeper's leftover pendings; the 4s pacing
+# rule exists because back-to-back commands were dropped). Exactly ONE
+# live pending per bot: a new command waits in a per-bot FIFO until the
+# pending matches or its TTM timeout sweeps it - a reply therefore binds
+# to THE pending by construction.
+PERBOT_PENDING = max(1, int(os.environ.get("CHAT_TUNNEL_PERBOT_PENDING", "1")))
+QUEUE_TIMEOUT = float(os.environ.get("CHAT_TUNNEL_QUEUE_TIMEOUT", "25"))
 RETENTION = float(os.environ.get("CHAT_TUNNEL_RETENTION", str(24 * 3600)))
 PURGE_EVERY = float(os.environ.get("CHAT_TUNNEL_PURGE_EVERY", "60"))
 # minimum seconds between FIFO writes: the client/server throttle whispers,
@@ -93,6 +103,7 @@ MASTER_CMDS = ("bot add", "bot remove", "bot" )
 STATS = {"lines_seen": 0, "lines_parsed": 0, "lines_noise": 0,
          "lines_garbled": 0, "lines_filtered": 0, "sends_refused": 0,
          "lines_system": 0, "lines_echo_skipped": 0,
+         "queue_waits": 0, "queue_timeouts": 0,
          "replies_matched": 0, "replies_unmatched": 0,
          "sends_ok": 0, "sends_failed": 0, "started_at": time.time()}
 
@@ -147,6 +158,28 @@ def new_cid():
     return uuid.uuid4().hex[:12]
 
 
+_BOT_SENDS_LOCK = threading.Lock()
+_BOT_SENDS = {}
+
+
+def _bot_send_lock(bot):
+    key = bot.lower()
+    with _BOT_SENDS_LOCK:
+        lk = _BOT_SENDS.get(key)
+        if lk is None:
+            lk = _BOT_SENDS[key] = threading.Lock()
+    return lk
+
+
+def _pending_count(bot):
+    with closing(db()) as conn:
+        sweep_timeouts(conn, now())
+        return conn.execute(
+            "SELECT COUNT(*) FROM events WHERE direction='sent'"
+            " AND status='pending' AND target = ? COLLATE NOCASE",
+            (bot,)).fetchone()[0]
+
+
 def send_command(bot, cmd):
     bot = str(bot or "").strip()
     cmd = str(cmd or "").strip()
@@ -159,11 +192,29 @@ def send_command(bot, cmd):
         STATS["sends_refused"] += 1
         return False, ("bot %r is not in the allowlist (guild/bot-account "
                        "roster) - refusing" % bot)
-    line = order_line(bot, cmd)
-    ok, err = _fifo_write_paced(line)
-    if not ok:
-        return False, err
-    cid = _record_sent(bot, line, cmd)
+    # ONE-IN-FLIGHT-PER-BOT: hold the bot's send lock for the whole
+    # check -> write -> record span, so a same-bot send can never slip
+    # between the slot check and the record. Different bots stay fully
+    # parallel (only the paced FIFO write is shared).
+    with _bot_send_lock(bot):
+        t0 = now()
+        while True:
+            if _pending_count(bot) < PERBOT_PENDING:
+                break
+            waited = now() - t0
+            if waited >= QUEUE_TIMEOUT:
+                STATS["queue_timeouts"] += 1
+                STATS["sends_refused"] += 1
+                return False, ("queued_timeout: %r still has a live pending "
+                               "command after %.0fs - refusing rather than "
+                               "silently dropping" % (bot, waited))
+            STATS["queue_waits"] += 1
+            time.sleep(0.2)
+        line = order_line(bot, cmd)
+        ok, err = _fifo_write_paced(line)
+        if not ok:
+            return False, err
+        cid = _record_sent(bot, line, cmd)
     return True, {"correlation_id": cid, "line": line, "bot": bot, "cmd": cmd}
 
 
