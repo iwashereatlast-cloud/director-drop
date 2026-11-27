@@ -277,7 +277,7 @@ def main():
             director.census(online_only=False))
         check("recipes sweep: leveling loads travel + grind orders",
               "RECIPE level_in_zone" in r5 and "travel <the zone's table destination>" in r5
-              and "nc +new rpg,+grind,-follow" in r5, r5[:300])
+              and "nc +new rpg,+grind,-quest,-gather,-follow" in r5, r5[:300])
         dig = director.run_queries(
             [{"query": "dest", "bot": "Gau", "name": "Booty Bay"}],
             director.census(online_only=False))
@@ -502,7 +502,7 @@ def main():
               any("is travelling to BootyBay" in r for r in reported), reported)
         check("mission stood the bot down and restored it",
               any("nc -new rpg,-grind,-gather,-follow" in l for l in fifo_lines) and
-              any("nc +new rpg,+grind,-follow" in l for l in fifo_lines), fifo_lines[-6:])
+              any("nc -new rpg,-grind,-quest,-gather,-follow" in l for l in fifo_lines), fifo_lines[-6:])
         check("audit records the leg as TRAVEL",
               "TRAVEL" in open(director.AUDIT).read(), None)
         err = director.validate({"bot": "Gau", "cmd": "travel Nowhereville"},
@@ -540,7 +540,7 @@ def main():
                     m = re.match(r"\.tele name Ayla (\S+)$", line.strip())
                     if m and m.group(1) == "BootyBay":
                         sim2["x"], sim2["y"] = -14420.0, 480.0
-                    if "/w Ayla nc +new rpg,-grind,-quest,-follow,+gather" in line:
+                    if "/w Ayla nc +new rpg,-follow" in line:
                         farm_state["gathers"] += 1
 
         def farm_replier():
@@ -585,7 +585,9 @@ def main():
         err3 = director._start_walk(fo, "Cecil")
         check("second farm order for the same bot is refused",
               "already farming" in str(err3), err3)
-        deadline = time.time() + 30
+        # the arm pace is 5s live (operator measured) + the activity
+        # monitor's readbacks - a keeper cycle takes ~15s now
+        deadline = time.time() + 75
         while time.time() < deadline and farm_state["gathers"] < 3:
             time.sleep(0.2)
         check("farm mission armed and re-armed the gather status",

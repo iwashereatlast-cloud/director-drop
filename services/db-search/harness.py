@@ -170,6 +170,10 @@ def main():
         check("wallets: richest first (Golbez 80000)",
               r["rows"][0][0] == "Golbez" and r["rows"][0][3] == "80000", r["rows"][0])
 
+        r = handle(adapter, {"tool": "get_worldserver_uptime", "params": {}})
+        check("worldserver uptime: the heartbeat row answers (no scope gate)",
+              r.get("ok") and r["rows"] and r["rows"][0][1] == "1766000000"
+              and int(r["rows"][0][2]) == 43200, r)
         r = handle(adapter, {"tool": "get_guild_members", "params": {"guild": "Special FXc"}})
         check("guild envelope (name with a space accepted)", envelope_ok(r, "get_guild_members"))
         g = rows_by_key(r)
