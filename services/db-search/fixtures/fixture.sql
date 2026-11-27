@@ -110,8 +110,9 @@ CREATE TABLE acore_world.item_template (
   entry INTEGER PRIMARY KEY, name TEXT, Quality INTEGER,
   ItemLevel INTEGER, RequiredLevel INTEGER, ContainerSlots INTEGER,
   class INTEGER, subclass INTEGER);
--- Ayla's paperdoll (guid 20): bag=255, equipment slots 0-18 per the
--- director.py:530 audit; two slots empty to prove sparse output.
+-- Ayla's paperdoll (guid 20): bag=0, equipment slots 0-18 (live
+-- convention 2026-11-27: worn gear lives in bag 0, NOT bag 255); two
+-- slots empty to prove sparse output.
 INSERT INTO acore_characters.item_instance VALUES
   (9001, 2901), (9002, 2902), (9003, 2903);
 INSERT INTO acore_world.item_template VALUES
@@ -123,9 +124,9 @@ INSERT INTO acore_world.item_template VALUES
   (2952, 'Linen Cloth', 0, 1, 1, 0, 7, 1),
   (2953, 'Chestnut Mare Bridle', 3, 30, 30, 0, 15, 5);
 INSERT INTO acore_characters.character_inventory VALUES
-  (20, 255, 4, 9001),   -- chest: Linen Robe
-  (20, 255, 7, 9002),   -- feet: Brawler Boots
-  (20, 255, 15, 9003);  -- mainhand: Worn Shortsword
+  (20, 0, 4, 9001),     -- chest: Linen Robe
+  (20, 0, 7, 9002),     -- feet: Brawler Boots
+  (20, 0, 15, 9003);    -- mainhand: Worn Shortsword
 
 CREATE TABLE acore_characters.character_skills (
   guid INTEGER, skill INTEGER, value INTEGER, max INTEGER);
@@ -135,15 +136,19 @@ INSERT INTO acore_characters.character_skills VALUES
   (20, 186, 75, 150),   -- mine
   (20, 129, 40, 75),    -- firstaid
   (20, 148, 150, 150);  -- riding
--- Ayla's bags: an 8-slot pouch equipped (bag=255 slot 19), 3 items in the
--- backpack (bag=0 slots 23-25) -> capacity 24, used 3, free 21.
+-- Ayla's bags, LIVE CONVENTION (2026-11-27): the equipped pouch is a
+-- paperdoll row (bag=0 slot 19); backpack contents are bag=0 slots
+-- 39-54; items INSIDE the pouch are stored under the pouch's own item
+-- guid (bag=9004). -> capacity 16+8=24; used = 3 backpack + 1 inside
+-- the pouch = 4; free 20.
 INSERT INTO acore_characters.item_instance VALUES
-  (9004, 2950), (9005, 2951), (9006, 2952), (9007, 2953);
+  (9004, 2950), (9005, 2951), (9006, 2952), (9007, 2953), (9008, 2951);
 INSERT INTO acore_characters.character_inventory VALUES
-  (20, 255, 19, 9004),  -- equipped bag: Small Brown Pouch (8 slots)
-  (20, 0, 23, 9005),    -- backpack: Rough Stone
-  (20, 0, 24, 9006),    -- backpack: Linen Cloth
-  (20, 0, 25, 9007);    -- backpack: Chestnut Mare Bridle (mount item)
+  (20, 0, 19, 9004),    -- equipped bag: Small Brown Pouch (8 slots)
+  (20, 0, 39, 9005),    -- backpack: Rough Stone
+  (20, 0, 40, 9006),    -- backpack: Linen Cloth
+  (20, 0, 41, 9007),    -- backpack: Chestnut Mare Bridle (mount item)
+  (20, 9004, 0, 9008);  -- INSIDE the pouch: Rough Stone
 
 CREATE TABLE acore_characters.character_talent (
   guid INTEGER, spell INTEGER, specMask INTEGER,

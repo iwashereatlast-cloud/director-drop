@@ -212,8 +212,9 @@ CATALOG = {
   },
 
   "get_equipped_gear": {
-    # equipped gear sits at bag=255, slot 0-18 (director.py:530 audit: bags are
-    # bag=255 slot 19-22, backpack is bag=0 slot 23-38); items are GUIDs into
+    # equipped gear sits at bag=0, slot 0-18 (live 2026-11-27, mysql probe
+    # pack: the operator's build stores worn gear at bag=0 slots 0-18 and
+    # equipped BAGS at bag=0 slots 19-22 - NOT bag=255); items are GUIDS into
     # item_instance, resolved to templates in acore_world (needs its grant).
     "sql": ("SELECT ci.slot, "
             "CASE ci.slot WHEN 0 THEN 'head' WHEN 1 THEN 'neck' "
@@ -229,7 +230,7 @@ CATALOG = {
             "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
             "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
             "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
-            "AND ci.bag = 255 AND ci.slot BETWEEN 0 AND 18 "
+            "AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 "
             "ORDER BY ci.slot"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -330,9 +331,14 @@ CATALOG = {
   },
 
   "get_bag_space": {
-    # director.py:528-540 audit: capacity = 16 backpack slots +
-    # ContainerSlots of equipped bags (bag=255 slot 19-22); used = backpack
-    # items (bag=0 slot 23-38) + items inside equipped bags.
+    # LIVE CONVENTION (2026-11-27, mysql probe pack on serverpc): worn gear
+    # and equipped BAGS sit in the paperdoll container (bag=0): gear at
+    # slots 0-18, equipped bags at slots 19-22; backpack contents are
+    # bag=0 slots 39-54; items INSIDE an equipped bag are stored with
+    # bag=<the bag's own item-instance guid>. Bank bags never appear in
+    # bag=0 slots 19-22, so they are inherently excluded.
+    # capacity = 16 backpack slots + ContainerSlots of the equipped bags;
+    # used = backpack contents + items inside the equipped bags.
     "sql": ("SELECT t.capacity, t.used, t.capacity - t.used AS free_slots "
             "FROM (SELECT "
             "16 + (SELECT COALESCE(SUM(it.ContainerSlots), 0) "
@@ -340,18 +346,18 @@ CATALOG = {
             "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
             "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
             "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
-            "AND ci.bag = 255 AND ci.slot BETWEEN 19 AND 22) AS capacity, "
+            "AND ci.bag = 0 AND ci.slot BETWEEN 19 AND 22) AS capacity, "
             "(SELECT COUNT(*) FROM acore_characters.character_inventory "
             "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
-            "AND ((bag = 0 AND slot BETWEEN 23 AND 38) OR bag IN "
+            "AND ((bag = 0 AND slot BETWEEN 39 AND 54) OR bag IN "
             "(SELECT item FROM acore_characters.character_inventory "
             "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
-            "AND bag = 255 AND slot BETWEEN 19 AND 22))) AS used) t"),
+            "AND bag = 0 AND slot BETWEEN 19 AND 22))) AS used) t"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
-    "can": "one row: bag capacity (16 + equipped bags' ContainerSlots, needs the acore_world.item_template grant), used slots, and free slots",
-    "cannot": "what the items ARE (this is a count only); bank/vault space",
-    "caveat": "inventory flushes with the character save - loot gained seconds ago may not be counted; without the item_template grant capacity falls back to 16 and undercounts.",
+    "can": "per-toon bag math: capacity (16 backpack + the equipped bags' real sizes), used, and free slots - the number behind every bags-full alarm",
+    "cannot": "bank bags or their contents (deliberately: only equipped bags count); the item names inside the bags (separate tool)",
+    "caveat": "inventory flushes with the character save - loot gained seconds ago may not be counted.",
     "fill": lambda p: {"toon": _p("get_bag_space", p, "toon")},
   },
 
