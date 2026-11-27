@@ -502,8 +502,52 @@ def api_map(census):
                     "map": p.get("map", 0), "zone": p.get("zone", ""),
                     "age_s": int(now - p.get("ts", 0)),
                     "state": t.get("state", "unknown")})
+    # zone labels: DATA-DRIVEN FIRST - a zone's reference point is the
+    # centroid of its observed toon positions (the operator's own probes;
+    # live 2026-11-27: the hand-curated guesses drew a cluttered,
+    # misleading canvas). The curated list covers zones with no observed
+    # toons yet.
+    observed = {}
+    for t in out:
+        z = t["zone"]
+        observed.setdefault(z, []).append((t["x"], t["y"]))
+    # list() copies the OUTER list only - the curated rows are TUPLES
+    # (live: the centroid override crashed on item assignment); convert
+    # rows to lists
+    zones_out = {str(m): [list(r) for r in MAP_ZONES[m]]
+                 for m in MAP_ZONES}
+    for z, pts in observed.items():
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        placed = False
+        for m in zones_out:
+            for row in zones_out[m]:
+                if row[0].lower() == z.lower():
+                    row[1], row[2] = round(cx), round(cy)
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            # a zone with no curated entry: it belongs to the map its
+            # observed toons are on
+            mapid = str(next((t["map"] for t in out
+                              if t["zone"] == z), 0))
+            zones_out.setdefault(mapid, []).append(
+                [z, round(cx), round(cy)])
+    # per-zone bounding boxes for the zone zoom (from observed toons,
+    # generous margin; curated centers for unobserved zones)
+    zone_boxes = {}
+    for z, pts in observed.items():
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        margin = max(300.0, (max(xs) - min(xs)) * 0.4,
+                     (max(ys) - min(ys)) * 0.4)
+        zone_boxes[z] = [min(xs) - margin, min(ys) - margin,
+                         max(xs) + margin, max(ys) + margin]
     return {"ok": True, "queried_at": _now(), "toons": out,
-            "zones": MAP_ZONES, "bounds": MAP_BOUNDS}
+            "zones": zones_out, "bounds": MAP_BOUNDS,
+            "zone_boxes": zone_boxes}
 
 
 def api_truth(census):
@@ -1409,6 +1453,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
       age). Zone names are approximate reference points.</p>
       <select id="map-cont"><option value="0">Eastern Kingdoms</option>
       <option value="1">Kalimdor</option></select>
+      <select id="map-zone"><option value="">whole continent</option></select>
       <button id="map-refresh">refresh</button>
       <canvas id="map-canvas" width="900" height="500"
         style="max-width:100%;background:#101418;border:1px solid var(--line)"></canvas>
@@ -1832,44 +1877,66 @@ async function loadMap(){
     $('map-wrap').insertAdjacentHTML('afterbegin','<p class="err">MAP UNREACHABLE: '+esc(String(e.message||e))+'</p>');
     return;
   }
-  mapData=m; drawMap();
+  mapData=m; fillZones(); drawMap();
 }
 $('map-refresh').onclick=loadMap;
-$('map-cont').onchange=()=>{ if(mapData) drawMap(); };
+$('map-cont').onchange=()=>{ fillZones(); if(mapData) drawMap(); };
+$('map-zone').onchange=()=>{ if(mapData) drawMap(); };
+function fillZones(){
+  if(!mapData) return;
+  const zs=Object.keys(mapData.zone_boxes||{}).sort();
+  const cur=$('map-zone').value;
+  $('map-zone').innerHTML='<option value="">whole continent</option>'+
+    zs.map(z=>'<option'+(z===cur?' selected':'')+'>'+esc(z)+'</option>').join('');
+}
+function mapBounds(cont){
+  const zv=$('map-zone').value;
+  if(zv && mapData.zone_boxes && mapData.zone_boxes[zv])
+    return mapData.zone_boxes[zv];
+  return mapData.bounds[cont];
+}
 function drawMap(){
   if(!mapData) return;
   const cont=parseInt($('map-cont').value,10);
   const cv=$('map-canvas'), ctx=cv.getContext('2d');
-  const b=mapData.bounds[cont], W=cv.width, H=cv.height;
+  const b=mapBounds(cont), W=cv.width, H=cv.height;
   const sx=(x)=>(x-b[0])/(b[2]-b[0])*W, sy=(y)=>(y-b[1])/(b[3]-b[1])*H;
   ctx.clearRect(0,0,W,H);
-  // grid every 2500 world units
+  // the grid step scales with the view (500 for zone zoom, 2500 for a
+  // whole continent) so zone zoom is actually readable
+  const step=(b[2]-b[0])>12000?2500:500;
   ctx.strokeStyle='#1c232b'; ctx.fillStyle='#5a6675'; ctx.font='10px monospace';
-  for(let gx=Math.ceil(b[0]/2500)*2500; gx<=b[2]; gx+=2500){
+  for(let gx=Math.ceil(b[0]/step)*step; gx<=b[2]; gx+=step){
     ctx.beginPath(); ctx.moveTo(sx(gx),0); ctx.lineTo(sx(gx),H); ctx.stroke();
     ctx.fillText(String(gx), sx(gx)+2, 12);
   }
-  for(let gy=Math.ceil(b[1]/2500)*2500; gy<=b[3]; gy+=2500){
+  for(let gy=Math.ceil(b[1]/step)*step; gy<=b[3]; gy+=step){
     ctx.beginPath(); ctx.moveTo(0,sy(gy)); ctx.lineTo(W,sy(gy)); ctx.stroke();
     ctx.fillText(String(gy), 4, sy(gy)-2);
   }
-  // zone reference labels
-  ctx.font='11px monospace'; ctx.fillStyle='#3d5a80';
+  // zone reference labels (data-driven centroids; dim, small, behind dots)
+  ctx.font='10px monospace'; ctx.fillStyle='#2e4a66';
   (mapData.zones[cont]||[]).forEach(z=>{
-    ctx.fillText(z[0], sx(z[1]), sy(z[2]));
+    ctx.fillText(z[0], sx(z[1])-ctx.measureText(z[0]).width/2, sy(z[2]));
   });
-  // toon dots
-  (mapData.toons||[]).filter(t=>t.map===cont).forEach(t=>{
+  // toon dots with a dark halo so names stay readable over labels
+  (mapData.toons||[]).filter(t=>t.map===cont).forEach((t,i)=>{
     const px=Math.max(4,Math.min(W-4,sx(t.x))), py=Math.max(4,Math.min(H-4,sy(t.y)));
+    // halo
+    ctx.beginPath(); ctx.arc(px,py,7,0,7); ctx.fillStyle='#10141a'; ctx.fill();
     ctx.beginPath(); ctx.arc(px,py,5,0,7);
     if(t.state==='live'){ ctx.fillStyle='#3fbf6f'; }
     else if(t.state==='db_online'){ ctx.fillStyle='#e0b04a'; }
     else { ctx.fillStyle='#5a6675'; }
     ctx.fill();
-    ctx.fillStyle='#dfe6ee'; ctx.font='bold 11px monospace';
-    ctx.fillText(t.toon, px+8, py+4);
-    ctx.font='10px monospace'; ctx.fillStyle='#8a97a5';
-    ctx.fillText(t.zone+' '+Math.round(t.age_s/60)+'m ago', px+8, py+16);
+    // stagger names so dots close together stay readable
+    const lx=px+9, ly=py+4+(i%2?12:-2);
+    ctx.font='bold 12px monospace';
+    ctx.fillStyle='#10141a'; ctx.fillText(t.toon, lx+1, ly+1);
+    ctx.fillStyle='#dfe6ee'; ctx.fillText(t.toon, lx, ly);
+    ctx.font='10px monospace';
+    ctx.fillStyle='#10141a'; ctx.fillText(t.zone, lx+1, ly+12);
+    ctx.fillStyle='#8a97a5'; ctx.fillText(t.zone, lx, ly+11);
   });
   cv.title=(mapData.toons||[]).filter(t=>t.map===cont)
     .map(t=>t.toon+' @ '+t.x.toFixed(0)+','+t.y.toFixed(0)+' ('+t.zone+', '+Math.round(t.age_s/60)+'m ago, '+t.state+')').join(String.fromCharCode(10))||'no positions yet';
