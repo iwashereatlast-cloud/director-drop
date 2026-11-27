@@ -492,10 +492,16 @@ def api_world_uptime():
     RESTARTED (detected across polls; audited once)."""
     r = db_call("get_worldserver_uptime", {})
     if not r.get("ok") or not r.get("rows"):
+        # the error envelope is a STRING on some db-search paths and a
+        # dict on others (live 2026-11-27, the doctor's world probe:
+        # "'str' object has no attribute 'get'" - and the crash took
+        # /api/overview down with it, starving the dashboard table).
+        # NEVER raise here: the probe answers, whatever the envelope.
+        err = r.get("error")
+        msg = (err.get("message") if isinstance(err, dict) else err) \
+            or "no rows"
         return {"ok": False, "state": "unknown",
-                "reason": "uptime unavailable: %s"
-                          % ((r.get("error") or {}).get("message")
-                             or "no rows")}
+                "reason": "uptime unavailable: %s" % msg}
     try:
         st, up = int(r["rows"][0][1]), int(r["rows"][0][2])
         maxp = int(r["rows"][0][3])

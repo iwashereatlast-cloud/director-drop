@@ -240,8 +240,9 @@ CATALOG = {
   },
 
   "get_leveling_progress": {
-    "sql": ("SELECT name, level, xp, leveltime, totaltime, logout_time, online, "
-            "COALESCE(ROUND(xp * 3600.0 / leveltime), 0) AS xp_per_hour "
+    "sql": ("SELECT c.name, c.level, c.xp, c.leveltime, c.totaltime, "
+            "c.logout_time, c.online, "
+            "COALESCE(ROUND(c.xp * 3600.0 / c.leveltime), 0) AS xp_per_hour "
             "FROM acore_characters.characters c "
             "JOIN acore_auth.account a ON a.id = c.account "
             "WHERE a.username LIKE '{account}%' "
