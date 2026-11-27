@@ -511,18 +511,30 @@ def api_map(census):
     for t in out:
         z = t["zone"]
         observed.setdefault(z, []).append((t["x"], t["y"]))
-    zones_out = {str(m): list(MAP_ZONES[m]) for m in MAP_ZONES}
+    # list() copies the OUTER list only - the curated rows are TUPLES
+    # (live: the centroid override crashed on item assignment); convert
+    # rows to lists
+    zones_out = {str(m): [list(r) for r in MAP_ZONES[m]]
+                 for m in MAP_ZONES}
     for z, pts in observed.items():
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
+        placed = False
         for m in zones_out:
             for row in zones_out[m]:
                 if row[0].lower() == z.lower():
                     row[1], row[2] = round(cx), round(cy)
+                    placed = True
                     break
-            else:
-                zones_out[m].append((z, round(cx), round(cy)))
-                continue
+            if placed:
+                break
+        if not placed:
+            # a zone with no curated entry: it belongs to the map its
+            # observed toons are on
+            mapid = str(next((t["map"] for t in out
+                              if t["zone"] == z), 0))
+            zones_out.setdefault(mapid, []).append(
+                [z, round(cx), round(cy)])
     # per-zone bounding boxes for the zone zoom (from observed toons,
     # generous margin; curated centers for unobserved zones)
     zone_boxes = {}
