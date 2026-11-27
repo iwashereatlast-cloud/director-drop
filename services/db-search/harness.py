@@ -170,6 +170,16 @@ def main():
         check("wallets: richest first (Golbez 80000)",
               r["rows"][0][0] == "Golbez" and r["rows"][0][3] == "80000", r["rows"][0])
 
+        # case-insensitivity BY CONSTRUCTION (live 2026-11-27: the
+        # operator's characters.name column is case-sensitive; a lowercase
+        # 'cecil' from the query browser failed the scope gate while the
+        # exact-case name passed - every name/username/guild compare now
+        # LOWERs both sides)
+        r = handle(adapter, {"tool": "get_character",
+                             "params": {"toon": "AYLA"}})
+        check("a toon lookup is case-insensitive (lowercase/uppercase params)",
+              r.get("ok") and r.get("rows") and
+              r["rows"][0][0] == "Ayla", r)
         r = handle(adapter, {"tool": "get_worldserver_uptime", "params": {}})
         check("worldserver uptime: the heartbeat row answers (no scope gate)",
               r.get("ok") and r["rows"] and r["rows"][0][1] == "1766000000"

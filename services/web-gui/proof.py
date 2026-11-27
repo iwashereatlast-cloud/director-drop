@@ -131,7 +131,7 @@ def build_fixture(tmp):
         # (the fixture ships a static ancient row by design; this one is
         # now-relative so the GUI's verdict computes 'up')
         import time as _t
-        con.execute("INSERT OR REPLACE INTO acore_characters.uptime "
+        con.execute("INSERT OR REPLACE INTO acore_auth.uptime "
                     "VALUES (1, ?, ?, 30)",
                     (int(_t.time()) - 5400, 5400))
         con.commit()
