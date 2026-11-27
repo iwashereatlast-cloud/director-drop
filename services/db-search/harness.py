@@ -159,12 +159,12 @@ def main():
               r.get("ok") is True and r["row_count"] == 0, r)
         r = handle(adapter, {"tool": "get_mount_items", "params": {"toon": "Ayla"}})
         check("mounts envelope", envelope_ok(r, "get_mount_items"))
-        check("mounts: Chestnut Mare Bridle found in backpack",
+        check("mounts: Chestnut Mare Bridle found in backpack (live slot range)",
               r["row_count"] == 1 and r["rows"][0][2] == "Chestnut Mare Bridle"
-              and r["rows"][0][0] == "0" and r["rows"][0][1] == "25", r)
+              and r["rows"][0][0] == "0" and r["rows"][0][1] == "41", r)
         r = handle(adapter, {"tool": "get_bag_space", "params": {"toon": "Ayla"}})
-        check("bag space: capacity 24 (16+8 pouch), used 3, free 21",
-              r.get("ok") and r["rows"] == [["24", "3", "21"]], r)
+        check("bag space: capacity 24 (16+8 pouch), used 4 (3 backpack + 1 inside the pouch), free 20",
+              r.get("ok") and r["rows"] == [["24", "4", "20"]], r)
         r = handle(adapter, {"tool": "get_wallets", "params": {"account": "i_was_here"}})
         check("wallets envelope", envelope_ok(r, "get_wallets"))
         check("wallets: richest first (Golbez 80000)",
