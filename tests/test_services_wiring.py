@@ -139,6 +139,14 @@ def main():
                   CHAT_TUNNEL_DB=tunnel_db,
                   CHAT_TUNNEL_ALLOW="Leo,Cecil,Rydia,Vivi,Ayla,Gau,Locke,Golbez",
                   CHAT_TUNNEL_PACE="0.05",
+                  # TEST TIMING ONLY: the one-in-flight-per-bot whisper
+                  # discipline holds a bot's slot until its reply, its
+                  # TTM sweep, or - live - its whisper_inform delivery
+                  # echo; this fixture feeds no echoes, so a small
+                  # window keeps same-bot whisper queues fast. Production
+                  # pacing is unaffected.
+                  CHAT_TUNNEL_WINDOW="3",
+                  CHAT_TUNNEL_QUEUE_TIMEOUT="6",
                   CHAT_TUNNEL_PURGE_EVERY="3600")
     ct_proc = subprocess.Popen([sys.executable, "chat_tunnel.py"],
                                cwd=os.path.join(REPO, "services", "chat-tunnel"),

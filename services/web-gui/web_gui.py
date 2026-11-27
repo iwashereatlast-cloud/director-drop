@@ -1037,14 +1037,16 @@ def api_mission(bot, op, dest):
                 "gate": {"skill": skill, "min": need, "prof": prof,
                          "zone": zname}}
     if op == "vendor_all":
-        # one town, every bags-full toon: the bulk answer to a wall of
-        # bag alarms (each order still walks validate(); leased/offline
-        # bots come back refused per-bot, not fatal)
-        if not isinstance(dest, str) or not _DEST_RE.fullmatch(dest.strip()):
+        # every bags-full toon sells. NO DESTINATION = the locationless
+        # nearest-vendor sell for each (operator 2026-11-27: "the vendor
+        # run function still asks for a town" - it should not have to;
+        # mod docs: sell finds the NEAREST vendor). A picked town keeps
+        # the old town-teleport bulk run.
+        locationless = not (isinstance(dest, str) and dest.strip())
+        if not locationless and not _DEST_RE.fullmatch(dest.strip()):
             return {"ok": False, "queried_at": _now(),
                 "error": {"code": "bad_request",
-                          "message": "vendor_all needs a destination name "
-                                     "(a town with vendors)"}}
+                          "message": "vendor_all: bad destination name"}}
         flagged = [w["toon"] for w in api_warnings().get("warnings", [])
                    if w.get("kind") == "bags_full"]
         if not flagged:

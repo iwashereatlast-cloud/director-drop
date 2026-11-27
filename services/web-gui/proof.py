@@ -736,12 +736,31 @@ def main():
               rv0.get("ok") is True and rv0.get("counts", {}).get("actions", 0) >= 1
               and (rv0.get("since") == 0), json.dumps(rv0.get("counts"))[:160])
         st, mk1, _ = http("POST", base + "/api/review", {"action": "mark"})
+        # SECOND-GRANULARITY: api_review compares audit timestamps parsed
+        # to whole seconds (t > since) - a leave in the SAME second as
+        # the mark is invisible forever. Space them so the audit lands in
+        # a strictly later second (the flake this check has always had)
+        time.sleep(1.3)
         check("marking reviewed stores the cursor",
               mk1.get("ok") is True and mk1.get("review", {}).get("event_id", -1) >= 0,
               json.dumps(mk1)[:160])
         st, lv9, _ = http("POST", base + "/api/mission",
                           {"bot": "Ayla", "op": "leave"})
-        st, rv1, _ = http("GET", base + "/api/review")
+        # the per-bot send discipline queues the leave behind any live
+        # pending (WINDOW seconds), so the audit write can land a few
+        # seconds after the POST returns - POLL, do not sample once
+        rv1 = {}
+        def _digest():
+            st, r, _ = http("GET", base + "/api/review")
+            return r if (r.get("counts", {}).get("actions") or 0) >= 1 \
+                else None
+        _t0 = time.time()
+        rv1 = {}
+        while time.time() - _t0 < 15:
+            st, rv1, _ = http("GET", base + "/api/review")
+            if (rv1.get("counts", {}).get("actions") or 0) >= 1:
+                break
+            time.sleep(0.5)
         check("a new action shows up in the since-last-review digest",
               rv1.get("counts", {}).get("actions") == 1
               and "leave" in ((rv1.get("new_actions") or [{}])[0].get("detail") or ""),
@@ -879,9 +898,12 @@ def main():
         # --- 6c3. vendor_all: the bulk bag-alarm answer ------------------
         st, va0, _ = http("POST", base + "/api/mission",
                           {"bot": "ALL", "op": "vendor_all"})
-        check("vendor_all without a town is refused",
-              va0.get("ok") is False
-              and va0.get("error", {}).get("code") == "bad_request",
+        # RE-MARKED (operator 2026-11-27): no town = the LOCATIONLESS
+        # bulk sell (s vendor to each bags-full toon) - no longer refused;
+        # with no bags-full toons it is a clean ok-no-op with the note
+        check("vendor_all without a town is the locationless sell (ok, no town needed)",
+              va0.get("ok") is True and
+              (("note" in va0) or va0.get("results")),
               json.dumps(va0)[:160])
         st, va1, _ = http("POST", base + "/api/mission",
                           {"bot": "ALL", "op": "vendor_all",
@@ -962,6 +984,32 @@ def main():
                 vgone = True
                 break
         check("vendor run releases the lease when done", vgone)
+
+        # vendor_all with NO town = the locationless bulk sell (s vendor
+        # to each bags-full toon, no .tele anywhere)
+        st, vall, _ = http("POST", base + "/api/mission",
+                           {"bot": "ALL", "op": "vendor_all", "dest": ""})
+        va_cmds = []
+        if vall.get("ok"):
+            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            va_cmds = [x.get("command") for x in
+                       (ev.get("result") or {}).get("events", [])
+                       if x.get("command") == "s vendor"]
+        check("vendor_all with no town sells locationless (no town needed)",
+              vall.get("ok") is True and va_cmds, json.dumps(vall)[:200])
+
+        # vendor_all with NO town = the locationless bulk sell (s vendor
+        # to each bags-full toon, no .tele anywhere)
+        st, vall, _ = http("POST", base + "/api/mission",
+                           {"bot": "ALL", "op": "vendor_all", "dest": ""})
+        va_cmds = []
+        if vall.get("ok"):
+            st, ev, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+            va_cmds = [x.get("command") for x in
+                       (ev.get("result") or {}).get("events", [])
+                       if x.get("command") == "s vendor"]
+        check("vendor_all with no town sells locationless (no town needed)",
+              vall.get("ok") is True and va_cmds, json.dumps(vall)[:200])
 
         # --- 6d2. the rpg status readback + the echo dedup ----------------
         stop1 = {"v": False}
