@@ -1496,7 +1496,7 @@ async function openModal(name){
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<button id="op-travel" class="warn" disabled>travel there</button>'
     +'<button id="op-farm" class="warn" disabled>farm there</button>'
-    +'<button id="op-vendor" class="warn" disabled>vendor run</button></div></div>'
+    +'<button id="op-vendor" class="warn" title="no destination needed - the bot sells to the NEAREST vendor wherever it stands; pick a town only for the old teleport run">vendor (sell here)</button></div></div>'
     +'<div class="sect"><b>states (nc-only presets)</b>'
     +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
     +'<button id="op-grind">grind</button>'
@@ -1530,7 +1530,7 @@ async function openModal(name){
   $('toon-modal').onclick=(e)=>{if(e.target.id==='toon-modal')closeModal()};
   $('op-close').onclick=closeModal;
   function pickDest(n){selDest=n;$('dest-picked').innerHTML='destination: <b style="color:var(--warn)">'+esc(n)+'</b>';
-    ['op-travel','op-farm','op-vendor'].forEach(id=>$(id).disabled=false);}
+    ['op-travel','op-farm'].forEach(id=>$(id).disabled=false);}
   $('dest-search').onclick=async()=>{
     const q=await jpost('/api/query',{tool:'get_game_tele',params:{name:$('dest-in').value}});
     $('dest-list').innerHTML=(q.ok&&q.rows.length)?q.rows.map(r=>'<button class="destbtn" data-n="'+esc(r[0])+'">'+esc(r[0])+' (map '+esc(r[1])+')</button>').join(' '):'<span class="err">'+esc((q.error||{}).message||'no match')+'</span>';
