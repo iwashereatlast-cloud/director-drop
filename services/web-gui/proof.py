@@ -720,6 +720,25 @@ def main():
         # --- 6b4b. the doctor sweep (self-diagnosis) ----------------------
         st, doc_, _ = http("GET", base + "/api/doctor")
         st, wv, _ = http("GET", base + "/api/overview")
+        # --- the map overlay -------------------------------------------
+        st, mp, _ = http("GET", base + "/api/map")
+        names = {t.get("toon"): t for t in mp.get("toons", [])}
+        zones = mp.get("zones") or {}
+        bounds = mp.get("bounds") or {}
+        check("the map endpoint answers with positions + zone refs",
+              mp.get("ok") is True
+              and ("0" in zones or 0 in zones)
+              and ("0" in bounds or 0 in bounds)
+              and names.get("Ayla", {}).get("zone") == "Stranglethorn Vale"
+              and isinstance(names.get("Ayla", {}).get("x"), float),
+              json.dumps(mp.get("toons", []))[:200])
+        req = urllib.request.Request(base + "/")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            pg = r.read().decode()
+        check("the page ships the map tab + canvas",
+              "tab-map" in pg and "map-canvas" in pg
+              and "Eastern Kingdoms" in pg,
+              "the served page must carry the map tab")
         check("the world liveness signal reads the heartbeat (verdict up)",
               (wv.get("world") or {}).get("state") == "up"
               and (wv.get("world") or {}).get("uptime_s") == 5400,

@@ -446,6 +446,66 @@ def _receipt_note(bot, line, status):
                           "ts": time.time()}
 
 
+# reference zone labels for the map overlay (approximate world centers,
+# curated from live probe data + public classic coordinates; each is a
+# REFERENCE POINT, not a boundary - the toons' own zone text comes from
+# the probes themselves)
+MAP_ZONES = {
+    0: [("Stormwind", -8800, 640), ("Elwynn Forest", -9400, 80),
+        ("Westfall", -10300, 1200), ("Redridge", -9500, -2200),
+        ("Duskwood", -10600, -500), ("Stranglethorn Vale", -13400, 300),
+        ("Swamp of Sorrows", -10400, -3100), ("Burning Steppes", -7700, -2200),
+        ("Searing Gorge", -6500, -1150), ("Badlands", -6800, -3400),
+        ("Loch Modan", -5300, -3000), ("Wetlands", -4000, -1400),
+        ("Ironforge", -4900, -1700), ("Dun Morogh", -8900, 0),
+        ("Hinterlands", -350, -3700), ("Eastern Plaguelands", 2200, -3600),
+        ("Western Plaguelands", 1200, -1800),
+        ("Tirisfal Glades", -1600, 900), ("Silverpine", -1400, -200),
+        ("Hillsbrad", -300, -900)],
+    1: [("The Barrens", -3000, -2200), ("Durotar", 900, -3600),
+        ("Orgrimmar", 1400, -4400), ("Mulgore", -2300, -700),
+        ("Thunder Bluff", -1300, 100), ("Stonetalon", -900, -1400),
+        ("Desolace", -1400, 1900), ("Feralas", -4900, 2900),
+        ("Thousand Needles", -5300, -3300), ("Tanaris", -8100, -4300),
+        ("Un'Goro Crater", -6300, 600), ("Silithus", -7900, 1500),
+        ("Dustwallow Marsh", -3400, -2900), ("Ashenvale", 2500, -600),
+        ("Azshara", 3100, -3900), ("Felwood", 5300, -1300),
+        ("Winterspring", 6200, -3700), ("Moonglade", 7800, -2200),
+        ("Darkshore", 6600, 200), ("Teldrassil", 9800, 900)],
+}
+# world-coordinate bounds per continent (generous; dots clamp inside)
+MAP_BOUNDS = {
+    0: (-14700, -4300, 700, 2600),    # Eastern Kingdoms: xmin, ymin, xmax, ymax
+    1: (-10200, -5200, 10000, 2100),  # Kalimdor
+}
+
+
+def api_map(census):
+    """The map overlay's data: every toon's LAST-KNOWN position (the probe
+    store), with its age and the reconciled truth state - so the operator
+    can see WHERE in the Barrens a toon is, not just that it is in one
+    (operator ask 2026-11-27). Positions age: a dot is the last probe
+    answer, not a live GPS."""
+    rows = census.get("rows", []) if census.get("ok") else []
+    tr = api_truth(census).get("truth", {})
+    now = time.time()
+    with POSITIONS_LOCK:
+        pos = dict(POSITIONS)
+    out = []
+    for r in rows:
+        name = r[0]
+        p = pos.get(name)
+        if not p:
+            continue
+        t = tr.get(name, {})
+        out.append({"toon": name, "x": p["x"], "y": p["y"],
+                    "map": p.get("map", 0), "zone": p.get("zone", ""),
+                    "age_s": int(now - p.get("ts", 0)),
+                    "state": t.get("state", "unknown")})
+    return {"ok": True, "queried_at": _now(), "toons": out,
+            "zones": MAP_ZONES, "bounds": MAP_BOUNDS}
+
+
 def api_truth(census):
     """Tier 0: ONE reconciled presence state per toon. Signals, weakest to
     strongest: the DB online flag (A5 hint - boot-reset, async on login),
@@ -1334,6 +1394,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
       <button id="tab-grammar">tunnel grammar</button>
       <button id="tab-audit">action log</button>
       <button id="tab-doctor">doctor</button>
+      <button id="tab-map">map</button>
     </div>
     <div class="cat-cols" id="cat-wrap">
       <div class="tools" id="tools"></div>
@@ -1342,6 +1403,16 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     <div id="grammar-wrap" style="display:none"><pre id="grammar-out">...</pre></div>
     <div id="audit-wrap" style="display:none"><pre id="audit-out">...</pre></div>
     <div id="doctor-wrap" style="display:none"><pre id="doctor-out">...</pre></div>
+    <div id="map-wrap" style="display:none">
+      <p class="note">every toon's LAST-KNOWN position from the probe store
+      (a dot is the last probe answer, not a live GPS - the title shows its
+      age). Zone names are approximate reference points.</p>
+      <select id="map-cont"><option value="0">Eastern Kingdoms</option>
+      <option value="1">Kalimdor</option></select>
+      <button id="map-refresh">refresh</button>
+      <canvas id="map-canvas" width="900" height="500"
+        style="max-width:100%;background:#101418;border:1px solid var(--line)"></canvas>
+    </div>
   </section>
 </main>
 <script>
@@ -1746,6 +1817,63 @@ $('tab-doctor').onclick=async()=>{
   $('doctor-out').textContent=(d.ok?d.text:JSON.stringify(d));
   $('doctor-out').style.whiteSpace='pre';
 };
+
+let mapData=null;
+$('tab-map').onclick=async()=>{
+  ['tab-db','tab-grammar','tab-audit','tab-doctor','tab-map'].forEach(x=>$(x).className='');
+  $('tab-map').className='sel';
+  $('cat-wrap').style.display='none';$('audit-wrap').style.display='none';
+  $('doctor-wrap').style.display='none';$('grammar-wrap').style.display='none';
+  $('map-wrap').style.display='block';
+  loadMap();
+};
+async function loadMap(){
+  let m; try{ m=await jget('/api/map') }catch(e){
+    $('map-wrap').insertAdjacentHTML('afterbegin','<p class="err">MAP UNREACHABLE: '+esc(String(e.message||e))+'</p>');
+    return;
+  }
+  mapData=m; drawMap();
+}
+$('map-refresh').onclick=loadMap;
+$('map-cont').onchange=()=>{ if(mapData) drawMap(); };
+function drawMap(){
+  if(!mapData) return;
+  const cont=parseInt($('map-cont').value,10);
+  const cv=$('map-canvas'), ctx=cv.getContext('2d');
+  const b=mapData.bounds[cont], W=cv.width, H=cv.height;
+  const sx=(x)=>(x-b[0])/(b[2]-b[0])*W, sy=(y)=>(y-b[1])/(b[3]-b[1])*H;
+  ctx.clearRect(0,0,W,H);
+  // grid every 2500 world units
+  ctx.strokeStyle='#1c232b'; ctx.fillStyle='#5a6675'; ctx.font='10px monospace';
+  for(let gx=Math.ceil(b[0]/2500)*2500; gx<=b[2]; gx+=2500){
+    ctx.beginPath(); ctx.moveTo(sx(gx),0); ctx.lineTo(sx(gx),H); ctx.stroke();
+    ctx.fillText(String(gx), sx(gx)+2, 12);
+  }
+  for(let gy=Math.ceil(b[1]/2500)*2500; gy<=b[3]; gy+=2500){
+    ctx.beginPath(); ctx.moveTo(0,sy(gy)); ctx.lineTo(W,sy(gy)); ctx.stroke();
+    ctx.fillText(String(gy), 4, sy(gy)-2);
+  }
+  // zone reference labels
+  ctx.font='11px monospace'; ctx.fillStyle='#3d5a80';
+  (mapData.zones[cont]||[]).forEach(z=>{
+    ctx.fillText(z[0], sx(z[1]), sy(z[2]));
+  });
+  // toon dots
+  (mapData.toons||[]).filter(t=>t.map===cont).forEach(t=>{
+    const px=Math.max(4,Math.min(W-4,sx(t.x))), py=Math.max(4,Math.min(H-4,sy(t.y)));
+    ctx.beginPath(); ctx.arc(px,py,5,0,7);
+    if(t.state==='live'){ ctx.fillStyle='#3fbf6f'; }
+    else if(t.state==='db_online'){ ctx.fillStyle='#e0b04a'; }
+    else { ctx.fillStyle='#5a6675'; }
+    ctx.fill();
+    ctx.fillStyle='#dfe6ee'; ctx.font='bold 11px monospace';
+    ctx.fillText(t.toon, px+8, py+4);
+    ctx.font='10px monospace'; ctx.fillStyle='#8a97a5';
+    ctx.fillText(t.zone+' '+Math.round(t.age_s/60)+'m ago', px+8, py+16);
+  });
+  cv.title=(mapData.toons||[]).filter(t=>t.map===cont)
+    .map(t=>t.toon+' @ '+t.x.toFixed(0)+','+t.y.toFixed(0)+' ('+t.zone+', '+Math.round(t.age_s/60)+'m ago, '+t.state+')').join(String.fromCharCode(10))||'no positions yet';
+}
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('tab-doctor').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none';$('doctor-wrap').style.display='none'};
 
 async function loadWarnings(){
@@ -1872,6 +2000,9 @@ class Handler(BaseHTTPRequestHandler):
                              "tunnel": TUNNEL, "db_search_sock": DB_SOCK,
                              "leo": LEO, "leo_unit": LEO_UNIT,
                              "census_prefix": CENSUS})
+        elif parsed.path == "/api/map":
+            self.reply(200, api_map(db_call(
+                "get_online_census", {"account_like": CENSUS})))
         elif parsed.path == "/api/overview":
             self.reply(200, api_overview())
         elif parsed.path == "/api/events":
