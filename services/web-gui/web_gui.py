@@ -57,6 +57,7 @@ Run: python3 web_gui.py serve
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -119,12 +120,32 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # second wall either way.
 MISSION_OPS = ("travel", "farm", "walk", "vendor", "vendor_all", "state",
                "standdown", "online", "offline", "leave", "disband",
-               "status")
+               "status", "farmzone")
 MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
 # goes through nc. The gather preset needs Herbalism/Mining; the idle
 # preset is the stand-down and releases a farm lease via validate().
+# ZONE GATHER GATES (operator 2026-11-25: "BOTH the bot and the master
+# need to be in the zone where the bot has a skill level high enough to
+# harvest mats"; over-skill is FINE (grey nodes pick all day), under-skill
+# is a hard error). MIN = skill needed for the LOWEST-tier node/mob in
+# the zone. Sources: wowpedia List-of-ore-by-zone (copper in all five
+# zones -> mining 1), classic herb tables (peacebloom/silverleaf tier-1
+# herbs in Elwynn/Westfall/Redridge/Duskwood; STV's lowest is
+# stranglekelp 85), skinning = 5 x lowest skinnable mob level.
+# Extend zone by zone - never guess a number.
+ZONE_GATHER_MIN = {
+    "Elwynn Forest": {"mining": 1, "herb": 1, "skinning": 1},
+    "Westfall": {"mining": 1, "herb": 1, "skinning": 50},
+    "Redridge Mountains": {"mining": 1, "herb": 1, "skinning": 75},
+    "Duskwood": {"mining": 1, "herb": 1, "skinning": 90},
+    "Stranglethorn Vale": {"mining": 1, "herb": 85, "skinning": 150},
+}
+GATHER_PROFS = ("mining", "herb", "skinning")
+PROF_WHO = {"mining": "mining", "herb": "herbalism", "skinning": "skinning"}
+
+
 # what 'nc ?' should mention when a preset has truly taken (the confirm
 # half of the operator's verify loop). idle's [""] = any answered readback
 # confirms (nothing-enabled is a negative state; the answer IS the proof)
@@ -200,6 +221,39 @@ def _states_save():
             json.dump(STATES, f)
     except OSError:
         pass
+
+
+def _ai_reset_watcher():
+    """Operator invariant (2026-11-25): any 'AI was reset to defaults' seen
+    in the feed must trigger a state re-assert - the reset wipes the
+    strategies we set. Watch the tunnel stream; if the resetting bot has
+    a state in the registry, re-run the state op (which does the NC ?
+    verify loop) and audit it."""
+    cur = 0
+    while True:
+        try:
+            evs = (tunnel_call("get_events_since",
+                               {"after_id": cur, "limit": 200}) or {})
+            for x in evs.get("result", {}).get("events", []):
+                cur = max(cur, int(x.get("id") or 0))
+                if x.get("direction") != "reply":
+                    continue
+                txt = x.get("command") or ""
+                if "ai was reset" not in txt.lower():
+                    continue
+                bot = str(x.get("sender") or "")
+                st = (STATES.get(bot.lower()) or {}).get("state")
+                if st and st in STATE_PRESETS:
+                    _audit("world", "%s: AI was reset - re-asserting the "
+                           "%s state (NC ? verify follows)" % (bot, st))
+                    try:
+                        api_mission(bot, "state", st)
+                    except Exception as e:
+                        _audit("world", "%s re-assert CRASHED: %s"
+                               % (bot, e))
+        except Exception:
+            pass
+        time.sleep(5)
 
 
 def _state_set(bot, state):
@@ -840,6 +894,24 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_unavailable",
                           "message": "the mission engine is not loadable: %s" % e}}
+    if op == "vendor" and not (dest or "").strip():
+        # LOCATIONLESS SELL (operator 2026-11-25 + mod-playerbots docs:
+        # 'sell [ITEM LINK]' - the bot sells to the NEAREST vendor; no
+        # town, no teleport). A picked destination keeps the old
+        # town-teleport vendor RUN; NO destination = 's vendor' right
+        # where the bot stands, with the sell evidence in the feed.
+        r = d.submit_orders([{"bot": bot, "cmd": "s vendor"}],
+                            master=LEO, trusted=_trusted_live())
+        sold = d._watch_reply(bot, 4)
+        ok = bool(r) and r[0].get("status") in ("started", "sent")
+        _audit("mission", "%s vendor-here -> %s; answered: %s"
+               % (bot, r[0].get("status") if r else "no result",
+                  (sold or "nothing")[:100]))
+        return {"ok": ok, "queried_at": _now(),
+                "result": r[0] if r else
+                {"status": "failed", "detail": "no result"},
+                "results": r,
+                "evidence": (sold or "")[:200]}
     if op in MISSION_DEST_OPS and bot != "ALL":
         # Tier 1 (strict for missions): a mission costs a lease, a
         # teleport and minutes - never spend it on a toon with neither
@@ -895,6 +967,69 @@ def api_mission(bot, op, dest):
                 "results": [{"bot": bot,
                              "status": "answered" if a else "no answer",
                              "detail": a or ""}]}
+    if op == "farmzone":
+        # the operator's farm flow (2026-11-25): read the bot's skill via
+        # 'who <prof>', check the zone's lowest-tier requirement, only
+        # then run the summon-anchored mission. UNDER-SKILL IS A HARD
+        # ERROR - never a silent zone swap (operator: "fails silently and
+        # positively just buries the errors").
+        parts = (dest or "").split("|")
+        zname = (parts[0] or "").strip()
+        prof = (parts[1] or "").strip().lower() if len(parts) > 1 else ""
+        if prof not in GATHER_PROFS:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "bad_request",
+                              "message": "farmzone needs a profession: "
+                                         "mining, herb or skinning"}}
+        zrow = None
+        for z, mins in ZONE_GATHER_MIN.items():
+            if z.lower().replace(" ", "") == zname.lower().replace(" ", ""):
+                zrow, zname = mins, z
+                break
+        if zrow is None:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "bad_request",
+                              "message": "farmzone: no gather table for %r "
+                                         "yet (zones: %s)"
+                                         % (zname, ", ".join(ZONE_GATHER_MIN))}}
+        need = zrow[prof]
+        reply = d.ask_bot(bot, "who %s" % PROF_WHO[prof], wait=4)
+        if reply is None:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "readback",
+                              "message": "Error: %s did not answer 'who "
+                                         "%s' - the skill gate cannot run; "
+                                         "no farm started"
+                                         % (bot, PROF_WHO[prof])}}
+        m = re.search(r"(\d+)", reply)
+        if m is None:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "readback",
+                              "message": "Error: %s answered 'who %s' with "
+                                         "%r - no skill number found; no "
+                                         "farm started"
+                                         % (bot, PROF_WHO[prof],
+                                            reply[:120])}}
+        skill = int(m.group(1))
+        if skill < need:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "under_skilled",
+                              "message": "Error: %s's %s is %d - %s needs "
+                                         "%d (its lowest pickable tier); "
+                                         "train up or pick another zone"
+                                         % (bot, PROF_WHO[prof], skill,
+                                            zname, need)}}
+        _audit("mission", "%s farmzone %s (%s): skill %d >= %d - go"
+               % (bot, zname, prof, skill, need))
+        r = d.submit_orders([{"bot": bot, "cmd": "farmzone %s" % zname}],
+                            master=LEO, trusted=_trusted_live())
+        return {"ok": bool(r) and r[0].get("status") in ("started", "sent"),
+                "queried_at": _now(),
+                "result": r[0] if r else
+                {"status": "failed", "detail": "no result"},
+                "results": r,
+                "gate": {"skill": skill, "min": need, "prof": prof,
+                         "zone": zname}}
     if op == "vendor_all":
         # one town, every bags-full toon: the bulk answer to a wall of
         # bag alarms (each order still walks validate(); leased/offline
@@ -1362,6 +1497,10 @@ async function openModal(name){
     +'<button id="op-leveling">leveling</button>'
     +'<button id="op-follow">follow</button>'
     +'<button id="op-idle">idle</button>'
+    +'<button id="op-farmzone">farm zone (summon)</button> '
+    +'<select id="farm-prof"><option value="mining">mining</option>'
+    +'<option value="herb">herb</option>'
+    +'<option value="skinning">skinning</option></select> '
     +'<button id="op-standdown" style="background:var(--err)">stand down</button> '
     +'<button id="op-status">what are you doing?</button></div></div>'
     +'<p class="note" id="mission-result"></p>'
@@ -1403,6 +1542,14 @@ async function openModal(name){
   };
   ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline','op-leave']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
+  $('op-farmzone').onclick=async()=>{
+    const out=$('mission-result'); out.textContent='gating...';
+    const r=await jpost('/api/mission',{bot:selToon,op:'farmzone',
+      dest:(selDest||'')+'|'+($('farm-prof').value||'mining')});
+    const det=r.ok?((r.result&&r.result.detail)||'started')
+      :((r.error&&r.error.message)||'refused');
+    out.innerHTML=r.ok?'<span class="on">'+esc(det)+'</span>':'<span class="err">'+esc(det)+'</span>';
+  };
   ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
   $('op-status').onclick=async()=>{
@@ -1869,6 +2016,7 @@ def main():
     _states_load()
     if POS_POLL > 0:
         threading.Thread(target=_position_loop, daemon=True).start()
+        threading.Thread(target=_ai_reset_watcher, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print("web-gui: http://%s:%d/ (tunnel %s, db-search %s, leo %s [%s], "
           "census prefix %r)" % (BIND, PORT, TUNNEL, DB_SOCK, LEO, LEO_UNIT,

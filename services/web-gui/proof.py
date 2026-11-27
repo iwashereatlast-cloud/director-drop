@@ -987,6 +987,56 @@ def main():
                    and "gnolls" in (names.get("Gau", {}).get("detail") or "")),
               json.dumps(rs2)[:240])
 
+        # --- 6d3. the farmzone gate + the locationless vendor -----------
+        stop3 = {"v": False}
+        th3 = threading.Thread(target=status_feeder_thread,
+            args=(base, log, {"Ayla": "skinning 100"}, stop3,
+                  "who skinning"), daemon=True)
+        th3.start()
+        st, fz1, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "farmzone",
+                           "dest": "Stranglethorn Vale|skinning"})
+        stop3["v"] = True
+        th3.join(timeout=3)
+        check("farmzone gate: under-skilled is a HARD error (no silent swap)",
+              fz1.get("ok") is False
+              and (fz1.get("error") or {}).get("code") == "under_skilled"
+              and "150" in (fz1.get("error") or {}).get("message", ""),
+              json.dumps(fz1)[:240])
+
+        stop4 = {"v": False}
+        th4 = threading.Thread(target=status_feeder_thread,
+            args=(base, log, {"Ayla": "mining 63"}, stop4,
+                  "who mining"), daemon=True)
+        th4.start()
+        st, fz2, _ = http("POST", base + "/api/mission",
+                          {"bot": "Ayla", "op": "farmzone",
+                           "dest": "Westfall|mining"})
+        stop4["v"] = True
+        th4.join(timeout=3)
+        check("farmzone gate: a qualified skill passes and the flow starts",
+              fz2.get("ok") is True and fz2.get("gate", {}).get("skill") == 63,
+              json.dumps(fz2)[:240])
+
+        # cursor: only the events AFTER the vendor-here POST count (the
+        # earlier vendor-RUN tests legitimately teleported Ayla)
+        st, evc, _ = http("GET", base + "/api/events?after_id=0&limit=1000")
+        vcur = max([int(x.get("id") or 0) for x in
+                    (evc.get("result") or {}).get("events", [])] or [0])
+        st, vh, _ = http("POST", base + "/api/mission",
+                         {"bot": "Ayla", "op": "vendor", "dest": ""})
+        check("vendor with no destination = the locationless nearest-vendor sell",
+              vh.get("ok") is True, json.dumps(vh)[:200])
+        time.sleep(1)
+        st, ev, _ = http("GET", base +
+                         "/api/events?after_id=%d&limit=500" % vcur)
+        cmds = [x.get("command") for x in
+                (ev.get("result") or {}).get("events", [])]
+        check("the locationless sell whispers 's vendor' (no .tele out)",
+              "s vendor" in cmds and not any(
+                  (c or "").startswith(".tele") for c in cmds),
+              json.dumps(cmds[-8:])[:200])
+
         # the master's whisper_inform echo must NOT become an event
         with open(log, "a") as f:
             f.write(display_line(

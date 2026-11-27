@@ -172,6 +172,7 @@ WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "quests", "share", "leave",
              "trainer", "craft",
              "c", "ll", "loot all", "ue", "de", "spells", "help",
+             "farmzone", "farm", "vendor", "s vendor", "travel", "walk",
              "revive", "flee", "runaway", "max dps", "save mana", "focus heal",
              "attackers", "target", "formation", "stance", "rti", "ready",
              "pull", "tank attack", "wait for attack time", "wipe", "rebuff",
@@ -1232,6 +1233,110 @@ def ask_all_bots(names, question, wait=8):
     return answers
 
 
+def _farmzone_mission(bot, tx, ty, tmap, name, master):
+    """The operator's gather sequence (2026-11-25), verbatim: the skill
+    gate has already passed in the web-gui. 1) LEO travels to the zone
+    first (only Leo can teleport, and summon anchors the bot AT the
+    master - the geometry of the one confirmed-good live run). 2) summon
+    the bot. 3) VERIFY the landing (position probe; never arm a gather
+    on an unverified position). 4) kick it from the group (raid XP +
+    'AI was reset to defaults' clears locked states on purpose).
+    5) the live-proven arm pair, 5s apart. 6) keeper: drift watchdog +
+    activity monitor (summon-back instead of GM tele)."""
+    try:
+        _stand_down(bot)
+        try:
+            send_order(master, "travel %s" % name)
+        except Exception as e:
+            print("director: farmzone Leo-travel failed: %s" % e)
+        time.sleep(4)
+        try:
+            send_order(bot, "summon")
+        except Exception as e:
+            say(master, "%s could not be summoned to %s (%s) - ending the "
+                        "farm." % (bot, name, e))
+            _release_lease(bot)
+            return
+        ok_at = None
+        for _ in range(3):
+            pos = _live_position(bot)
+            if pos is not None and pos[3] == tmap and \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 800.0 ** 2:
+                ok_at = pos
+                break
+            time.sleep(3)
+        if ok_at is None:
+            say(master, "%s did not arrive at %s after the summon - I am "
+                        "not arming a gather on an unverified position; "
+                        "whisper me to retry." % (bot, name))
+            _release_lease(bot)
+            return
+        try:
+            send_order(bot, "leave")
+        except Exception as e:
+            print("director: farmzone leave failed for %s: %s" % (bot, e))
+        time.sleep(3)
+        for c in ("nc +new rpg,-follow", "rpg do gather"):
+            try:
+                send_order(bot, c)
+            except Exception as e:
+                print("director: farmzone arm failed for %s: %s" % (bot, e))
+            time.sleep(5)
+        gathering = _bot_ask(bot, "rpg status", "gather")
+        say(master, "%s has been summoned to %s and %s."
+            % (bot, name,
+               "is gathering" if gathering
+               else "did not confirm gathering - run 'who' and check the "
+                    "skill table; do not trust this run"))
+        print("daemon: farmzone %s -> %s: %s (keeper every %ds)"
+              % (bot, name,
+                 "gathering" if gathering else "UNCONFIRMED", FARM_REFRESH))
+        misses = 0
+        while _lease_kind(bot) == "farm":
+            time.sleep(FARM_REFRESH)
+            pos = _live_position(bot)
+            if pos is None:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry." % (bot, name))
+                    break
+                continue
+            if pos[3] != tmap or \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 >= 800.0 ** 2:
+                say(master, "%s has drifted away from %s - summoning them "
+                            "back to me." % (bot, name))
+                try:
+                    send_order(bot, "summon")
+                except Exception:
+                    pass
+                time.sleep(4)
+            act = _bot_ask(bot, "rpg status", "gather")
+            if act is None:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry." % (bot, name))
+                    break
+                continue
+            if act is False:
+                say(master, "%s is not gathering in %s anymore - kicking "
+                            "'rpg do gather' again." % (bot, name))
+                try:
+                    send_order(bot, "rpg do gather")
+                except Exception:
+                    pass
+            try:
+                send_order(bot, "nc +new rpg,-follow")
+                misses = 0
+            except Exception:
+                misses += 1
+        _release_lease(bot)
+    except Exception as e:
+        print("director: farmzone mission crashed for %s: %s" % (bot, e))
+        _release_lease(bot)
+
+
 def _farm_mission(bot, tx, ty, tmap, name, master):
     """Gather-keeper (live 2026-11-11: 'sent golbez to stv, told her to gather,
     now shes back in EPL'): 'rpg status do gather' lasts exactly 15 minutes
@@ -1413,6 +1518,11 @@ def _start_walk(o, master):
     err = _take_lease(o["bot"], kind, name)
     if err:
         return err
+    if o.get("_farmzone"):
+        threading.Thread(target=_farmzone_mission,
+                         args=(o["bot"], tx, ty, tmap, name, master),
+                         daemon=True).start()
+        return None
     if kind == "farm":
         threading.Thread(target=_farm_mission,
                          args=(o["bot"], tx, ty, tmap, name, master),
