@@ -1417,7 +1417,7 @@ async function loadOverview(){
 let bagsData={};
 function bagsCell(name){
   const b=bagsData[name];
-  if(!b) return '<td class="off">?</td>';
+  if(!b) return '<td class="off" title="no bag data yet - the bag scan feeds this every 30s; a persistent ? means the scan is failing (see the warning line above the table)">?</td>';
   const cls=(b.free<=0)?'timeout':(b.free<=2)?'pending':'on';
   return '<td class="'+cls+'" title="capacity '+b.cap+' - used '+b.used+'">'+b.free+'/'+b.cap+'</td>';
 }
@@ -1749,7 +1749,12 @@ $('tab-doctor').onclick=async()=>{
 $('tab-db').onclick=()=>{$('tab-db').className='sel';$('tab-grammar').className='';$('tab-audit').className='';$('tab-doctor').className='';$('cat-wrap').style='grid';$('grammar-wrap').style.display='none';$('audit-wrap').style.display='none';$('doctor-wrap').style.display='none'};
 
 async function loadWarnings(){
-  let w; try{ w=await jget('/api/warnings') }catch(e){ return }
+  let w; try{ w=await jget('/api/warnings') }
+  catch(e){
+    const el=$('warnings');
+    el.innerHTML='<p class="err" style="margin:2px 0">&#9888; BAG SCAN UNREACHABLE: '+esc(String(e.message||e))+' - bags show ? until this clears. This is the error, not a mystery.</p>';
+    return;
+  }
   bagsData=w.bags||{};
   const el=$('warnings');
   if(!w.ok || !w.warnings.length){ el.innerHTML=''; return }
@@ -1772,7 +1777,7 @@ async function loadWarnings(){
 }
 async function tick(){ await loadOverview() }
 tick(); loadCatalogs(); loadWarnings();
-setInterval(tick,5000); setInterval(loadWarnings,60000);
+setInterval(tick,5000); setInterval(loadWarnings,30000);
 </script></body></html>"""
 
 
@@ -1832,6 +1837,14 @@ class Handler(BaseHTTPRequestHandler):
                 json.dumps(obj).encode())
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        # NEVER let a browser cache the dashboard: the page ships with the
+        # code, and a stale page silences every fix that lands (live
+        # 2026-11-27: the operator ran the pre-#165 page for a whole
+        # session - vendor still asked for a town, bags showed ?, and no
+        # refresh fixed it - because the browser kept serving the old
+        # HTML). The page is small; fetch it fresh every time.
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         for k, v in headers:
             self.send_header(k, v)
