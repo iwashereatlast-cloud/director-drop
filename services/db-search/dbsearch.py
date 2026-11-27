@@ -59,10 +59,10 @@ def _sqlq(s):
 SCOPE_SQL = ("SELECT COUNT(*) FROM acore_characters.characters c "
              "JOIN acore_auth.account a ON a.id = c.account "
              "LEFT JOIN acore_characters.guild_member gm ON gm.guid = c.guid "
-             "WHERE c.name = '{toon}' "
-             "AND (a.username LIKE '{prefix}%' "
+             "WHERE LOWER(c.name) = LOWER('{toon}') "
+             "AND (LOWER(a.username) LIKE LOWER('{prefix}%') "
              "OR gm.guildid = (SELECT guildid FROM acore_characters.guild "
-             "WHERE name = '{guild}'))")
+             "WHERE LOWER(name) = LOWER('{guild}')))")
 
 def assert_scope_toon(adapter, toon):
     if not SCOPE:
@@ -152,7 +152,7 @@ CATALOG = {
             "JOIN acore_characters.group_member gm2 ON gm2.guid = g.guid "
             "JOIN acore_characters.characters c ON c.guid = gm2.memberGuid "
             "WHERE gm.memberGuid = "
-            "(SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "(SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "ORDER BY gm2.subgroup, c.name"),
     "params": {"toon": "required - exact toon name, letters/digits/underscore"},
     "timeout": 10,
@@ -167,7 +167,7 @@ CATALOG = {
             "c.map, c.zone, c.money, c.totaltime, c.online "
             "FROM acore_characters.characters c "
             "JOIN acore_auth.account a ON a.id = c.account "
-            "WHERE c.name = '{toon}'"),
+            "WHERE LOWER(c.name) = LOWER('{toon}')"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
     "can": "account, level, race, class, last map/zone, money, total played time, DB online flag for one toon",
@@ -201,7 +201,7 @@ CATALOG = {
     "sql": ("SELECT cqs.quest, qt.LogTitle, cqs.status, cqs.explored "
             "FROM acore_characters.character_queststatus cqs "
             "LEFT JOIN acore_world.quest_template qt ON qt.ID = cqs.quest "
-            "WHERE cqs.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE cqs.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "ORDER BY cqs.status, cqs.quest"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -228,7 +228,7 @@ CATALOG = {
             "FROM acore_characters.character_inventory ci "
             "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
             "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
-            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "AND ci.bag = 255 AND ci.slot BETWEEN 0 AND 18 "
             "ORDER BY ci.slot"),
     "params": {"toon": "required - exact toon name"},
@@ -264,7 +264,7 @@ CATALOG = {
             "JOIN acore_characters.`groups` g ON g.guid = gm.guid "
             "WHERE gm.guid = (SELECT guid FROM acore_characters.group_member "
             "WHERE memberGuid = "
-            "(SELECT guid FROM acore_characters.characters WHERE name = '{toon}')) "
+            "(SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}'))) "
             "HAVING COUNT(*) > 0"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -286,7 +286,7 @@ CATALOG = {
             "JOIN acore_characters.characters c "
             "ON c.guid = cqs.guid "
             "LEFT JOIN acore_world.quest_template qt ON qt.ID = cqs.quest "
-            "WHERE c.name = '{toon}' "
+            "WHERE LOWER(c.name) = LOWER('{toon}') "
             "ORDER BY level_diff DESC, cqs.quest"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -319,7 +319,7 @@ CATALOG = {
             "ELSE 'skill' || cs.skill END AS name, "
             "cs.value, cs.max "
             "FROM acore_characters.character_skills cs "
-            "WHERE cs.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE cs.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "ORDER BY cs.skill"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -339,13 +339,13 @@ CATALOG = {
             "FROM acore_characters.character_inventory ci "
             "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
             "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
-            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "AND ci.bag = 255 AND ci.slot BETWEEN 19 AND 22) AS capacity, "
             "(SELECT COUNT(*) FROM acore_characters.character_inventory "
-            "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "AND ((bag = 0 AND slot BETWEEN 23 AND 38) OR bag IN "
             "(SELECT item FROM acore_characters.character_inventory "
-            "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "AND bag = 255 AND slot BETWEEN 19 AND 22))) AS used) t"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -364,7 +364,7 @@ CATALOG = {
             "FROM acore_characters.character_inventory ci "
             "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
             "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
-            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE ci.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "AND it.class = 15 AND it.subclass = 5 "
             "ORDER BY it.name"),
     "params": {"toon": "required - exact toon name"},
@@ -382,7 +382,7 @@ CATALOG = {
     # and spell names are DBC-only, so only ids + specMask can be returned.
     "sql": ("SELECT ct.spell, ct.specMask "
             "FROM acore_characters.character_talent ct "
-            "WHERE ct.guid = (SELECT guid FROM acore_characters.characters WHERE name = '{toon}') "
+            "WHERE ct.guid = (SELECT guid FROM acore_characters.characters WHERE LOWER(name) = LOWER('{toon}')) "
             "ORDER BY ct.specMask, ct.spell"),
     "params": {"toon": "required - exact toon name"},
     "timeout": 10,
@@ -408,7 +408,7 @@ CATALOG = {
 
   "get_worldserver_uptime": {
     "sql": ("SELECT realmid, starttime, uptime, maxplayers FROM "
-            "acore_characters.uptime ORDER BY starttime DESC LIMIT 1"),
+            "acore_auth.uptime ORDER BY starttime DESC LIMIT 1"),
     "params": {},
     "fill": lambda p: {},
     "timeout": 10,
