@@ -172,6 +172,7 @@ WHITELIST = ("nc", "co", "cs", "gb", "sendmail", "summon", "talents", "equip",
              "quests", "share", "leave",
              "trainer", "craft",
              "c", "ll", "loot all", "ue", "de", "spells", "help",
+             "farmzone", "farm", "vendor", "s vendor", "travel", "walk",
              "revive", "flee", "runaway", "max dps", "save mana", "focus heal",
              "attackers", "target", "formation", "stance", "rti", "ready",
              "pull", "tank attack", "wait for attack time", "wipe", "rebuff",
@@ -315,7 +316,7 @@ ORDER_RULES = """Reply with ONE JSON object as the LAST thing in your reply, ins
 {"reply": "<short human-readable answer>", "orders": [{"bot": "<bot name>", "cmd": "<command>"}]}
 Core rules:
 - Only name bots from the live roster (the system validates it against the live roster from the DB service and skips others).
-- cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-follow".
+- cmd is a whisper-bot command WITHOUT any leading slash, e.g. "nc +new rpg,+grind,-quest,-gather,-follow".
 - Allowed command prefixes: %(wl)s.
 - Mission orders (validated separately from the prefix list, always available): "travel <destination>" (the system moves the bot to a named location), "farm <destination>" (the system moves it there AND keeps it gathering - herbs/ore), "walk <destination>" (ground march).
 - RECIPES: for any TASK the master asks for (travel, farming, leveling, silent bots, groups, casting, presence, coming to you, boats), attach query {"query":"recipes","text":"<the master's words>"} FIRST - the results return the exact command structures, zone translation table and gotchas for the matched skills. Use them verbatim; do not improvise command shapes. If nothing matches, fall back to these core rules and say what you lack.
@@ -352,13 +353,13 @@ FEWSHOT = [
     {"role": "user", "content": "send golbez to stv"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is travelling to Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel Booty Bay\"}]}\n```"},
     {"role": "user", "content": "send Golbez to the Barrens to grind"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel TheCrossroads\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"Sending Golbez to the Barrens to grind.\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"travel TheCrossroads\"}, {\"bot\": \"Golbez\", \"cmd\": \"nc +new rpg,+grind,-quest,-gather,-follow\"}]}\n```"},
     {"role": "user", "content": "have golbez go to stv and gather herbs"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is off to Stranglethorn Vale to gather herbs.\", \"queries\": [{\"query\": \"skills\", \"bot\": \"Golbez\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "DB query results (read-only):\nskills: Golbez - herb 300/300, mine 0/1\nGive your final reply now, with orders if any. (Further queries this turn are ignored.)"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Golbez is farming herbs in Booty Bay (Stranglethorn Vale).\", \"orders\": [{\"bot\": \"Golbez\", \"cmd\": \"farm Booty Bay\"}]}\n```"},
     {"role": "user", "content": "have all the bots start leveling"},
-    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to their grind cycles.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+grind,-follow\"}]}\n```"},
+    {"role": "assistant", "content": "```json\n{\"reply\": \"All units to their grind cycles.\", \"orders\": [{\"bot\": \"ALL\", \"cmd\": \"nc +new rpg,+grind,-quest,-gather,-follow\"}]}\n```"},
     {"role": "user", "content": "where is Marle right now?"},
     {"role": "assistant", "content": "```json\n{\"reply\": \"Let me check.\", \"queries\": [{\"query\": \"location\", \"bot\": \"Marle\"}], \"orders\": []}\n```"},
     {"role": "user", "content": "make everyone quest in Westfall"},
@@ -968,7 +969,7 @@ def _walk_mission(bot, tx, ty, tmap, name, master, restore=None):
                 return
             hx, hy, dist = _next_hop(pos[0], pos[1], tx, ty)
             if dist <= WALK_ARRIVE:
-                for c in (restore or ("nc +new rpg,+grind,-follow",)):
+                for c in (restore or ("nc -new rpg,-grind,-quest,-gather,-follow",)):
                     try:
                         send_order(bot, c)
                     except Exception as e:
@@ -1054,8 +1055,12 @@ def _teleport_leg(bot, tx, ty, tmap, name, master, timeout=30):
 
 
 def _restore(bot, restore=None):
-    """Mission epilogue: hand the bot back to its normal engine life."""
-    for c in (restore or ("nc +new rpg,+grind,-follow",)):
+    """Mission epilogue: hand the bot back its NEUTRAL life (everything
+    off). The OLD default re-armed the wander engine + grind the moment
+    a travel ended - live 2026-11-24: a summoned bot ran off the instant
+    its teleport completed. Operators set their own state with the pills;
+    the mission leaves the bot where it was put (idle)."""
+    for c in (restore or ("nc -new rpg,-grind,-quest,-gather,-follow",)):
         try:
             send_order(bot, c)
         except Exception as e:
@@ -1228,6 +1233,110 @@ def ask_all_bots(names, question, wait=8):
     return answers
 
 
+def _farmzone_mission(bot, tx, ty, tmap, name, master):
+    """The operator's gather sequence (2026-11-25), verbatim: the skill
+    gate has already passed in the web-gui. 1) LEO travels to the zone
+    first (only Leo can teleport, and summon anchors the bot AT the
+    master - the geometry of the one confirmed-good live run). 2) summon
+    the bot. 3) VERIFY the landing (position probe; never arm a gather
+    on an unverified position). 4) kick it from the group (raid XP +
+    'AI was reset to defaults' clears locked states on purpose).
+    5) the live-proven arm pair, 5s apart. 6) keeper: drift watchdog +
+    activity monitor (summon-back instead of GM tele)."""
+    try:
+        _stand_down(bot)
+        try:
+            send_order(master, "travel %s" % name)
+        except Exception as e:
+            print("director: farmzone Leo-travel failed: %s" % e)
+        time.sleep(4)
+        try:
+            send_order(bot, "summon")
+        except Exception as e:
+            say(master, "%s could not be summoned to %s (%s) - ending the "
+                        "farm." % (bot, name, e))
+            _release_lease(bot)
+            return
+        ok_at = None
+        for _ in range(3):
+            pos = _live_position(bot)
+            if pos is not None and pos[3] == tmap and \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 < 800.0 ** 2:
+                ok_at = pos
+                break
+            time.sleep(3)
+        if ok_at is None:
+            say(master, "%s did not arrive at %s after the summon - I am "
+                        "not arming a gather on an unverified position; "
+                        "whisper me to retry." % (bot, name))
+            _release_lease(bot)
+            return
+        try:
+            send_order(bot, "leave")
+        except Exception as e:
+            print("director: farmzone leave failed for %s: %s" % (bot, e))
+        time.sleep(3)
+        for c in ("nc +new rpg,-follow", "rpg do gather"):
+            try:
+                send_order(bot, c)
+            except Exception as e:
+                print("director: farmzone arm failed for %s: %s" % (bot, e))
+            time.sleep(5)
+        gathering = _bot_ask(bot, "rpg status", "gather")
+        say(master, "%s has been summoned to %s and %s."
+            % (bot, name,
+               "is gathering" if gathering
+               else "did not confirm gathering - run 'who' and check the "
+                    "skill table; do not trust this run"))
+        print("daemon: farmzone %s -> %s: %s (keeper every %ds)"
+              % (bot, name,
+                 "gathering" if gathering else "UNCONFIRMED", FARM_REFRESH))
+        misses = 0
+        while _lease_kind(bot) == "farm":
+            time.sleep(FARM_REFRESH)
+            pos = _live_position(bot)
+            if pos is None:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry." % (bot, name))
+                    break
+                continue
+            if pos[3] != tmap or \
+                    (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 >= 800.0 ** 2:
+                say(master, "%s has drifted away from %s - summoning them "
+                            "back to me." % (bot, name))
+                try:
+                    send_order(bot, "summon")
+                except Exception:
+                    pass
+                time.sleep(4)
+            act = _bot_ask(bot, "rpg status", "gather")
+            if act is None:
+                misses += 1
+                if misses >= 3:
+                    say(master, "%s stopped answering in %s - I stopped the "
+                                "farming; whisper me to retry." % (bot, name))
+                    break
+                continue
+            if act is False:
+                say(master, "%s is not gathering in %s anymore - kicking "
+                            "'rpg do gather' again." % (bot, name))
+                try:
+                    send_order(bot, "rpg do gather")
+                except Exception:
+                    pass
+            try:
+                send_order(bot, "nc +new rpg,-follow")
+                misses = 0
+            except Exception:
+                misses += 1
+        _release_lease(bot)
+    except Exception as e:
+        print("director: farmzone mission crashed for %s: %s" % (bot, e))
+        _release_lease(bot)
+
+
 def _farm_mission(bot, tx, ty, tmap, name, master):
     """Gather-keeper (live 2026-11-11: 'sent golbez to stv, told her to gather,
     now shes back in EPL'): 'rpg status do gather' lasts exactly 15 minutes
@@ -1258,7 +1367,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
         # Caveat the operator documented: node usability is gated by the
         # bot's mining/herbalism SKILL (and a mining pick for miners), not
         # level - farm bots need the professions to actually gather.
-        for c in ("nc +new rpg,-grind,-quest,-follow,+gather",
+        for c in ("nc +new rpg,-follow",
                   "rpg do gather"):
             try:
                 send_order(bot, c)
@@ -1268,7 +1377,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
             # between them - 1s was too fast and the launcher was dropped
             # by the client before the strategy reloaded (live: gather
             # never started)
-            time.sleep(4)
+            time.sleep(5)
         gathering = _bot_ask(bot, "rpg status", "gather")
         say(master, "%s has arrived at %s and %s."
             % (bot, name,
@@ -1337,7 +1446,7 @@ def _farm_mission(bot, tx, ty, tmap, name, master):
                 except Exception:
                     pass
             try:
-                send_order(bot, "nc +new rpg,-grind,-quest,-follow,+gather")
+                send_order(bot, "nc +new rpg,-follow")
                 misses = 0
             except Exception:
                 misses += 1
@@ -1409,6 +1518,11 @@ def _start_walk(o, master):
     err = _take_lease(o["bot"], kind, name)
     if err:
         return err
+    if o.get("_farmzone"):
+        threading.Thread(target=_farmzone_mission,
+                         args=(o["bot"], tx, ty, tmap, name, master),
+                         daemon=True).start()
+        return None
     if kind == "farm":
         threading.Thread(target=_farm_mission,
                          args=(o["bot"], tx, ty, tmap, name, master),
@@ -2567,7 +2681,7 @@ def _patrol(state):
             adds.append({"bot": name, "cmd": "bot add"})
             pending.add(name)
         elif info.get("online") and name in pending:
-            arms.append({"bot": name, "cmd": "nc +new rpg,+grind,-follow"})
+            arms.append({"bot": name, "cmd": "nc +new rpg,+grind,-quest,-gather,-follow"})
             pending.discard(name)
     for o in adds:
         print("presence: patrol - %s is offline; bringing it online" % o["bot"])

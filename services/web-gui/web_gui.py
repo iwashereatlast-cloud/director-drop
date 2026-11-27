@@ -57,6 +57,7 @@ Run: python3 web_gui.py serve
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -119,21 +120,53 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 # second wall either way.
 MISSION_OPS = ("travel", "farm", "walk", "vendor", "vendor_all", "state",
                "standdown", "online", "offline", "leave", "disband",
-               "status")
+               "status", "farmzone")
 MISSION_DEST_OPS = ("travel", "farm", "walk", "vendor")
 # The bot states - nc-only, per the owner doctrine of 2026-11-12 (director
 # commit 8f3cd7c): 'rpg status' is READ-ONLY on this build; every command
 # goes through nc. The gather preset needs Herbalism/Mining; the idle
 # preset is the stand-down and releases a farm lease via validate().
+# ZONE GATHER GATES (operator 2026-11-25: "BOTH the bot and the master
+# need to be in the zone where the bot has a skill level high enough to
+# harvest mats"; over-skill is FINE (grey nodes pick all day), under-skill
+# is a hard error). MIN = skill needed for the LOWEST-tier node/mob in
+# the zone. Sources: wowpedia List-of-ore-by-zone (copper in all five
+# zones -> mining 1), classic herb tables (peacebloom/silverleaf tier-1
+# herbs in Elwynn/Westfall/Redridge/Duskwood; STV's lowest is
+# stranglekelp 85), skinning = 5 x lowest skinnable mob level.
+# Extend zone by zone - never guess a number.
+ZONE_GATHER_MIN = {
+    "Elwynn Forest": {"mining": 1, "herb": 1, "skinning": 1},
+    "Westfall": {"mining": 1, "herb": 1, "skinning": 50},
+    "Redridge Mountains": {"mining": 1, "herb": 1, "skinning": 75},
+    "Duskwood": {"mining": 1, "herb": 1, "skinning": 90},
+    "Stranglethorn Vale": {"mining": 1, "herb": 85, "skinning": 150},
+}
+GATHER_PROFS = ("mining", "herb", "skinning")
+PROF_WHO = {"mining": "mining", "herb": "herbalism", "skinning": "skinning"}
+
+
+# what 'nc ?' should mention when a preset has truly taken (the confirm
+# half of the operator's verify loop). idle's [""] = any answered readback
+# confirms (nothing-enabled is a negative state; the answer IS the proof)
+PRESET_MARKERS = {
+    "grind": ["grind"],
+    "quest": ["quest"],
+    "gather": ["gather"],
+    "leveling": ["quest", "grind"],
+    "follow": ["follow"],
+    "idle": [""],
+}
+
+
 STATE_PRESETS = {
     "grind": ("nc +new rpg,+grind,-quest,-gather,-follow",),
     "quest": ("nc +new rpg,+quest,-grind,-gather,-follow",),
-    # operator steps 2026-11-23 (the wiki workflow): the engine stays ON
-    # and the ACTION LAUNCHER is sent - strategies alone idle the bot
-    # (live: the whole fleet stood still); 'rpg do gather' is what starts
-    # gathering, and 'rpg status' is the readback
-    "gather": ("nc +new rpg,-grind,-quest,-follow,+gather",
-               "rpg do gather"),
+    # operator PROVEN sequence (live 2026-11-24, executed by hand from
+    # Golbez in Westfall: 'nc +new rpg,-follow' then 'rpg do gather' =
+    # she gathered the zone on her mount): engine ON, follow off, then
+    # the ACTION LAUNCHER; no strategy toggles needed
+    "gather": ("nc +new rpg,-follow", "rpg do gather"),
     # operator 2026-11-24: leveling is quest+grind ONLY - gather is not
     # part of it (it filled the fleet's bags with mats and split focus)
     "leveling": ("nc +new rpg,+quest,+grind,-follow",),
@@ -188,6 +221,39 @@ def _states_save():
             json.dump(STATES, f)
     except OSError:
         pass
+
+
+def _ai_reset_watcher():
+    """Operator invariant (2026-11-25): any 'AI was reset to defaults' seen
+    in the feed must trigger a state re-assert - the reset wipes the
+    strategies we set. Watch the tunnel stream; if the resetting bot has
+    a state in the registry, re-run the state op (which does the NC ?
+    verify loop) and audit it."""
+    cur = 0
+    while True:
+        try:
+            evs = (tunnel_call("get_events_since",
+                               {"after_id": cur, "limit": 200}) or {})
+            for x in evs.get("result", {}).get("events", []):
+                cur = max(cur, int(x.get("id") or 0))
+                if x.get("direction") != "reply":
+                    continue
+                txt = x.get("command") or ""
+                if "ai was reset" not in txt.lower():
+                    continue
+                bot = str(x.get("sender") or "")
+                st = (STATES.get(bot.lower()) or {}).get("state")
+                if st and st in STATE_PRESETS:
+                    _audit("world", "%s: AI was reset - re-asserting the "
+                           "%s state (NC ? verify follows)" % (bot, st))
+                    try:
+                        api_mission(bot, "state", st)
+                    except Exception as e:
+                        _audit("world", "%s re-assert CRASHED: %s"
+                               % (bot, e))
+        except Exception:
+            pass
+        time.sleep(5)
 
 
 def _state_set(bot, state):
@@ -415,6 +481,38 @@ def api_positions():
                 "positions": {k: dict(v) for k, v in POSITIONS.items()}}
 
 
+WORLD_SEEN = {"starttime": None}
+
+
+def api_world_uptime():
+    """The worldserver liveness signal (operator ask: 'does the web-gui
+    have any way to tell if ac-worldserver is down or up'): the server
+    rewrites its uptime heartbeat row every ~10-15 minutes; the verdict
+    is the age of that last write. A NEW starttime = the server
+    RESTARTED (detected across polls; audited once)."""
+    r = db_call("get_worldserver_uptime", {})
+    if not r.get("ok") or not r.get("rows"):
+        return {"ok": False, "state": "unknown",
+                "reason": "uptime unavailable: %s"
+                          % ((r.get("error") or {}).get("message")
+                             or "no rows")}
+    try:
+        st, up = int(r["rows"][0][1]), int(r["rows"][0][2])
+        maxp = int(r["rows"][0][3])
+    except (ValueError, IndexError):
+        return {"ok": False, "state": "unknown",
+                "reason": "bad heartbeat row"}
+    age = time.time() - (st + up)
+    out = {"ok": True, "state": "up" if age <= 900 else "silent",
+           "age_s": int(age), "starttime": st, "uptime_s": up,
+           "maxplayers": maxp}
+    if WORLD_SEEN["starttime"] is not None and st != WORLD_SEEN["starttime"]:
+        out["restarted"] = True
+        _audit("world", "the worldserver RESTARTED (new starttime %d)" % st)
+    WORLD_SEEN["starttime"] = st
+    return out
+
+
 def api_overview():
     out = {"ok": True, "interface": INTERFACE, "queried_at": _now(),
            "census_prefix": CENSUS, "leo": LEO, "leo_unit": LEO_UNIT,
@@ -433,6 +531,7 @@ def api_overview():
                              {"account_like": CENSUS})}
     tr = api_truth(out["census"])
     out["truth"] = tr["truth"]
+    out["world"] = api_world_uptime()
     horizon = max(120.0, 2 * max(30.0, POS_POLL))
     freshest = max((v.get("ts", 0) for v in POSITIONS.values()), default=0)
     with POSITIONS_LOCK:
@@ -751,6 +850,14 @@ def api_doctor():
             raise RuntimeError(json.dumps(r)[:160])
         return "healthy"
 
+    def _world():
+        r = api_world_uptime()
+        if not r.get("ok") or r.get("state") != "up":
+            raise RuntimeError(json.dumps(r)[:160])
+        return "up %dm, heartbeat fresh" % (r.get("uptime_s", 0) // 60)
+
+    probe("worldserver heartbeat", _world)
+
     probe("chat-tunnel", _tunnel)
 
     def _engine():
@@ -787,6 +894,24 @@ def api_mission(bot, op, dest):
         return {"ok": False, "queried_at": _now(),
                 "error": {"code": "director_unavailable",
                           "message": "the mission engine is not loadable: %s" % e}}
+    if op == "vendor" and not (dest or "").strip():
+        # LOCATIONLESS SELL (operator 2026-11-25 + mod-playerbots docs:
+        # 'sell [ITEM LINK]' - the bot sells to the NEAREST vendor; no
+        # town, no teleport). A picked destination keeps the old
+        # town-teleport vendor RUN; NO destination = 's vendor' right
+        # where the bot stands, with the sell evidence in the feed.
+        r = d.submit_orders([{"bot": bot, "cmd": "s vendor"}],
+                            master=LEO, trusted=_trusted_live())
+        sold = d._watch_reply(bot, 4)
+        ok = bool(r) and r[0].get("status") in ("started", "sent")
+        _audit("mission", "%s vendor-here -> %s; answered: %s"
+               % (bot, r[0].get("status") if r else "no result",
+                  (sold or "nothing")[:100]))
+        return {"ok": ok, "queried_at": _now(),
+                "result": r[0] if r else
+                {"status": "failed", "detail": "no result"},
+                "results": r,
+                "evidence": (sold or "")[:200]}
     if op in MISSION_DEST_OPS and bot != "ALL":
         # Tier 1 (strict for missions): a mission costs a lease, a
         # teleport and minutes - never spend it on a toon with neither
@@ -842,6 +967,69 @@ def api_mission(bot, op, dest):
                 "results": [{"bot": bot,
                              "status": "answered" if a else "no answer",
                              "detail": a or ""}]}
+    if op == "farmzone":
+        # the operator's farm flow (2026-11-25): read the bot's skill via
+        # 'who <prof>', check the zone's lowest-tier requirement, only
+        # then run the summon-anchored mission. UNDER-SKILL IS A HARD
+        # ERROR - never a silent zone swap (operator: "fails silently and
+        # positively just buries the errors").
+        parts = (dest or "").split("|")
+        zname = (parts[0] or "").strip()
+        prof = (parts[1] or "").strip().lower() if len(parts) > 1 else ""
+        if prof not in GATHER_PROFS:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "bad_request",
+                              "message": "farmzone needs a profession: "
+                                         "mining, herb or skinning"}}
+        zrow = None
+        for z, mins in ZONE_GATHER_MIN.items():
+            if z.lower().replace(" ", "") == zname.lower().replace(" ", ""):
+                zrow, zname = mins, z
+                break
+        if zrow is None:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "bad_request",
+                              "message": "farmzone: no gather table for %r "
+                                         "yet (zones: %s)"
+                                         % (zname, ", ".join(ZONE_GATHER_MIN))}}
+        need = zrow[prof]
+        reply = d.ask_bot(bot, "who %s" % PROF_WHO[prof], wait=4)
+        if reply is None:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "readback",
+                              "message": "Error: %s did not answer 'who "
+                                         "%s' - the skill gate cannot run; "
+                                         "no farm started"
+                                         % (bot, PROF_WHO[prof])}}
+        m = re.search(r"(\d+)", reply)
+        if m is None:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "readback",
+                              "message": "Error: %s answered 'who %s' with "
+                                         "%r - no skill number found; no "
+                                         "farm started"
+                                         % (bot, PROF_WHO[prof],
+                                            reply[:120])}}
+        skill = int(m.group(1))
+        if skill < need:
+            return {"ok": False, "queried_at": _now(),
+                    "error": {"code": "under_skilled",
+                              "message": "Error: %s's %s is %d - %s needs "
+                                         "%d (its lowest pickable tier); "
+                                         "train up or pick another zone"
+                                         % (bot, PROF_WHO[prof], skill,
+                                            zname, need)}}
+        _audit("mission", "%s farmzone %s (%s): skill %d >= %d - go"
+               % (bot, zname, prof, skill, need))
+        r = d.submit_orders([{"bot": bot, "cmd": "farmzone %s" % zname}],
+                            master=LEO, trusted=_trusted_live())
+        return {"ok": bool(r) and r[0].get("status") in ("started", "sent"),
+                "queried_at": _now(),
+                "result": r[0] if r else
+                {"status": "failed", "detail": "no result"},
+                "results": r,
+                "gate": {"skill": skill, "min": need, "prof": prof,
+                         "zone": zname}}
     if op == "vendor_all":
         # one town, every bags-full toon: the bulk answer to a wall of
         # bag alarms (each order still walks validate(); leased/offline
@@ -883,11 +1071,15 @@ def api_mission(bot, op, dest):
                 "error": {"code": "bad_request",
                           "message": "state preset must be one of %s"
                                      % ", ".join(STATE_PRESETS)}}
-        # operator 2026-11-24: multi-whisper presets must be paced - the
-        # client drops commands sent back-to-back to the same bot. Submit
-        # them one by one (in-branch) and fall through the shared result
-        # path by marking `orders` empty (the shared submit is skipped;
-        # audits, receipts and the state registry still apply).
+        # THE OPERATOR'S VERIFY LOOP (2026-11-24, verbatim): 'I send NC
+        # ?, read what it sends back, decide if its missing something, if
+        # it is I send the command THEN I DO A NC ? AGAIN TO CONFIRM.'
+        # Readback -> apply -> readback; both readbacks are shown in the
+        # response. A preset whose after-readback does not confirm is
+        # UNCONFIRMED, never sent-and-working.
+        before = d.ask_bot(bot, "nc ?", wait=3)
+        # multi-whisper presets are paced (back-to-back commands to the
+        # same bot get dropped by the client)
         paced = []
         for c in STATE_PRESETS[preset]:
             try:
@@ -898,23 +1090,35 @@ def api_mission(bot, op, dest):
                 paced.append({"bot": bot, "cmd": c, "status": "failed",
                               "detail": str(e)})
             if len(STATE_PRESETS[preset]) > 1:
-                time.sleep(4)
-        ok = bool(paced) and all(r.get("status") in ("started", "sent")
-                                 for r in paced)
+                time.sleep(5)
+        time.sleep(2)
+        after = d.ask_bot(bot, "nc ?", wait=5)
+        sent = bool(paced) and all(r.get("status") in ("started", "sent")
+                                   for r in paced)
+        confirmed = after and any(w.lower() in after.lower()
+                                  for w in PRESET_MARKERS.get(preset, []))
+        ok = sent and bool(confirmed)
         for r in paced:
             _receipt_note(r.get("bot", bot), r.get("detail", ""),
                           r.get("status", "unknown"))
-        if ok:
+        if sent:
             _state_set(bot, preset)
-        _audit("mission", "%s state %s -> %s"
-               % (bot, preset,
-                  "; ".join("%s:%s" % (r.get("status"),
-                                       (r.get("detail") or "")[:80])
-                            for r in paced)))
+        _audit("mission", "%s state %s -> sent=%s confirmed=%s (before: %s; "
+               "after: %s)"
+               % (bot, preset, sent, bool(confirmed), (before or "?")[:80],
+                  (after or "?")[:80]))
+        detail = ("sent and nc ? CONFIRMS the strategy" if confirmed else
+                  ("sent but nc ? did not confirm (after: %s)"
+                   % ((after or "no answer")[:120]) if sent else
+                   "not sent - see the per-order results"))
         return {"ok": ok, "queried_at": _now(),
-                "result": paced[0] if paced else
-                {"status": "failed", "detail": "no result"},
-                "results": paced}
+                "result": {"bot": bot, "status":
+                           "confirmed" if ok else "unconfirmed",
+                           "detail": detail},
+                "results": paced,
+                "verify": {"before": before or "no answer",
+                           "after": after or "no answer",
+                           "confirmed": bool(confirmed)}}
     elif op == "disband":
         # Leo's whole group, via the proven rails: a 'group remove' order
         # per current member (validate() rewrites bots to the plain
@@ -1090,6 +1294,7 @@ letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
     <span class="chip" id="chip-db">db-search ?</span>
     <span class="chip" id="chip-leo">Leo session ?</span>
     <span class="chip" id="chip-gold">gold ?</span>
+    <span class="chip" id="chip-world">world ?</span>
     <span class="chip" id="chip-refresh">updated ?</span>
     <button id="fleet-online" class="warn">all online</button>
     <button id="fleet-offline" class="warn">all offline</button>
@@ -1156,6 +1361,22 @@ async function loadOverview(){
        o.leo_active?'stop':'start');
   chip('refresh', true, 'updated '+o.queried_at);
   const tot=((o.wallets||{}).rows||[]).reduce((a,r)=>a+(parseInt(r[3])||0),0);
+  const w=o.world||{};
+  const wch=$('chip-world');
+  if(w.state==='up'){
+    wch.className='chip up';
+    const upm=Math.floor((w.uptime_s||0)/60);
+    wch.textContent='world up '+(upm>=60?Math.floor(upm/60)+'h'+(upm%60)+'m':upm+'m');
+  }else if(w.state==='silent'){
+    wch.className='chip down';
+    const agm=Math.floor((w.age_s||0)/60);
+    wch.textContent='world SILENT '+agm+'m';
+    wch.title='the worldserver last wrote its heartbeat '+agm+' minutes ago - it is down or frozen';
+  }else{
+    wch.className='chip down';
+    wch.textContent='world ?';
+    wch.title=(w.reason||'uptime unavailable');
+  }
   $('chip-gold').className='chip up';
   $('chip-gold').textContent='gold '+(tot/10000).toFixed(1)+'g';
   const bl=$('btn-leo'); if(bl) bl.onclick=async()=>{
@@ -1221,7 +1442,10 @@ const row=(r)=>'<tr><td><a href="#" class="toonlink" data-name="'+esc(r[0])+'">'
     for(const r of (d.rows||[])) tb.innerHTML+=row(r);
     $('bots-note').textContent=(d.row_count||0)+' bot rows - '+d.caveat;
   if(o.live_silent){
-    $('warnings').innerHTML='<p class="err" style="margin:2px 0">&#9888; LIVE PROBES ARE SILENT - the Leo session or the whole fleet is not answering. Nothing is verified right now.</p>'+$('warnings').innerHTML;
+    const ws=(o.world||{}).state==='silent'
+      ? ' THE WORLDSERVER ITSELF has stopped writing its heartbeat (last '+Math.floor((o.world.age_s||0)/60)+'m ago) - the server is down or frozen, not just the fleet.'
+      : ' The Leo session or the fleet is not answering; the worldserver heartbeat is fresh.';
+    $('warnings').innerHTML='<p class="err" style="margin:2px 0">&#9888; LIVE PROBES ARE SILENT.'+ws+' Nothing is verified right now.</p>'+$('warnings').innerHTML;
   }
   const pnote=[];
   if(!((o.progress||{}).ok)) pnote.push('leveling progress unavailable: '+esc(((o.progress||{}).error||{}).message||'db-search'));
@@ -1273,6 +1497,10 @@ async function openModal(name){
     +'<button id="op-leveling">leveling</button>'
     +'<button id="op-follow">follow</button>'
     +'<button id="op-idle">idle</button>'
+    +'<button id="op-farmzone">farm zone (summon)</button> '
+    +'<select id="farm-prof"><option value="mining">mining</option>'
+    +'<option value="herb">herb</option>'
+    +'<option value="skinning">skinning</option></select> '
     +'<button id="op-standdown" style="background:var(--err)">stand down</button> '
     +'<button id="op-status">what are you doing?</button></div></div>'
     +'<p class="note" id="mission-result"></p>'
@@ -1314,8 +1542,22 @@ async function openModal(name){
   };
   ['op-travel','op-farm','op-vendor','op-standdown','op-online','op-offline','op-leave']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,id.slice(3));});
-  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle','op-status']
+  $('op-farmzone').onclick=async()=>{
+    const out=$('mission-result'); out.textContent='gating...';
+    const r=await jpost('/api/mission',{bot:selToon,op:'farmzone',
+      dest:(selDest||'')+'|'+($('farm-prof').value||'mining')});
+    const det=r.ok?((r.result&&r.result.detail)||'started')
+      :((r.error&&r.error.message)||'refused');
+    out.innerHTML=r.ok?'<span class="on">'+esc(det)+'</span>':'<span class="err">'+esc(det)+'</span>';
+  };
+  ['op-grind','op-quest','op-gather','op-leveling','op-follow','op-idle']
     .forEach(id=>{const b=$(id);b.dataset.label=b.textContent;confirmable(b,'state',id.slice(3));});
+  $('op-status').onclick=async()=>{
+    const out=$('mission-result'); out.textContent='asking...';
+    const r=await jpost('/api/mission',{bot:selToon,op:'status'});
+    const det=r.ok?((r.result&&r.result.detail)||''):(r.error&&r.error.message)||'no answer';
+    out.innerHTML=r.ok?'<span class="on">'+esc(det)+'</span>':'<span class="err">'+esc(det)+'</span>';
+  };
   async function runMission(op,preset){
     const out=$('mission-result'); out.textContent='submitting...';
     const r=await jpost('/api/mission',{bot:selToon,op:op,dest:preset||((op==='standdown'||op==='online'||op==='offline'||op==='leave'||op==='status')?undefined:selDest)});
@@ -1774,6 +2016,7 @@ def main():
     _states_load()
     if POS_POLL > 0:
         threading.Thread(target=_position_loop, daemon=True).start()
+        threading.Thread(target=_ai_reset_watcher, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print("web-gui: http://%s:%d/ (tunnel %s, db-search %s, leo %s [%s], "
           "census prefix %r)" % (BIND, PORT, TUNNEL, DB_SOCK, LEO, LEO_UNIT,
