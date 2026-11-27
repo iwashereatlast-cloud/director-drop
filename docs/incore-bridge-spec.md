@@ -26,6 +26,26 @@ The module does NOT replace the whisper pipeline. It adds a second, typed,
 evidence-returning path for the functions the engine gates off — with the
 gates deliberate rather than accidental.
 
+**Post-LLM-retirement re-scope (2026-11-25, amendment):** the LLM-era
+action walls above are no longer on fire — the LLM thread is retired
+(2026-11-15, owner decision; the web-gui is the operator's wheel) and the
+action verbs are convenience, not the missing brain. What IS on fire is
+the whisper lane's READ traffic, all of it polling-shaped and all of it
+existing only because the DB `online` flag is boot-reset (A5):
+
+- the web-gui position poller (per-bot inspect position, every cycle);
+- the fleet status sweep (per-bot `rpg status`);
+- the per-toon bag scans (bag fill / vendor triggers);
+- the Tier 0 presence probes (proof-of-life because the flag lies).
+
+Phase 1's headliner verb is therefore `roster_state` (below): ONE call
+returning the whole roster's live state, retiring the poller fleet.
+
+**Known stale-docs row (flagged, NOT fixed in this pass):** `outline.md`
+and `leo/README.md` still describe the LLM as the brain, and
+`director.py` still carries the Ollama path — known-stale; correcting
+them is deliberately out of scope here.
+
 **Declined alternative (recorded so it is not re-litigated):**
 `mod-llm-playerbots` (bigr00 fork) — a fork loses upstream currency, has 0
 stars, and does not fix the engine gates above. OWN module dir, NOT a fork.
@@ -79,6 +99,7 @@ Both repos were reviewed as prior art on 2026-11-12 — see §8.
 | `catalog` | 1 | list verbs + their gates | pure | the catalog |
 | `ping` | 1 | liveness + world-thread round-trip latency | pure | latency_ms |
 | `bot_state` | 1 | one online bot: position, zone, strategies, rpg status | pure | the state snapshot |
+| `roster_state` | 1 | the WHOLE roster in one call: per bot — online truth, zone, position, strategies, bag fill, level (the phase-1 headliner: retires the web-gui's poller fleet — see the table under §3) | pure, roster-gated | the per-roster snapshot + `queried_at` |
 | `taxi_graph` | 1 | reachable flight nodes for a bot (the `taxi ?` the engine silently swallows, A35) | pure | node list with costs |
 | `trainer_catalog` | 1 | spells a trainer class can teach THIS bot, with prices | pure | spell list + affordability |
 | `travel_precheck` | 1 | would a teleport/flight to X be legal now (distance, map, faction gate A34)? | pure | verdict + reason |
@@ -97,8 +118,19 @@ Each phase ships ONLY after the previous phase's live proof is pasted into
 the thread and the A-rows are filled. Same protocol as the services
 (`services-roadmap.md` order & gates).
 
-- **Phase 1 — read-only.** `catalog`, `ping`, `bot_state`, `taxi_graph`,
-  `trainer_catalog`, `travel_precheck`. Proof: harness with a fixture world
+- **Phase 1 — read-only, re-scoped (2026-11-25).** `catalog`, `ping`,
+  `roster_state` (the headliner), `bot_state`, `taxi_graph`,
+  `trainer_catalog`, `travel_precheck`. The action walls are post-retirement
+  convenience; the whisper lane's live traffic is READS — the pollers below
+  exist only because the DB online flag boot-resets (A5). `roster_state`
+  retires them:
+
+  | web-gui poller today | retired by |
+  |---|---|
+  | the position poller (per-bot `inspect position` every cycle) | one `roster_state` call |
+  | the fleet status sweep (per-bot `rpg status` whispers) | the strategies field, per bot |
+  | the per-toon bag scan traffic | the bag-fill field, per bot |
+  | the Tier 0 presence probing loop | the online-truth field, per bot | Proof: harness with a fixture world
   (or a live worldserver with a throwaway bot) answering all six without a
   worldserver crash/tick stall over a 100-request battery; the roster gate
   refuses a stranger and an RNDBOT; a `\n`/pipe/garbage corpus never crashes
@@ -216,3 +248,17 @@ worldserver process (provider on an in-process worker thread). Our design
 keeps the model OUT of the process — director.py owns Ollama, the module is
 a thin verb endpoint — so a model/provider hang can never touch the world
 tick, and the module stays buildable without any HTTP client code.
+
+### mod-multibot-bridge (Wishmaster117) — capability-negotiation precedent, wrong transport
+
+Reviewed (2026-11-25). An addon-side bridge that shuttles bot control
+through in-game addon messages — the transport is the exact inverse of
+our seam: it terminates INSIDE a game client's addon space, with no
+external surface a headless service could call. Declined as a shape for
+us. Adopted as precedent for two things its protocol gets right and our
+§7 questions should absorb: explicit capability NEGOTIATION at handshake
+(client and server agree on the verb set and versions before any verb
+fires), and server-side REVALIDATION of every client-supplied gate
+assertion (the server never trusts the client's "this should work" claim
+— it re-checks the engine gates itself before acting). Both fold into
+the phase-1 `catalog` verb's design and the §6 risk rows.
