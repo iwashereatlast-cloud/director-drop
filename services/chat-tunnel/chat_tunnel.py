@@ -192,10 +192,26 @@ def send_command(bot, cmd):
         STATS["sends_refused"] += 1
         return False, ("bot %r is not in the allowlist (guild/bot-account "
                        "roster) - refusing" % bot)
-    # ONE-IN-FLIGHT-PER-BOT: hold the bot's send lock for the whole
-    # check -> write -> record span, so a same-bot send can never slip
-    # between the slot check and the record. Different bots stay fully
-    # parallel (only the paced FIFO write is shared).
+    line = order_line(bot, cmd)
+    # ONE-IN-FLIGHT-PER-BOT applies to WHISPERS (the #160 steal class
+    # was whisper-bind stealing). GM/master-shaped lines ('.tele ...',
+    # '.playerbots ...') are NOT whispers: they carry no bot-reply
+    # binding (inspects bind [System] replies separately), and a
+    # mission's own GM legs (stand-down whisper -> .tele -> inspect)
+    # must never queue behind the whisper's TTM window (live wiring
+    # evidence: the .tele behind an unanswered nc timed out 25s).
+    gm_shape = line.startswith(".")
+    if gm_shape:
+        ok, err = _fifo_write_paced(line)
+        if not ok:
+            return False, err
+        cid = _record_sent(bot, line, cmd)
+        return True, {"correlation_id": cid, "line": line,
+                      "bot": bot, "cmd": cmd}
+    # hold the bot's send lock for the whole check -> write -> record
+    # span, so a same-bot send can never slip between the slot check
+    # and the record. Different bots stay fully parallel (only the
+    # paced FIFO write is shared).
     with _bot_send_lock(bot):
         t0 = now()
         while True:
@@ -210,7 +226,6 @@ def send_command(bot, cmd):
                                "silently dropping" % (bot, waited))
             STATS["queue_waits"] += 1
             time.sleep(0.2)
-        line = order_line(bot, cmd)
         ok, err = _fifo_write_paced(line)
         if not ok:
             return False, err
